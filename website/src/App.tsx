@@ -122,7 +122,6 @@ import BuiltinAppRoute from './apps/BuiltinAppRoute'
 import { getBuiltinIcon } from './apps/builtinIcons'
 import { getTopBarWidgets } from './apps/topBarWidgets'
 import { getCapsuleSegments } from './apps/capsuleSegments'
-import { useRequestFeature } from './shell/topbar/requestFeature'
 import { IS_MAC } from './hooks/useKeyboardShortcuts'
 import { useNavShortcutHint } from './hooks/useNavShortcutHint'
 import { useShellKeyboard } from './shell/shortcuts/shellKeyboard'
@@ -130,7 +129,6 @@ import { MobileNavRailContext, MobileRosterBarContext, type MobileNavRailOptions
 import ShortcutsModal from './components/ShortcutsModal'
 import QuickSearchSurface from './components/QuickSearchSurface'
 import ReportProblemModal from './components/ReportProblemModal'
-import FeedbackPill from './components/FeedbackPill'
 import { Glass } from './components/Glass'
 import KiroAccountModal from './components/KiroAccountModal'
 import WindowsTitlebarMenu from './components/WindowsTitlebarMenu'
@@ -152,7 +150,7 @@ import { NAV_ITEMS } from './shell/nav/navItems'
 import { useNavTip } from './shell/nav/navTip'
 import { isChatRoute, useRouteActiveModel } from './shell/nav/routeActive'
 import { useDeveloperMode } from './shell/nav/developerMode'
-import { RailHeaderGlyph, RailBrandToggle, RailCommunityLinks } from './shell/nav/railChrome'
+import { RailHeaderGlyph, RailBrandToggle } from './shell/nav/railChrome'
 import { AdaptiveMobileRail } from './shell/nav/adaptiveMobileRail'
 import { appPathname } from './lib/basePath'
 import { guideTarget } from './uiLocations/targetRegistry'
@@ -1445,8 +1443,6 @@ export default function App() {
   // (not in the rail) so the modal is not unmounted when the rail collapses.
   const [reportProblemOpen, setReportProblemOpen] = useState(false)
 
-  const requestFeature = useRequestFeature(colorTheme)
-
   const toggleNav = () => {
     if (isMobile) { if (mobileNavPhaseRef.current === 'open') closeMobileNavDrawer(); else openMobileNav() }
     else {
@@ -2341,18 +2337,6 @@ export default function App() {
               <UpdatePill />
             </Suspense>
           )}
-          {/* Feedback — "Request a Feature" plus, on a prerelease build, a
-              channel chip that opens the same Report a Problem flow. Its own
-              bordered pill (28px tall, 12px radius), separated from the readout
-              capsule (item 2.3). */}
-          {!isMobile && (
-            <span className="tb-drop-feedback flex items-center">
-              <FeedbackPill
-                onRequestFeature={requestFeature}
-                onReportProblem={() => setReportProblemOpen(true)}
-              />
-            </span>
-          )}
           {/* Notifications bell — borderless icon button, rightmost control.
               (The activity-panel open toggle now lives in the session header,
               beside the pop-out control — see ChatPage — so opening the panel
@@ -2753,7 +2737,6 @@ export default function App() {
                 onClick={closeMobileNav}
                 badge={updateAvailable ? <span title={i18nT('app.update_available')} role="status" aria-label={i18nT('app.update_available_2')} className={effectiveCollapsed ? 'absolute top-1 right-1 w-2 h-2 bg-accent rounded-full z-10' : 'absolute top-1/2 -translate-y-1/2 right-2 w-2 h-2 bg-accent rounded-full z-10'} /> : undefined}
               />
-              <RailCommunityLinks effectiveCollapsed={effectiveCollapsed} setReportProblemOpen={setReportProblemOpen} />
             </div>
           )
         })()}

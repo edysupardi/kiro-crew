@@ -518,39 +518,16 @@ describe('App routing', () => {
     // (/apps/library).
     expect(screen.getByText('Discover')).toBeInTheDocument()
     expect(screen.getByText('Library')).toBeInTheDocument()
-    // The bottom-pinned community row: the GitHub mark fronts a "Star us" link
-    // plus a "Report issue" BUTTON (it opens the diagnostics flow rather than
-    // navigating to the issue list), and the icon-only Discord link. The
-    // kiro.dev link was removed.
-    expect(screen.getByText('Star us')).toBeInTheDocument()
-    expect(screen.getByText('Report issue')).toBeInTheDocument()
-    expect(screen.getByLabelText('Star Kiro Crew on GitHub')).toBeInTheDocument()
+    // The community row was removed from the nav rail.
+    expect(screen.queryByText('Star us')).not.toBeInTheDocument()
+    expect(screen.queryByText('Report issue')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Star Kiro Crew on GitHub')).not.toBeInTheDocument()
     expect(
-      screen.getByLabelText(
+      screen.queryByLabelText(
         'Report a problem — collects logs and crash reports, secrets removed',
       ),
-    ).toBeInTheDocument()
-    // The old bare link to the issue list is gone — reporting now goes through
-    // the collector so triage gets logs instead of an empty issue form.
-    expect(screen.queryByLabelText('Report an issue on GitHub')).not.toBeInTheDocument()
-    expect(screen.getByLabelText('Kiro Discord community')).toBeInTheDocument()
-    expect(screen.queryByLabelText('Kiro website (kiro.dev)')).not.toBeInTheDocument()
-  })
-
-  it('rail "Report issue" opens the diagnostics Report a Problem modal', async () => {
-    // The rail entry used to be an <a> to /issues, which lost exactly what
-    // triage needs. It must now mount the same shared modal as
-    // Settings › About › Support.
-    renderWithProviders(<App />, { route: '/chat' })
-    const trigger = screen.getByLabelText(
-      'Report a problem — collects logs and crash reports, secrets removed',
-    )
-    expect(trigger.tagName).toBe('BUTTON')
-    expect(trigger).not.toHaveAttribute('href')
-
-    fireEvent.click(trigger)
-    expect(await screen.findByText('What happened?')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /create report/i })).toBeInTheDocument()
+    ).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Kiro Discord community')).not.toBeInTheDocument()
   })
 
   it('renders the registry-derived Artifacts nav item, without a Knowledge rail item', () => {
@@ -1437,74 +1414,6 @@ describe('App routing', () => {
     expect(within(nav).getByRole('button', { name: 'Collapse sidebar' })).toBeInTheDocument()
     // The auto-collapse is transient: it never writes the persisted preference.
     expect(localStorage.getItem('mc-nav')).toBeNull()
-  })
-
-  it('hides the community row when the sidebar is collapsed', () => {
-    localStorage.removeItem('mc-nav')
-    renderWithProviders(<App />, { route: '/chat' })
-    const nav = screen.getByRole('navigation', { name: 'Main navigation' })
-    const contact = within(nav).getByText('Star us')
-    expect(contact).toBeVisible()
-    fireEvent.click(within(nav).getByRole('button', { name: 'Collapse sidebar' }))
-    // The row folds away (max-h-0 + opacity-0 + inert) instead of unmounting.
-    const wrapper = contact.closest('[class*="max-h-0"]')
-    expect(wrapper).not.toBeNull()
-    expect(wrapper).toHaveAttribute('inert')
-    localStorage.removeItem('mc-nav')
-  })
-
-  it('keeps Request a Feature visible in the header actions cluster in both sidebar states', () => {
-    safeSetItem('mc-nav', '1')
-    renderWithProviders(<App />, { route: '/chat' })
-
-    // Request a Feature moved out of the brand region into its own pill in the
-    // header's right-side actions cluster; it stays visible regardless of the
-    // sidebar's collapsed/expanded state.
-    expect(screen.getByRole('button', { name: 'Request a Feature' })).toBeInTheDocument()
-
-    const nav = screen.getByRole('navigation', { name: 'Main navigation' })
-    fireEvent.click(within(nav).getByRole('button', { name: 'Expand sidebar' }))
-    expect(within(nav).getByRole('button', { name: 'Collapse sidebar' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Request a Feature' })).toBeInTheDocument()
-    expect(localStorage.getItem('mc-nav')).toBe('0')
-    localStorage.removeItem('mc-nav')
-  })
-
-  it('keeps feature-request instructions hidden from the persisted user message', async () => {
-    const { api } = await import('../api/client')
-    vi.mocked(api.createChatSlot).mockClear()
-    vi.mocked(api.chatSlotContext).mockClear()
-    vi.mocked(api.sendChat).mockClear()
-    renderWithProviders(<App />, { route: '/chat' })
-
-    fireEvent.click(screen.getByRole('button', { name: 'Request a Feature' }))
-
-    await waitFor(() => {
-      expect(api.chatSlotContext).toHaveBeenCalledWith(
-        'feature-slot',
-        FEATURE_REQUEST_PROMPT_FALLBACK,
-        // maxAge bounds the hidden seed's lifetime so a failed visible send
-        // cannot leave it queued for a later, unrelated message.
-        { source: 'feature-request', maxAge: 60 },
-      )
-      // sendTurn's dashboard wire passes (message, slot, colorTheme, signal,
-      // meta, steer). `meta` carries only the seeded turn's correlation id
-      // (#13342): the hidden instructions ride the context seed above, never
-      // the visible message.
-      expect(api.sendChat).toHaveBeenCalledWith(
-        'I’d like to request a feature!',
-        'feature-slot',
-        expect.any(String),
-        expect.any(AbortSignal),
-        { sendId: expect.stringMatching(/^s-/), featureRequest: true },
-        undefined,
-      )
-    })
-    expect(api.sendChat).not.toHaveBeenCalledWith(
-      FEATURE_REQUEST_PROMPT_FALLBACK,
-      expect.anything(),
-      expect.anything(),
-    )
   })
 
   it('renders connection status', () => {

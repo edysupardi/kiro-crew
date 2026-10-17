@@ -49,6 +49,10 @@ jobs:
              cd /home/dev/kiro-crew
              git fetch origin main
              git checkout --force -B main origin/main
+             cd website && npm run build
+             rm -rf ../src/kiro_crew/static/dist
+             cp -R dist ../src/kiro_crew/static/dist
+             cd ..
              /home/dev/kiro-crew/.venv/bin/pip install -e .
              sudo systemctl restart kirocrew'
 
