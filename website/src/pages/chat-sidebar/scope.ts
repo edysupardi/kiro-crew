@@ -226,11 +226,11 @@ export interface SidebarScope {
   rowViews: ReturnType<SidebarRows['views']>
   isActiveRow: ReturnType<SidebarRows['views']>['isActive']
 
-  // The confirming callbacks (the native dialogs stay in ChatSidebar.tsx)
+  // The confirming callbacks (backed by useConfirm in ChatSidebar.tsx)
   clearClosedSessionsWithConfirm: () => Promise<void>
-  deleteColumnWithConfirm: (columnId: string) => void
-  deleteFolderWithConfirm: (folder: ChatFolder) => void
-  deleteHistorySessionWithConfirm: (key: string) => void
+  deleteColumnWithConfirm: (columnId: string) => void | Promise<void>
+  deleteFolderWithConfirm: (folder: ChatFolder) => void | Promise<void>
+  deleteHistorySessionWithConfirm: (key: string) => void | Promise<void>
 
   // From `useAppDispatch`
   dispatch: ReturnType<typeof useAppDispatch>

@@ -26,6 +26,7 @@ import { ListDock } from '../components/ListDock'
 import { LIST_SHELL_CLS } from '../components/listShell'
 import MoveUndoBar from '../components/MoveUndoBar'
 import TagManagerList from '../components/TagManagerList'
+import { useConfirm } from '../components/ConfirmDialog'
 import type { ChatFolder } from '../types'
 import { useSessionRowWindowRoot } from './chat/sessionRowWindow'
 import { readSessionSortKey } from './chat/sessionOrder'
@@ -107,8 +108,8 @@ export { SIDEBAR_MIN, SIDEBAR_MAX } from './chat/sidebarWidth'
  * render owners, which call no hooks: the lane-row and folder-block factories (built once
  * per render, so the row stamps belong to that pass), the lanes, the header, the dock and
  * the Older Sessions pane. What stays here: every hook call, the row actions and row shell
- * the row memo compares, the native confirm() dialogs (eslint's native-dialog allowlist
- * names this file) and the root region. The owner table and the pin list are in
+ * the row memo compares, the async confirm dialogs (backed by useConfirm)
+ * and the root region. The owner table and the pin list are in
  * docs/system-specs/modules/history.md.
  */
 function ChatSidebar({
@@ -730,12 +731,60 @@ function ChatSidebar({
   // The Older Sessions pane's guide scope (`open:chat.older-sessions`).
   useGuideDisclosureScope('chat.older-sessions', historyOpen)
 
-  // The native confirm() dialogs stay in this file, the one eslint's native-dialog
-  // allowlist names; the render owners call these.
-  const deleteFolderWithConfirm = (folder: ChatFolder) => { if (confirm(i18nT('pages.chatSidebar.delete_folder_confirm', { name: folder.name }))) deleteFolderMutation.mutate(folder.id) }
-  const deleteColumnWithConfirm = (columnId: string) => { if (confirm(i18nT('pages.chatSidebar.delete_this_column'))) deleteColumnMutation.mutate(columnId) }
-  const clearClosedSessionsWithConfirm = async () => { if (confirm(i18nT('pages.chatSidebar.clear_closed_sessions_active_tabs_and_pinned_ses'))) { await dispatch(clearHistorySessions()); dispatch(fetchHistory(false)) } }
-  const deleteHistorySessionWithConfirm = (key: string) => { if (confirm(i18nT('pages.chatSidebar.are_you_sure_you_want_to_delete_this_history_ses'))) dispatch(deleteHistorySession(key)) }
+  // The async themed confirm dialog replacing native window.confirm()
+  const { confirm, confirmDialog } = useConfirm()
+
+  const deleteFolderWithConfirm = async (folder: ChatFolder) => {
+    if (
+      await confirm({
+        title: i18nT('pages.chatSidebar.delete_folder'),
+        body: i18nT('pages.chatSidebar.delete_folder_confirm', { name: folder.name }),
+        confirmLabel: i18nT('pages.chatSidebar.delete_folder'),
+        danger: true,
+      })
+    ) {
+      deleteFolderMutation.mutate(folder.id)
+    }
+  }
+
+  const deleteColumnWithConfirm = async (columnId: string) => {
+    if (
+      await confirm({
+        title: i18nT('pages.chatSidebar.delete_this_column'),
+        confirmLabel: i18nT('pages.chatSidebar.delete_column'),
+        danger: true,
+      })
+    ) {
+      deleteColumnMutation.mutate(columnId)
+    }
+  }
+
+  const clearClosedSessionsWithConfirm = async () => {
+    if (
+      await confirm({
+        title: i18nT('pages.chatSidebar.clear'),
+        body: i18nT('pages.chatSidebar.clear_closed_sessions_active_tabs_and_pinned_ses'),
+        confirmLabel: i18nT('pages.chatSidebar.clear'),
+        danger: true,
+      })
+    ) {
+      await dispatch(clearHistorySessions())
+      dispatch(fetchHistory(false))
+    }
+  }
+
+  const deleteHistorySessionWithConfirm = async (key: string) => {
+    if (
+      await confirm({
+        title: i18nT('pages.chatSidebar.delete_history_session'),
+        body: i18nT('pages.chatSidebar.are_you_sure_you_want_to_delete_this_history_ses'),
+        confirmLabel: i18nT('pages.chatSidebar.delete_history_session'),
+        danger: true,
+      })
+    ) {
+      dispatch(deleteHistorySession(key))
+    }
+  }
 
   // Everything the render owners draw from, built after the last hook call. The
   // factories run once per render, so the row stamps belong to this pass.
@@ -932,6 +981,7 @@ function ChatSidebar({
        *  rather than per-row so a folder shown in several board columns can only
        *  ever open one, and so the ProjectPicker it hosts has a single owner. */}
       {folderModal && renderFolderModal(scope, folderModal)}
+      {confirmDialog}
     </div>
   )
 }
