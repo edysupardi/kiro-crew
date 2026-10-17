@@ -1113,6 +1113,9 @@ class _Session:
     # subagent shares this process only when its own directory binds the same
     # profile (``aws_profile_differs_from_parent``).
     aws_project_profile: str | None = None
+    # The route ``claude.project_routes`` set on this session's process;
+    # ``None`` when unbound or non-Claude.
+    claude_route: str | None = None
     # True while the lease is held for a LIFETIME rather than a turn -- see
     # ``session_lifecycle._turn_in_flight``, which is what asks.
     lifecycle_lease: bool = False

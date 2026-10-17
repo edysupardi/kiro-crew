@@ -39,6 +39,10 @@ from kiro_crew.aws_project_profiles import (
     bound_profile_env,
     configured_project_profiles,
 )
+from kiro_crew.claude_routes import (
+    configured_claude_routes,
+    resolve_claude_route,
+)
 from kiro_crew.kiro_prerequisite import pre_spawn_identity, spawn_pid, stamp_spawn_identity
 from kiro_crew.metrics.sessions import (
     END_REASON_EVICTED,
@@ -606,6 +610,23 @@ async def _get_or_create_impl(
             )
         extra_env = bound_env
 
+    # A project bound to a Claude route (claude.project_routes) sets route
+    # environment variables for the Claude backend, forcing bypass_env so
+    # sessions bound to different routes never share a warm process.
+    claude_routes = configured_claude_routes(owner._cfg)
+    bound_claude_route: str | None = None
+    if claude_routes.routes and claude_routes.project_routes and effective_cwd:
+        resolved_route = await asyncio.to_thread(resolve_claude_route, claude_routes, effective_cwd)
+        if resolved_route is not None:
+            bound_claude_route = resolved_route.route_id
+            extra_factory_kwargs["claude_route"] = bound_claude_route
+            extra_env = {**(extra_env or {}), "KIROCREW_CLAUDE_ROUTE": bound_claude_route}
+            self._deps.logger.info(
+                "session %s: Claude route %r from claude.project_routes",
+                key,
+                bound_claude_route,
+            )
+
     # Reconciliation can publish a new template model. Resolve only after
     # that boundary, while retaining an explicit caller model unchanged.
     if model is None:
@@ -1057,6 +1078,7 @@ async def _get_or_create_impl(
                     "reasoning_effort_override"
                 )
                 session.aws_project_profile = bound_profile
+                session.claude_route = bound_claude_route
                 session.loaded_capabilities = stamp
                 self.state.capability_failures.pop(key, None)
                 replay_needed = getattr(provider, "_history_replay_needed", False) is True

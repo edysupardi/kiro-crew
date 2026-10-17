@@ -1344,6 +1344,13 @@ async def api_models(request: web.Request) -> web.Response:
     cfg = await asyncio.to_thread(KiroCrewConfig.load)
     backend = getattr(cfg.agent, "acp_backend", "")
     if backend == ACP_BACKEND_CLAUDE:
+        project_param = request.query.get("project")
+        if project_param:
+            from kiro_crew.claude_routes.discovery_handler import routed_cc_models
+
+            routed = await routed_cc_models(request, cfg, project_param)
+            if routed is not None:
+                return web.json_response(routed)
         return web.json_response(
             _cc_models(request, configured_default=_scoped_default(cfg, backend))
         )

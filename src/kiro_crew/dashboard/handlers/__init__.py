@@ -972,6 +972,13 @@ def _build_prompt_base() -> list[dict[str, Any]]:
     return result
 
 
+# Per-project Claude route binding (claude.project_routes)
+from kiro_crew.claude_routes.handlers import (  # noqa: E402, F401
+    api_claude_project_route_get,
+    api_claude_project_route_import,
+    api_claude_project_route_put,
+)
+
 # Paid-AWS-service consent — the operator's confirmation surface for Amazon
 # Polly (TTS) and Amazon Transcribe (STT). Sole writer of the keystone grant.
 from kiro_crew.dashboard.handlers.aws_consent import (  # noqa: E402, F401

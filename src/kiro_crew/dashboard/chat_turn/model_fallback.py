@@ -83,6 +83,18 @@ def _default_session_model(
     """
     if slot.model or agent_model or cfg is None:
         return ""
+    # Per-project Claude route model preference (takes precedence over agent/global default)
+    if slot.project:
+        try:
+            from kiro_crew.claude_routes.preferences import resolve_slot_project_model
+
+            proj_model = resolve_slot_project_model(cfg, slot.project)
+            if proj_model:
+                return proj_model
+        except Exception:
+            logger.debug(
+                "Failed to resolve project model preference for %s", slot.project, exc_info=True
+            )
     # A slot an app owns starts on that app's own model setting when the agent
     # pins none (``resolve_effective_model`` tier 3). Any other slot resolves
     # through the same call it always has.

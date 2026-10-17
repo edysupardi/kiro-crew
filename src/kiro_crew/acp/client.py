@@ -1336,6 +1336,25 @@ class AcpClient:
         return self.backend == ACP_BACKEND_DEEPSEEK
 
     @property
+    def _claude_route_id(self) -> str | None:
+        """The Claude route identifier if this client serves a routed project directory."""
+        route = self._extra_env.get("KIROCREW_CLAUDE_ROUTE")
+        if route:
+            return route
+        from kiro_crew.claude_routes.config import configured_claude_routes, resolve_claude_route
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        try:
+            cfg = KiroCrewConfig.load()
+            claude_cfg = configured_claude_routes(cfg)
+            if claude_cfg.project_routes and self._work_dir:
+                res = resolve_claude_route(claude_cfg, str(self._work_dir))
+                return res.route_id if res else None
+        except Exception:
+            return None
+        return None
+
+    @property
     def _model_registry_namespace(self) -> str:
         """The model_registry namespace key for this backend (``claude_code`` /
         ``acp``). A registry index selector, NOT a provider-identity check — see

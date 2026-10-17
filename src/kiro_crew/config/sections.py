@@ -39,6 +39,7 @@ from kiro_crew import _facade_mirror, model_registry
 # literal.
 from kiro_crew.acp_backends import DEFAULT_ACP_BACKEND, resolve_selected_backend
 from kiro_crew.appearance_packs import safe_pack_id as _safe_pack_id
+from kiro_crew.claude_routes import ClaudeConfig, ClaudeRouteConfig  # noqa: F401
 from kiro_crew.config.fields import (  # noqa: F401
     _COLOR_HEX_RE,
     _coerce_int,

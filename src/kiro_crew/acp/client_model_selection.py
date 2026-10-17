@@ -318,9 +318,15 @@ def _capture_available_models(self: AcpClient, session_resp: dict) -> None:
         # stored spelling gap opts into the set and is fed here automatically,
         # keyed by its own registry namespace.
         if self._uses_advertised_model_selection:
-            self._advertised_models_changed = model_registry.refresh_advertised_models(
-                self._model_registry_namespace, self._advertised_model_ids()
-            )
+            route_id = getattr(self, "_claude_route_id", None)
+            if route_id:
+                from kiro_crew.claude_routes.model_cache import set_route_models
+
+                set_route_models(route_id, self._advertised_model_ids())
+            else:
+                self._advertised_models_changed = model_registry.refresh_advertised_models(
+                    self._model_registry_namespace, self._advertised_model_ids()
+                )
 
 
 async def _persist_advertised_models_if_changed(self: AcpClient) -> None:

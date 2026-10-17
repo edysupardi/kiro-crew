@@ -5,6 +5,7 @@ it relaunches the session.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from typing import TYPE_CHECKING, Any
 
@@ -350,6 +351,21 @@ async def api_chat_slot_model(request: web.Request) -> web.Response:
         )
         return _owner_denial_response(request, "arming Jev routing is owner-only")
     model_name = "auto" if jev_route else _normalize_model(body.get("model", ""))
+    if body.get("scope") == "project":
+        from kiro_crew.claude_routes.preferences import handle_project_model_pick
+
+        cfg = await asyncio.to_thread(KiroCrewConfig.load)
+        if handle_project_model_pick(cfg, slot.project, model_name):
+            slot.model = ""
+            state.push_slots_update()
+            return web.json_response(
+                {
+                    "ok": True,
+                    "model": model_name,
+                    "scope": "project",
+                    "project": slot.project,
+                }
+            )
     # Judged on THIS slot's harness: a member DM runs on agent.member_acp_backend.
     reason = _model_rejected_reason(model_name, session_keys=(effective_session_key(slot),))
     if reason:

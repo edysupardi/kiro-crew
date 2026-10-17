@@ -60,6 +60,11 @@ from kiro_crew.aws_project_profiles import (
     coerce_project_profiles,
     project_profile_refusals,
 )
+from kiro_crew.claude_routes import (
+    ClaudeConfig,
+    coerce_claude_routes,
+    refuse_claude_routes_on_write,
+)
 
 # Post-split section internals are reached through the module: the name-level
 # `from kiro_crew.config.sections import (...)` block below is a FROZEN
@@ -2031,6 +2036,7 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
     """
     _refuse_unpublishable(data, path)
     _refuse_aws_project_profiles(data, path)
+    refuse_claude_routes_on_write(data, path)
     # Resolve BEFORE stat/write so a symlinked config keeps pointing at its
     # target (and the mode preserved is the target's, not the link's).
     try:
@@ -4100,6 +4106,13 @@ class KiroCrewConfig:
             "AWS",
             "AWS settings for agent sessions: which named profile a project's "
             "sessions start with.",
+        ),
+    )
+    claude: ClaudeConfig = field(
+        default_factory=ClaudeConfig,
+        metadata=_meta(
+            "Claude Routes",
+            "Per-project Claude routes, gateway base URLs, API keys, and model aliases.",
         ),
     )
     mcp_gateway: McpGatewayConfig = field(
@@ -6203,6 +6216,7 @@ def build_config(
                 _coerced_section(data, "aws", _degraded).get("project_profiles")
             )
         ),
+        claude=coerce_claude_routes(_coerced_section(data, "claude", _degraded)),
         # ``_coerce_bool``, not ``_safe_bool``: this one key decides whether
         # an unattended installer runs, and the two wrong answers are not
         # symmetric. A hand-edited ``"auto_update": "false"`` is truthy to

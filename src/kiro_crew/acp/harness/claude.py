@@ -20,7 +20,9 @@ import json
 import logging
 import os
 import shutil
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from kiro_crew import model_registry
 from kiro_crew.acp import launch as launch_mod
@@ -199,6 +201,8 @@ class ClaudeLaunch(ProcessAdapter):
         global _claude_acp_argv_cache  # noqa: PLW0603
         session = ctx.session
         assert session is not None, "claude-agent-acp is launched for one session"
+        self._session = session
+        self._work_dir = str(ctx.work_dir) if ctx.work_dir else None
         session._model = model_registry.resolve_wire_model_id(
             session._model, model_registry_namespace(self.backend)
         )
@@ -279,3 +283,33 @@ class ClaudeLaunch(ProcessAdapter):
                 "CLAUDE_CODE_EXECUTABLE.",
                 CLAUDE_CODE_BIN,
             )
+
+    async def prepare_spawn_env(
+        self,
+        env: dict[str, str],
+        *,
+        to_thread: Callable[..., Awaitable[Any]],
+    ) -> None:
+        """Apply Claude executable, then resolve and inject per-project gateway route environment.
+
+        @param env - The environment dictionary for the spawning process
+        @param to_thread - Guarded off-loop runner
+        @throws AcpError if credentials cannot be resolved
+        """
+        self.apply_spawn_env(env)
+        route_id = env.pop("KIROCREW_CLAUDE_ROUTE", None)
+        work_dir = getattr(self, "_work_dir", None)
+        try:
+            from kiro_crew.claude_routes.config import prepare_claude_route_env
+
+            route_env, keys_to_pop = await to_thread(prepare_claude_route_env, route_id, work_dir)
+        except ValueError as exc:
+            raise AcpError(
+                f"Claude route credential resolution failed: {exc}. "
+                "Configure the secret under Settings > Secrets or CLI."
+            ) from None
+
+        if route_env:
+            for k in keys_to_pop:
+                env.pop(k, None)
+            env.update(route_env)

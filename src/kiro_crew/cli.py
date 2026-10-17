@@ -2171,6 +2171,7 @@ Examples:
     register_perf_parser(sub)
     register_bench_parser(sub)
     register_desktop_parser(sub)
+    register_claude_route_parser(sub)
 
     kn_parser = cli_help.add_command(sub, "knowledge")
     kn_sub = kn_parser.add_subparsers(dest="knowledge_action")
@@ -3847,6 +3848,12 @@ env var overrides it.
         rc = desktop_cmd(args)
         if rc:
             raise SystemExit(rc)
+    elif args.command == "claude-route":
+        from kiro_crew.claude_routes.cli import claude_route_cmd
+
+        rc = claude_route_cmd(args)
+        if rc:
+            raise SystemExit(rc)
     elif args.command == "snapshot":
         from kiro_crew.snapshot import snapshot_main
 
@@ -3887,6 +3894,7 @@ env var overrides it.
 # need neither. Every name from those two modules is imported inside the one
 # ``main()`` dispatch branch that uses it. ``test_cli_lazy_imports.py`` ratchets
 # this: a new module-scope import that reaches them fails the suite.
+from kiro_crew.claude_routes.cli import register_claude_route_parser  # noqa: E402
 from kiro_crew.cli_bench import bench_cmd, register_bench_parser  # noqa: E402
 from kiro_crew.cli_chat import _run_chat  # noqa: E402
 from kiro_crew.cli_cloud import add_size_choices as _cloud_size_choices  # noqa: E402

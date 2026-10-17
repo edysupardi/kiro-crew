@@ -3307,6 +3307,22 @@ pass `--profile`.
   - The PUT binds exactly the given directory, or unbinds it with `profile: ""`,
     through `update_config_locked` under `run_config_write`.
 
+### Per-project Claude routes (`claude.routes`, `claude.project_routes`)
+
+`claude.routes` and `claude.project_routes` configure per-project gateway base URLs,
+API credentials, and model aliases for the Claude ACP backend (`claude_routes/config.py`).
+This allows distinct API keys, model maps, and gateways (e.g. 9router) per project checkout.
+
+- **Validation.** Route IDs must match `^[a-z0-9][a-z0-9._-]{0,63}$`.
+  - `base_url` must be an `http` or `https` URL with host and no userinfo credentials, queries, or fragments.
+  - `api_key` must be a `secret://` reference (never plaintext).
+  - `auth_env` must be either `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`.
+  - `project_routes` keys must be absolute directory paths (at most 4096 characters).
+  - At load, `coerce_claude_routes` drops invalid entries with a warning.
+  - At save, `write_config_atomically` calls `refuse_claude_routes_on_write`, refusing any write that introduces an invalid entry (`ConfigWriteRefused`).
+- **Resolution.** `resolve_claude_route` uses `resolve_project_binding` to find the deepest containing directory component by component after resolving symlinks.
+- **Security.** Like `aws.project_profiles`, the mapping lives in the operator's own configuration. Repository-controlled files never choose the endpoint or credentials directly.
+
 ### Decisions: no `enabled` field here either
 
 `DecisionsConfig` has no `enabled` field; its fields are listed in

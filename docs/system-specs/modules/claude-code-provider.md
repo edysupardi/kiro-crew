@@ -595,6 +595,13 @@ Crew-owned directory from the user's `~/.claude`, keeping credentials and models
 while stripping inherited `permissions` that would pre-approve past Crew's gate)
 is **not implemented here** — see the known gap below.
 
+### Per-project Claude routes and gateway isolation
+
+When a session's project directory matches an entry in `claude.project_routes`, the session is bound to that route (`session.claude_route`).
+- `SessionAllocation._get_or_create_impl` sets marker `KIROCREW_CLAUDE_ROUTE`, ensuring a warm-pool bypass (`bypass_env`) so processes are never shared across routes.
+- `ClaudeLaunch.prepare_spawn_env` resolves the route's `secret://` API key from the vault, strips ambient `ANTHROPIC_*` environment variables, and injects the route's base URL, API key, and model aliases (`ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`).
+- Settings conflicts in `~/.claude/settings.json` or project settings files are detected safely with non-blocking, no-follow checks (`claude_routes/settings_conflict.py`).
+
 ### A Side Chat session
 
 A Side Chat or thread-reply session (`side_read_only`) runs under `READ_ONLY`, which

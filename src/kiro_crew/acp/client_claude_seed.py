@@ -282,7 +282,31 @@ def _render_claude_settings_payload(self: AcpClient) -> str:
     # back to the static registry, and the else branch below omits both model
     # keys — the adapter's own provider list is already right, and a stale
     # allowlist merged over it is not.
-    allowlist = model_registry.seed_available_models(self._model_registry_namespace)
+    route_id = getattr(self, "_claude_route_id", None)
+    if route_id:
+        from kiro_crew.claude_routes.config import configured_claude_routes
+        from kiro_crew.claude_routes.model_cache import get_route_models
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        try:
+            cfg = KiroCrewConfig.load()
+            claude_cfg = configured_claude_routes(cfg)
+            route = claude_cfg.routes.get(route_id)
+            route_models = set(get_route_models(route_id))
+            if route:
+                route_models.update(route.extra_models)
+                for m in route.models.values():
+                    if m:
+                        route_models.add(m)
+            if self._model and self._model != DEFAULT_MODEL:
+                route_models.add(self._model)
+            allowlist = sorted(route_models)
+        except Exception:
+            logger.debug("Failed to resolve route-scoped availableModels for %s", route_id, exc_info=True)
+            allowlist = []
+    else:
+        allowlist = model_registry.seed_available_models(self._model_registry_namespace)
+
     if allowlist:
         data["availableModels"] = allowlist
         # DEFAULT_MODEL ("auto") is not a provider id, and omitting the key is
@@ -290,18 +314,12 @@ def _render_claude_settings_payload(self: AcpClient) -> str:
         # the allowlist: a model key that names no entry in the list it ships
         # with is the exact shape that resolves to the base window.
         if self._model and self._model != DEFAULT_MODEL:
-            # Folded onto the advertised spelling HERE rather than trusting a
-            # caller to have folded self._model first. The re-seed runs beside
-            # the model-cache persist, which is BEFORE _apply_startup_model, so
-            # depending on that fold would be an ordering coupling between two
-            # distant steps -- and the failure it buys is silent (a bare id
-            # writes a model key that is not in the allowlist beside it, i.e.
-            # exactly the base-window bug this file exists to close). The
-            # allowlist above is non-empty here, so the cache is warm and the
-            # fold is the same one _apply_startup_model and set_model perform.
-            data["model"] = model_registry.resolve_wire_model_id(
-                self._model, self._model_registry_namespace
-            )
+            if route_id:
+                data["model"] = self._model
+            else:
+                data["model"] = model_registry.resolve_wire_model_id(
+                    self._model, self._model_registry_namespace
+                )
     else:
         # Cold advertised-model cache -- the first session on this install,
         # before any session/new has been captured. Both model keys are

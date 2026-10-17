@@ -1,0 +1,68 @@
+# =====================================================================
+# Deploy Kiro Crew ke devserver via Tailscale
+#
+#   deploy-dev : Otomatis jalan saat push ke main, atau manual via
+#                workflow_dispatch.
+#                Runner join tailnet (ephemeral) lalu SSH ke devserver.
+#
+# Secrets (repo -> Settings -> Secrets and variables -> Actions):
+#   DEPLOY_SSH_KEY - private key ed25519 deploy (publik ada di authorized_keys devserver)
+#   TS_AUTHKEY     - Tailscale auth key ephemeral+reusable
+# =====================================================================
+
+name: deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-dev:
+    name: Deploy DEV (devserver via Tailscale)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Join tailnet (ephemeral)
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          install -m 600 /dev/null ~/.ssh/id_ed25519
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          ssh-keyscan -H 100.122.223.94 >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy ke devserver
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 dev@100.122.223.94 \
+            'set -e
+             cd /home/dev/kiro-crew
+             git fetch origin main
+             git checkout --force -B main origin/main
+             /home/dev/kiro-crew/.venv/bin/pip install -e .
+             sudo systemctl restart kirocrew'
+
+      - name: Tunggu healthcheck
+        run: |
+          for i in $(seq 1 30); do
+            if ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+                 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 dev@100.122.223.94 \
+                 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5476/' 2>/dev/null | grep -q "200"; then
+              echo "DEV healthy ✅"
+              exit 0
+            fi
+            echo "menunggu gateway :5476... ($i/30)"
+            sleep 2
+          done
+          echo "::error::healthcheck gateway tidak sehat setelah 60s"
+          exit 1

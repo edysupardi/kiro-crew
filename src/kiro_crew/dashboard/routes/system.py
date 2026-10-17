@@ -177,6 +177,12 @@ def register(app: web.Application) -> None:
     # agent's AWS commands reach by default is the operator's choice.
     app.router.add_get("/api/aws/project-profile", handlers.api_aws_project_profile_get)
     app.router.add_put("/api/aws/project-profile", handlers.api_aws_project_profile_put)
+    # Per-project Claude route binding (claude.project_routes) and settings import.
+    app.router.add_get("/api/claude/project-route", handlers.api_claude_project_route_get)
+    app.router.add_put("/api/claude/project-route", handlers.api_claude_project_route_put)
+    app.router.add_post(
+        "/api/claude/project-route/import", handlers.api_claude_project_route_import
+    )
     # Decision-seam consent (Settings > Developer > Feature Previews). Owner-gated
     # in the handler and browser-called like the AWS pair above, for the same
     # reason: it is the operator's out-of-band surface for an egress

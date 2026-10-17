@@ -474,6 +474,13 @@ its own once the cache refreshes with a list that carries it.
   triggers nothing. A slot or crewmate pin never triggers it. A `slot.model` an
   earlier backfill stored is indistinguishable from a person's pick and stays until
   the user picks Auto.
+- **Per-project Claude route model preference (`claude.project_routes`)**:
+  When a slot has an empty `slot.model` and its working directory is bound to a Claude route,
+  `_default_session_model` consults the route's persistent model preference
+  (`claude_project_models.json`, via `claude_routes/preferences.py`) before falling back
+  to agent or global defaults. An explicit slot pin (`slot.model`) takes precedence and is
+  untouched. Picking a model with `scope: "project"` saves the route preference and leaves
+  `slot.model` unpinned so the slot and future slots in that project inherit the project model.
 - Codex advertises `model[effort]` pairs, but its `model` config option accepts the
   base ID and its `reasoning_effort` option accepts the level. The live capability
   marks only backends in `ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS` for pair grouping;
