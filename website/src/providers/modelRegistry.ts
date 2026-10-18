@@ -115,6 +115,14 @@ export function releasedAt(name: string): string | null {
   return (key !== null && REGISTRY[key].released_at) || null
 }
 
+/** Registry-declared effort support for a model, or `null` if not declared; mirrors `model_registry.supports_effort`. */
+export function supportsEffort(name: string): boolean | null {
+  const key = canonicalKey(name)
+  return key !== null && REGISTRY[key]?.supports_effort !== undefined
+    ? !!REGISTRY[key].supports_effort
+    : null
+}
+
 /** Dropdown rows (canonical key + display + window), default first. */
 export function displayModels(): { name: string; description: string; contextWindow: number }[] {
   return Object.entries(REGISTRY)

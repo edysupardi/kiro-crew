@@ -46,6 +46,14 @@
     "aliases": ["claude-opus-4.7", "claude-opus-4.7-1m", "claude-opus-4-7[1m]"],
     "providers": { "claude_code": "global.anthropic.claude-opus-4-7[1m]", "acp": "claude-opus-4.7" }
   },
+  "opusplan": {
+    "display": "Opus Plan",
+    "description": "Dynamic role: Opus for planning, Sonnet for execution",
+    "window": 1000000,
+    "supports_effort": true,
+    "aliases": ["opusplan"],
+    "providers": { "claude_code": "opusplan" }
+  },
   "sonnet-4.5": {
     "display": "Sonnet 4.5 (200K)",
     "description": "Everyday tasks, 200K context",

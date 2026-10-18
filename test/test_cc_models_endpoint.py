@@ -269,6 +269,17 @@ class TestCcModelsMerge:
         assert "opus-4.8-1m" not in names
         assert names[0] == "auto"
 
+    def test_opusplan_survives_advertised_filter(self):
+        """opusplan is Claude Code's dynamic plan pseudo-model and always survives."""
+        prov = _FakeProvider(
+            [{"modelId": "global.anthropic.claude-sonnet-4-6[1m]", "name": "Sonnet 4.6"}]
+        )
+        out = _cc_models(_request_with_providers({"s": prov}))
+        names = [m["model_name"] for m in out]
+        assert "opusplan" in names
+        row = next(m for m in out if m["model_name"] == "opusplan")
+        assert row["display_name"] == "Opus Plan"
+
     def test_configured_default_still_included_when_nothing_advertised(self):
         # Entitlement unknown → trust the operator's config rather than dropping
         # their selected model from the picker.

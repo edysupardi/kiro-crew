@@ -58,6 +58,9 @@ class TestModelSupportsEffort:
             "gpt-5.6-terra",
             "gpt-5.6-luna",
             "gpt-5.5",
+            "code-high",
+            "code-medium",
+            "opusplan",
         ],
     )
     def test_opus_sonnet_fable_gpt_supported(self, model: str):
@@ -69,6 +72,7 @@ class TestModelSupportsEffort:
             None,
             "",
             "auto",
+            "code-low",
             "amazon.nova-pro-v1:0",
             "deepseek-3.2",
             "minimax-m2.5",

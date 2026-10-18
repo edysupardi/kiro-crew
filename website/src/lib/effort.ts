@@ -8,6 +8,7 @@
 
 import { isNotFoundError } from '../api/apiError'
 import { i18nT } from '../i18n/t'
+import { supportsEffort } from '../providers/modelRegistry'
 
 /**
  * Catalog KEY for each effort level's display label. '' = provider/model default.
@@ -74,8 +75,19 @@ export const REASONING_EFFORT_PROVIDERS = new Set(['acp'])
 export function modelSupportsEffort(model: string | undefined): boolean {
   if (!model) return false
   const m = model.toLowerCase()
-  if (m === 'auto' || m.includes('haiku')) return false
-  return m.includes('opus') || m.includes('sonnet') || m.includes('fable') || m.includes('gpt')
+  if (m === 'auto' || m.includes('haiku') || m.includes('code-low')) return false
+  const declared = supportsEffort(model)
+  if (declared !== null) return declared
+  return (
+    m.includes('opus') ||
+    m.includes('sonnet') ||
+    m.includes('fable') ||
+    m.includes('gpt') ||
+    m.includes('code-high') ||
+    m.includes('code-medium') ||
+    m.includes('thinking') ||
+    m.includes('reasoning')
+  )
 }
 
 /**

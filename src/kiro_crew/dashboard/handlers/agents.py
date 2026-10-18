@@ -775,12 +775,13 @@ def _cc_models(request: web.Request, configured_default: str = "") -> list[dict]
             if _normalize_model_key(e.get("model_name", ""))
         }
         # Keep registry rows only when the backend also advertises them; "auto" is
-        # a sentinel, not an entitlement, so it survives regardless.
+        # a sentinel, not an entitlement, and "opusplan" is Claude Code's dynamic
+        # planning/execution pseudo-model, so both survive regardless.
         registry_rows = [
             e
             for e in registry_rows
             if _normalize_model_key(e.get("model_name", "")) in advertised_keys
-            or _normalize_model_key(e.get("model_name", "")) == "auto"
+            or _normalize_model_key(e.get("model_name", "")) in ("auto", "opusplan")
         ]
 
     merged: list[dict] = []

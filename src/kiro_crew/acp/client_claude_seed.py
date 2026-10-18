@@ -302,24 +302,33 @@ def _render_claude_settings_payload(self: AcpClient) -> str:
                 route_models.add(self._model)
             allowlist = sorted(route_models)
         except Exception:
-            logger.debug("Failed to resolve route-scoped availableModels for %s", route_id, exc_info=True)
+            logger.debug(
+                "Failed to resolve route-scoped availableModels for %s", route_id, exc_info=True
+            )
             allowlist = []
     else:
         allowlist = model_registry.seed_available_models(self._model_registry_namespace)
 
     if allowlist:
-        data["availableModels"] = allowlist
+        models_list = list(allowlist)
+        if "opusplan" not in models_list:
+            models_list.append("opusplan")
+        data["availableModels"] = models_list
         # DEFAULT_MODEL ("auto") is not a provider id, and omitting the key is
         # what lets the adapter pick the allowlist head. Written only ALONGSIDE
         # the allowlist: a model key that names no entry in the list it ships
         # with is the exact shape that resolves to the base window.
         if self._model and self._model != DEFAULT_MODEL:
-            if route_id:
-                data["model"] = self._model
-            else:
-                data["model"] = model_registry.resolve_wire_model_id(
+            wire_model = (
+                self._model
+                if route_id
+                else model_registry.resolve_wire_model_id(
                     self._model, self._model_registry_namespace
                 )
+            )
+            data["model"] = wire_model
+            if wire_model and wire_model not in data["availableModels"]:
+                data["availableModels"].append(wire_model)
     else:
         # Cold advertised-model cache -- the first session on this install,
         # before any session/new has been captured. Both model keys are
