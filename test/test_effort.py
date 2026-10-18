@@ -60,6 +60,8 @@ class TestModelSupportsEffort:
             "gpt-5.5",
             "code-high",
             "code-medium",
+            "code-low",
+            "claude-haiku-5-5",
             "opusplan",
         ],
     )
@@ -72,7 +74,6 @@ class TestModelSupportsEffort:
             None,
             "",
             "auto",
-            "code-low",
             "amazon.nova-pro-v1:0",
             "deepseek-3.2",
             "minimax-m2.5",

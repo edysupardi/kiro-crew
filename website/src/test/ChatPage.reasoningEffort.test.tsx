@@ -141,9 +141,10 @@ describe('ChatInput reasoning effort on the model chip', () => {
     expect(modelSupportsEffort('gpt-5.6-luna')).toBe(true)
     expect(modelSupportsEffort('code-high')).toBe(true)
     expect(modelSupportsEffort('code-medium')).toBe(true)
+    expect(modelSupportsEffort('code-low')).toBe(true)
+    expect(modelSupportsEffort('claude-haiku-5-5')).toBe(true)
     expect(modelSupportsEffort('opusplan')).toBe(true)
-    // Not capable: haiku, auto, empty/undefined, other third-party.
-    expect(modelSupportsEffort('code-low')).toBe(false)
+    // Not capable: haiku-4, auto, empty/undefined, other third-party.
     expect(modelSupportsEffort('claude-haiku-4.5')).toBe(false)
     expect(modelSupportsEffort('auto')).toBe(false)
     expect(modelSupportsEffort('')).toBe(false)

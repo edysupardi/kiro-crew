@@ -75,7 +75,8 @@ export const REASONING_EFFORT_PROVIDERS = new Set(['acp'])
 export function modelSupportsEffort(model: string | undefined): boolean {
   if (!model) return false
   const m = model.toLowerCase()
-  if (m === 'auto' || m.includes('haiku') || m.includes('code-low')) return false
+  if (m === 'auto') return false
+  if (m.includes('haiku') && !m.includes('haiku-5')) return false
   const declared = supportsEffort(model)
   if (declared !== null) return declared
   return (
@@ -83,8 +84,8 @@ export function modelSupportsEffort(model: string | undefined): boolean {
     m.includes('sonnet') ||
     m.includes('fable') ||
     m.includes('gpt') ||
-    m.includes('code-high') ||
-    m.includes('code-medium') ||
+    m.includes('code-') ||
+    m.includes('haiku-5') ||
     m.includes('thinking') ||
     m.includes('reasoning')
   )

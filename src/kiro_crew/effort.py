@@ -82,7 +82,9 @@ def model_supports_effort(model: str | None) -> bool:
     # provider id (no "haiku" substring) and stays capable. Only the raw kiro
     # spelling — which the kiro/acp path passes untranslated — is gated here, so
     # a kiro Haiku agent can never wrongly report effort-capable.
-    if "haiku" in m or "code-low" in m:
+    # Legacy Haiku (Haiku 4.x) does not support effort. Haiku 5+ and custom
+    # gateway models like code-low (backed by Haiku 5.5 in 9router) support effort.
+    if "haiku" in m and "haiku-5" not in m:
         return False
     try:
         declared = model_registry.supports_effort(model)
@@ -95,8 +97,8 @@ def model_supports_effort(model: str | None) -> bool:
         or "sonnet" in m
         or "fable" in m
         or "gpt" in m
-        or "code-high" in m
-        or "code-medium" in m
+        or "code-" in m
+        or "haiku-5" in m
         or "thinking" in m
         or "reasoning" in m
     )
