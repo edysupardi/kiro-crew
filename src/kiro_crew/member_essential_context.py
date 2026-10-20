@@ -279,6 +279,16 @@ def _read_implicit_guide(path: Path, root: Path) -> str | None:
         return None
 
 
+def read_optional_root_guide(path: Path, root: Path) -> str | None:
+    """Read one optional guide at *root* through the essential-context reader.
+
+    The same containment, managed-state, hard-link, no-follow and size checks every
+    essential source goes through. ``None`` when the guide is refused for any of
+    them, so an optional file never stops a session from starting.
+    """
+    return _read_implicit_guide(path, root)
+
+
 def _omitted_guide(path: Path, root: Path) -> tuple[str, str]:
     """The in-band note that stands in for a guide :func:`_read_implicit_guide` refused."""
     return (

@@ -155,7 +155,9 @@ class TestClaudeLaunchPrepareSpawnEnv:
         }
 
         async def _fake_to_thread(func, *args, **kwargs):
-            return resolved_route_env, keys_to_pop
+            if func is prepare_claude_route_env:
+                return resolved_route_env, keys_to_pop
+            return func(*args, **kwargs)
 
         with patch.object(launch, "apply_spawn_env"):
             await launch.prepare_spawn_env(env, to_thread=_fake_to_thread)

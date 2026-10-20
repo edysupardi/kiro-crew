@@ -52,6 +52,11 @@ from kiro_crew.agent_sdk.drivers import acp as acp_driver
 from kiro_crew.agent_sdk.provider_identity import PROVIDER_ACP, is_claude_code
 from kiro_crew.agent_spec_format import iter_agent_spec_files, parse_agent_spec_text
 from kiro_crew.board_tag_grammar import is_grantable_tag_id
+from kiro_crew.claude_workspace_inputs import project_tier_left_out as _project_tier_left_out
+from kiro_crew.claude_workspace_inputs import (
+    read_project_instructions,
+    render_project_instructions,
+)
 from kiro_crew.config import live
 from kiro_crew.config.loader import KiroCrewConfig, workspace_dir_for
 from kiro_crew.config.paths import kiro_agents_dir
@@ -3614,6 +3619,31 @@ class ContextBuilder:
                 )
                 if _folder_ctx:
                     parts.append(_folder_ctx + "\n\n")
+            # Root AGENTS.md / CLAUDE.md of a Claude session's workspace. That
+            # harness loads no project tier here, so nothing else delivers them.
+            # Minted after the scrub for the reason folder steering is; a fresh
+            # build only, so a follow-up turn and a slim resume (whose restored
+            # history already holds it) never repeat the files.
+            if (
+                is_cc
+                and not _essentials
+                and not (minimal_context or slim_resume)
+                and _group_included(context_groups, CONTEXT_GROUP_PROJECT)
+                and _project_tier_left_out(context_provider)
+            ):
+                _instructions_dir = project or (
+                    context_provider.cwd if context_provider is not None else None
+                )
+                # The bodies are repository-authored, so each is scrubbed BEFORE the
+                # genuine frame is minted around it: the frame is in the scrub set.
+                _instructions = render_project_instructions(
+                    [
+                        (name, _neutralize_structural_markers(body))
+                        for name, body in read_project_instructions(_instructions_dir)
+                    ]
+                )
+                if _instructions:
+                    parts.append(_instructions)
             # Mint trusted reply-style framing only after the session-context
             # payload has been scrubbed. Its own markers are intentionally in the
             # scrub set, so placing it inside ``session_ctx`` would erase it.

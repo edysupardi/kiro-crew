@@ -165,6 +165,12 @@ _STRUCTURAL_MARKER_RES: tuple[re.Pattern[str], ...] = (
     # required hyphen separator, per the variable-tail convention above.
     re.compile(r"\[\s*FOLDER\s*STEERING\s*[-]{1,2}", re.IGNORECASE),
     re.compile(r"\[\s*END\s*FOLDER\s*STEERING\s*\]", re.IGNORECASE),
+    # The Claude workspace-instructions frame (``claude_workspace_inputs``). Its
+    # body is a project file anyone with commit access wrote, so a copy inside a
+    # memory line or channel message must not read as the genuine frame. Minted
+    # AFTER the session-context scrub, like folder steering.
+    re.compile(r"\[\s*PROJECT\s*INSTRUCTIONS\s*[-]{1,2}", re.IGNORECASE),
+    re.compile(r"\[\s*END\s*PROJECT\s*INSTRUCTIONS\s*\]", re.IGNORECASE),
     # The checklist blocks the runner prepends for a fresh or live session
     # (``_ChatSlot.todo_recovery_prompt`` / ``todo_sync_prompt``). Minted AFTER
     # the egress scrub, like folder steering, so a copy in a fetched page or a

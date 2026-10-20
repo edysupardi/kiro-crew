@@ -139,6 +139,16 @@ class LLMProvider(ABC):
         return False
 
     @property
+    def project_tier_left_out(self) -> bool:
+        """Whether the serving harness runs without the project's own settings tiers.
+
+        Only a Claude session that left a project-owned settings file out answers
+        True; elsewhere the harness either loads the project's ``CLAUDE.md`` itself
+        or has no such file, and Crew must not send it a second time.
+        """
+        return False
+
+    @property
     def native_context_documents(self) -> dict[str, str]:
         """Exact documents supplied at native startup, empty without evidence."""
         return {}

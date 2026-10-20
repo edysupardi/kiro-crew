@@ -733,6 +733,13 @@ class AcpProvider(LLMProvider):
         # the fallback keeps those guides reachable without a false capability.
         return self._client.backend == ACP_BACKEND_KAS
 
+    @property
+    def project_tier_left_out(self) -> bool:
+        client = self._client
+        if isinstance(client, AcpClient) and is_claude_backend_name(client.backend):
+            return bool(client._claude_session_excludes_local())
+        return False
+
     def prompt_timeout_for_deadline(self, deadline: float) -> float:
         """Resolve the immutable transport budget this ACP session supports."""
         return resolve_prompt_timeout_for_deadline(deadline)

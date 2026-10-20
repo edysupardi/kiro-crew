@@ -313,3 +313,28 @@ class ClaudeLaunch(ProcessAdapter):
             for k in keys_to_pop:
                 env.pop(k, None)
             env.update(route_env)
+
+        from kiro_crew.claude_workspace_inputs import (
+            apply_workspace_provider_env,
+            read_workspace_provider_env,
+        )
+
+        workspace_env = await to_thread(read_workspace_provider_env, work_dir)
+        apply_workspace_provider_env(env, workspace_env)
+        if workspace_env.values:
+            logger.info(
+                "workspace provider env applied to this session's child: %s",
+                ", ".join(sorted(workspace_env.values)),
+            )
+        if workspace_env.shadowed:
+            logger.warning(
+                "~/.claude/settings.json sets %s differently, and the claude CLI ranks it above "
+                "the process environment, so the workspace value for those keys does not take effect.",
+                ", ".join(sorted(workspace_env.shadowed)),
+            )
+        if workspace_env.ignored:
+            logger.warning(
+                "workspace %s ignored: a base URL is applied only together with an API key "
+                "from the same file.",
+                ", ".join(sorted(workspace_env.ignored)),
+            )

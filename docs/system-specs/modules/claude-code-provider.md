@@ -479,7 +479,8 @@ model allowlist ride the inline settings. That makes the permission surface gove
 project delivers its result. The cost is that project-scope config does not load on
 this path either: its `settings.json` env and plugins, and its `CLAUDE.md` memory
 files, which the SDK loads only with the `project` source. The runtime warning names
-the same list.
+the same list. Two of those are restored in a narrow form, see
+"Workspace provider env and root instructions" below.
 
 What the project tiers REFUSE is carried, not dropped. Leaving a tier out must drop its
 allows, never its restrictions, so `_project_settings_restrictions` reads the
@@ -594,6 +595,50 @@ core does not set `CLAUDE_CONFIG_DIR` itself: an isolated CC config root (seedin
 Crew-owned directory from the user's `~/.claude`, keeping credentials and models
 while stripping inherited `permissions` that would pre-approve past Crew's gate)
 is **not implemented here** — see the known gap below.
+
+### Workspace provider env and root instructions
+
+`claude_workspace_inputs.py` brings back exactly two things the project-owned path
+leaves out, without reopening any setting tier (`settingSources` stays `["user"]`):
+
+- **Provider env.** `ClaudeLaunch.prepare_spawn_env` reads the `env` object of
+  `<work_dir>/.claude/settings.local.json` and merges only `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_BASE_URL` and the three `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`
+  keys into that one child's environment mapping, after the per-project route, so a
+  workspace value outranks the route's for the same key. Nothing else in the file is
+  read. Values are never logged, placed on argv, put in `_meta` or in a prompt, and
+  `os.environ` is not touched; logs name keys only. The read is the same bounded,
+  no-follow read the exclusion uses, pinned to the workspace root, and a value
+  holding a NUL byte is ignored so it cannot fail the spawn.
+- **Root instructions.** On a fresh Claude session `build_message` appends one
+  `[PROJECT INSTRUCTIONS — ...]` block holding the root `AGENTS.md` then `CLAUDE.md`
+  (the later file wins on conflict), after the session-context scrub like folder
+  steering and before the user request. Each body is scrubbed before the frame is
+  minted around it, and the frame is in `_STRUCTURAL_MARKER_RES`. Each file goes
+  through `member_essential_context.read_optional_root_guide`, so containment, links,
+  hard links, size and UTF-8 are refused rather than read; a refused file is skipped
+  with a warning that names the file, never its content. The block is sent only when
+  the provider reports `project_tier_left_out`: a session that loads the project tier
+  already has the CLI read `CLAUDE.md` itself, and a second copy would only cost
+  prompt. Follow-up turns, a slim resume, minimal-context turns, a member's
+  essentials envelope and every other harness do not carry it. Edits to either file
+  apply to the next new session.
+
+Two limits are stated rather than hidden:
+
+- **A user-level value outranks the child environment.** The claude CLI ranks
+  `~/.claude/settings.json` `env` above the process environment (measured with the
+  CLI against loopback listeners). A workspace value for a key the user file sets to
+  something else therefore does not take effect; the launch logs a warning naming the
+  key. Carrying the value in the inline flag tier would win, but that tier is part of
+  `_meta`, which must hold no credential.
+- **A repository-chosen base URL never meets a credential it did not bring.** A
+  workspace `ANTHROPIC_BASE_URL` is dropped unless the same file supplies
+  `ANTHROPIC_API_KEY`, and is dropped as well when `~/.claude/settings.json` holds an
+  `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN`. When it is applied, any bearer
+  token the child already holds (a route's `ANTHROPIC_AUTH_TOKEN`, an inherited OAuth
+  token) is removed from that child. Without this a cloned repository could aim the
+  operator's own token at an address it chose.
 
 ### Per-project Claude routes and gateway isolation
 
