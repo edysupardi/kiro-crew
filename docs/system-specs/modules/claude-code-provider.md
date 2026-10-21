@@ -707,3 +707,25 @@ uses the resulting allowlist when an automatic selection omits an explicit
 model. `TestModelRegistry.test_fable_5_not_default` and
 `TestModelRegistry.test_available_models_is_default_first` pin the default and
 ordering behavior.
+
+### The advertised list behind a custom gateway
+
+`session/new` answers a `models` payload of slot-resolved ids — the
+`ANTHROPIC_DEFAULT_*_MODEL` targets plus the real Claude ids — while the same
+response's `configOptions` `model` select carries every id the gateway serves
+(the CLI fetches the gateway's model list itself), and that select is the whole
+vocabulary `session/set_config_option("model", …)` accepts. A reader that stops
+at the payload offers a fraction of what a pick can name: the dashboard picker
+showed eight models against a gateway serving over a hundred.
+
+`session_models_envelope` answers from the union for this harness
+(`merge_model_select_options`: payload entries first, select-only ids appended,
+`currentModelId` from the payload), gated on `ACP_BACKENDS_MODEL_SELECT_UNION` —
+claude is its only member, because the other advertised-selection hosts keep
+payload-wins (their payload is the entitlement answer). Every reader of the
+list goes through the same fold: the session-init capture
+(`AcpClient._capture_available_models`), the pooled `store_session_config`, and
+the entitlement probe, so the cross-session snapshot (`provider_models.json`)
+and the picker it feeds carry the union too. The adapter still validates every
+pick — a gateway id it refuses fails the strict `set_model` path with
+`AcpModelUnavailable` rather than a silent downgrade.

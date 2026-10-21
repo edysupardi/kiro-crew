@@ -129,6 +129,7 @@ from kiro_crew.acp.types import (
     ACP_BACKENDS_HOOKS_LIST,
     ACP_BACKENDS_INLINE_COMPACTION,
     ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS,
+    ACP_BACKENDS_MODEL_SELECT_UNION,
     ACP_BACKENDS_MODEL_VIA_CONFIG_OPTION,
     ACP_BACKENDS_PERMISSION_KIND_FROM_TOOL_CALL,
     ACP_BACKENDS_STEER,
@@ -801,6 +802,34 @@ def model_select_envelope(resp: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def merge_model_select_options(models: dict[str, Any], select: dict[str, Any]) -> dict[str, Any]:
+    """One envelope from a ``models`` payload and a ``model`` select, payload first.
+
+    claude-agent-acp behind a custom gateway is the shape this exists for: its
+    ``models`` payload carries the slot-resolved ids (the
+    ``ANTHROPIC_DEFAULT_*_MODEL`` targets plus the real Claude ids) while its
+    ``model`` select carries every id the gateway serves, because
+    ``session/set_config_option`` accepts the whole select. A reader that stops
+    at the payload offers a fraction of what a pick can name. Entries from
+    *models* keep their place and shape; select-only ids follow in select order,
+    so the list's head and ``currentModelId`` still come from the payload the
+    backend itself resolved.
+    """
+    base = AcpSessionHandle._normalize_models(models.get("availableModels") or [])
+    seen = {m["modelId"] for m in base}
+    for entry in AcpSessionHandle._normalize_models(select.get("availableModels") or []):
+        if entry["modelId"] not in seen:
+            seen.add(entry["modelId"])
+            base.append(entry)
+    merged: dict[str, Any] = {"availableModels": base}
+    current = models.get("currentModelId")
+    if not (isinstance(current, str) and current):
+        current = select.get("currentModelId")
+    if isinstance(current, str) and current:
+        merged["currentModelId"] = current
+    return merged
+
+
 def session_models_envelope(resp: dict[str, Any], backend: str) -> Any:
     """The ``models`` payload of a session response, with the select folded in.
 
@@ -809,11 +838,21 @@ def session_models_envelope(resp: dict[str, Any], backend: str) -> Any:
     whatever shape the response carried when it carried one, the synthesized
     envelope when it did not and the host advertises a ``model`` select, and the
     original absent value when neither applies -- so a caller's own shape branches
-    stay exactly as they were.
+    stay exactly as they were. When the response carries BOTH, the answer is the
+    host's to make: a member of ``ACP_BACKENDS_MODEL_SELECT_UNION`` gets the
+    select's only-id entries appended behind the payload's
+    (:func:`merge_model_select_options`), every other host keeps payload-wins —
+    for those the payload IS the entitlement answer and a select value it does
+    not list must not be offered.
     """
     models = resp.get("models") or resp.get("availableModels")
     if models is None or models == {} or models == []:
         models = models_from_config_options(resp, backend) or models
+        return models
+    if isinstance(models, dict) and backend in ACP_BACKENDS_MODEL_SELECT_UNION:
+        select = models_from_config_options(resp, backend)
+        if select:
+            return merge_model_select_options(models, select)
     return models
 
 

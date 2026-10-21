@@ -156,6 +156,9 @@ with no row here.
        registry, answers that this session takes an effort level and which ones)
    * - ``ACP_BACKENDS_ADVERTISED_MODEL_SELECTION``
      - semantic question (``SessionCapabilities.resolves_model_from_advertised_list``)
+   * - ``ACP_BACKENDS_MODEL_SELECT_UNION``
+     - driver-internal (whether a session carrying BOTH a ``models`` payload and a
+       ``model`` select is answered from their union or the payload alone)
    * - ``ACP_BACKENDS_SEED_LOCAL_SETTINGS``
      - driver-internal (whether ``settings.local.json`` is re-seeded on switch)
    * - ``ACP_BACKENDS_KIRO_SLASH_COMMANDS``
@@ -2249,6 +2252,20 @@ ACP_BACKENDS_ADVERTISED_MODEL_SELECTION = frozenset(
 # one pinned environment variable, and its model travels as a config option, so a
 # warm-pool claim that switches model leaves nothing anywhere to re-seed.
 ACP_BACKENDS_SEED_LOCAL_SETTINGS = frozenset({ACP_BACKEND_CLAUDE})
+
+# Backends whose ``model`` select is a SUPERSET of the ``models`` payload and the
+# accepted vocabulary of ``session/set_config_option`` both, so a session response
+# carrying the two together is UNIONED rather than answered from the payload alone.
+# claude-agent-acp is the whole set: behind a custom ``ANTHROPIC_BASE_URL`` gateway
+# its ``models`` payload names the slot-resolved ids (the
+# ``ANTHROPIC_DEFAULT_*_MODEL`` targets plus the real Claude ids) while its select
+# names every id the gateway serves, fetched live from the gateway's model list —
+# a picker fed the payload alone offers a fraction of what a pick can name. The
+# other advertised-selection members keep payload-wins: their payload IS the
+# entitlement answer, and a select value it does not list must not be offered.
+# Opt-in for the same reason as every set here — a harness whose select is not a
+# served superset is not a member and its both-shapes answer stays as it was.
+ACP_BACKENDS_MODEL_SELECT_UNION = frozenset({ACP_BACKEND_CLAUDE})
 
 #: Operator lever for the permission mode a seeded session runs under, read by
 #: :func:`resolve_cc_permission_mode`. One name and one resolver, so a per-session

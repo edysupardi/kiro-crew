@@ -430,6 +430,14 @@ OFF_CARD_SETS: Mapping[str, str] = {
         "different question, and it is on the card as an ineffective setting where it "
         "holds"
     ),
+    "ACP_BACKENDS_MODEL_SELECT_UNION": (
+        "whether a session carrying both a `models` payload and a `model` select is "
+        "answered from their union or the payload alone. Every harness's picker is fed "
+        "its full served list either way -- a member's from the select, a non-member's "
+        "from the payload that IS its entitlement answer -- so a reader choosing a "
+        "harness loses nothing, and a wrong membership offers ids the harness cannot "
+        "run, which is a defect"
+    ),
     "ACP_BACKENDS_ACP_RUNTIME": (
         "which transport starts a session: one shared process demuxed by AcpRuntime, or "
         "one process per session. The user gets a session either way; a wrong membership "

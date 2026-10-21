@@ -270,23 +270,23 @@ def _capture_available_models(self: AcpClient, session_resp: dict) -> None:
     The shape walk is delegated to
     :func:`kiro_crew.acp.session_handle.parse_advertised_models` so this
     snapshot stays directly comparable with the pooled-runtime probe.
-    This path keeps its dict-only ``models`` gate and its
-    non-empty assignment guard — both are call-site policy, not parsing.
+    Where the list lives is asked in one place too,
+    :func:`kiro_crew.acp.session_handle.session_models_envelope`, which also
+    folds a ``model`` select's ids in when the response carries both — the
+    claude shape behind a custom gateway. This path keeps its dict-only
+    ``models`` gate and its non-empty assignment guard — both are call-site
+    policy, not parsing.
 
     Also records ``currentModelId`` for ``_track_metadata``'s context
     window lookup.
     """
     # Imported lazily: acp.session_handle imports this module at module
     # level, so a top-level import here would be a cycle.
-    from kiro_crew.acp.session_handle import models_from_config_options
+    from kiro_crew.acp.session_handle import session_models_envelope
 
-    models = session_resp.get("models")
+    models = session_models_envelope(session_resp, self.backend)
     if not isinstance(models, dict):
-        # Adapters that omit `models` still advertise via configOptions. One
-        # authoring, shared with the shared-runtime driver's own capture.
-        models = models_from_config_options(session_resp, self.backend)
-        if models is None:
-            return
+        return
     current_model_id = models.get("currentModelId")
     if isinstance(current_model_id, str) and current_model_id:
         self._resolved_model_id = current_model_id
