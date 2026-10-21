@@ -338,3 +338,8 @@ class ClaudeLaunch(ProcessAdapter):
                 "from the same file.",
                 ", ".join(sorted(workspace_env.ignored)),
             )
+
+        if not route_env:
+            from kiro_crew.claude_gateway_models import schedule_gateway_refresh
+
+            schedule_gateway_refresh(env)

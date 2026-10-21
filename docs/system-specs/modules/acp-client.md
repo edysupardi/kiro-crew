@@ -1477,6 +1477,9 @@ and — for a member of `ACP_BACKENDS_MODEL_SELECT_UNION` (claude only) — the
 union of the two when a response carries both, because that harness's select is
 a served superset of its payload (see
 [claude-code-provider](claude-code-provider.md#the-advertised-list-behind-a-custom-gateway)).
+The same members also get the gateway model file's ids and `opusplan` folded in
+behind those entries (`fold_gateway_models`), so a session whose adapter answered
+with only its static list still advertises the gateway's full list.
 That answer is captured once, and a lookup racing a token refresh can return the
 free tier. Two paths heal it through the runtime's `probe_advertised_models`,
 which opens a throwaway minimal session (no MCP servers, no mode) on the same

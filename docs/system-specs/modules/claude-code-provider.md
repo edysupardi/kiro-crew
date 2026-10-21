@@ -729,3 +729,25 @@ the entitlement probe, so the cross-session snapshot (`provider_models.json`)
 and the picker it feeds carry the union too. The adapter still validates every
 pick — a gateway id it refuses fails the strict `set_model` path with
 `AcpModelUnavailable` rather than a silent downgrade.
+
+**The gateway model file.** The adapter's own `/v1/models` fetch inside
+`session/new` is bounded at two seconds and swallows every failure, while a real
+gateway takes 0.4–4 s, so one session advertised the whole list and the next
+advertised only the adapter's static entries, and each such session overwrote
+`provider_models.json` with the short list. `claude_gateway_models.py` owns the
+list instead. Every claude session start (`ClaudeLaunch.prepare_spawn_env`)
+schedules a detached refresh that asks `GET <base>/v1/models` with the base URL
+and key the session's child runs under, five-second budget, never awaited by
+session start. A success rewrites `claude_gateway_models.json` in the data home
+whole (ids in gateway order, deduplicated, `updated_at`; mode 0600, atomic), so a
+model the gateway dropped leaves the file. A timeout, a non-200, a body that is
+not JSON, an empty list, or an unreachable gateway leaves the file as it was and
+logs one warning naming the failure class — never the URL or the key. The file is
+the source of truth: `session_models_envelope` calls `fold_gateway_models` for
+`ACP_BACKENDS_MODEL_SELECT_UNION` members, which appends the file's ids behind
+the adapter's entries and then `opusplan` (Claude Code's own planning alias, so
+it is offered on a cold start with no file too). A session routed through a
+per-project Claude route (`claude.routes`) does not refresh the file, because its
+gateway is not the host's; one file serves every workspace that shares a gateway.
+The adapter's own patched fetch, where present, is untouched and only adds to the
+union.

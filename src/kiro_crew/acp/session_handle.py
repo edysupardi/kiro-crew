@@ -202,6 +202,7 @@ from kiro_crew.acp.types import (
 )
 from kiro_crew.agent_sdk.capabilities import capabilities_for
 from kiro_crew.agent_sdk.drivers.acp import EntitlementRevalidating  # noqa: F401 - raised here
+from kiro_crew.claude_gateway_models import fold_gateway_models
 from kiro_crew.config.paths import kiro_sessions_dir
 from kiro_crew.constants import COMPACT_WAIT_TIMEOUT_SECS
 from kiro_crew.executors import subprocess_executor
@@ -848,11 +849,12 @@ def session_models_envelope(resp: dict[str, Any], backend: str) -> Any:
     models = resp.get("models") or resp.get("availableModels")
     if models is None or models == {} or models == []:
         models = models_from_config_options(resp, backend) or models
-        return models
-    if isinstance(models, dict) and backend in ACP_BACKENDS_MODEL_SELECT_UNION:
+    elif isinstance(models, dict) and backend in ACP_BACKENDS_MODEL_SELECT_UNION:
         select = models_from_config_options(resp, backend)
         if select:
-            return merge_model_select_options(models, select)
+            models = merge_model_select_options(models, select)
+    if isinstance(models, dict) and backend in ACP_BACKENDS_MODEL_SELECT_UNION:
+        return fold_gateway_models(models)
     return models
 
 

@@ -119,17 +119,19 @@ class TestSessionModelsEnvelope:
                 m["modelId"] for m in _PAYLOAD_MODELS
             ], backend
 
-    def test_no_select_leaves_the_payload_envelope_untouched(self) -> None:
+    def test_no_select_leaves_the_payload_entries_in_place(self) -> None:
         resp = {"models": {"currentModelId": "m1", "availableModels": [{"modelId": "m1"}]}}
         env = session_models_envelope(resp, ACP_BACKEND_CLAUDE)
-        assert env == {"currentModelId": "m1", "availableModels": [{"modelId": "m1"}]}
+        assert env["currentModelId"] == "m1"
+        assert [m["modelId"] for m in env["availableModels"]] == ["m1", "opusplan"]
 
     def test_a_malformed_select_does_not_touch_the_payload(self) -> None:
         resp = _both_shapes()
         resp["configOptions"][0]["options"] = "not-a-list"
         env = session_models_envelope(resp, ACP_BACKEND_CLAUDE)
         assert [m["modelId"] for m in env["availableModels"]] == [
-            m["modelId"] for m in _PAYLOAD_MODELS
+            *[m["modelId"] for m in _PAYLOAD_MODELS],
+            "opusplan",
         ]
 
 
@@ -163,7 +165,7 @@ class TestClientCapture:
     def test_capture_without_select_unchanged(self) -> None:
         client = self._client()
         client._capture_available_models({"models": {"availableModels": [{"modelId": "m1"}]}})
-        assert [m["modelId"] for m in client.available_models()] == ["m1"]
+        assert [m["modelId"] for m in client.available_models()] == ["m1", "opusplan"]
 
 
 class TestPooledAndProbePaths:
