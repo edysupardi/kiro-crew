@@ -380,7 +380,11 @@ access token.
 - Known limit, by decision: the spawn-time probe (`auth/bridge.vault_holds_identity`)
   accepts a stored identity whose access token is live or which carries a refresh
   token; it cannot know without a network call that an issuer will reject that
-  refresh token. When a refresh IS refused (issuer answers 400/401/403,
+  refresh token, nor does it check the local inputs a refresh needs
+  (`KasToken.refresh_blocker`: stored client credentials, a token endpoint) -- a
+  refresh that cannot even be attempted raises `auth/refresh.RefreshBlocked`, as
+  permanent as a rejection but with no issuer asked and so no marker recorded.
+  When a refresh IS refused (issuer answers 400/401/403,
   `auth/refresh.RefreshRejected`), the refresher records a token-free marker beside
   the vault (`TokenStore.mark_refresh_rejected`, cleared by any new credential
   landing in the slot), and that marker is what `kirocrew doctor` (`crew vault:`
@@ -413,7 +417,7 @@ access token.
   SettingsPage mounts; the card's older home, `/developer?tab=agent-backend`,
   is forwarded there by DeveloperPage with the `highlight` kept) and from the KAS remedy
   strings in `agent_sdk/host_auth.py`. Its intro sentence names the backend
-  ("Used only by the KAS (kiro-agent) backend") and says Kiro CLI keeps its own
+  ("Used only by the Kiro Agent backend") and says Kiro CLI keeps its own
   kiro-cli login, because the card sits under a switch that also lists Kiro
   CLI. It is deliberately NOT on Settings > Overview and not indexed into
   Settings search: a provider chooser on the landing page read as a required

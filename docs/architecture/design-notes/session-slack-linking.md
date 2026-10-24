@@ -52,7 +52,7 @@ outbound-only mirror. Slack never sets it, because Slack has its own inbound leg
 ## In-memory projection on the dashboard side
 
 `_ChatSlot` mirrors the persisted link into `_slack_linked`, `_slack_channel`,
-`_slack_thread_ts` (`dashboard/state.py`), serialized to the frontend as
+`_slack_thread_ts` (`dashboard/state_parts/slot_session.py`), serialized to the frontend as
 `slack_linked` / `slack_channel` / `slack_thread_ts`. `DashboardState` keeps
 `_slack_to_slot` (thread_ts -> slot name) for the inbound Slack lookup.
 
@@ -131,7 +131,9 @@ need a fresh @mention.
 
 ### Dashboard to Slack
 
-In `chat_runner._run_chat`, gated on `not is_slash and not _is_synthetic`:
+In the dashboard turn, gated on `not is_slash and not _is_synthetic` (`_turn_open` and
+`_turn_dispatch_gates` run steps 1-2, `_on_tool_call` step 3, `_turn_stop_hook` step 4 and
+`_turn_release_session` (`chat_turn/session_reset.py`) step 5, from `_run_chat`'s `finally`):
 
 1. Read `get_slack_link(session_key)`. A dashboard session may hold its link on
    the bare key while the turn runs under the `dashboard:`-prefixed one, so the

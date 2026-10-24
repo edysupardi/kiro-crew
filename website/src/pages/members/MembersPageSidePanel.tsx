@@ -35,6 +35,7 @@ import { claimDashboardOnLoad } from './dashboardOnLoad'
 import { suggestPaneDraft } from '../../utils/chatPaneDrafts'
 import { revealComposer } from '../chat/composerFocus'
 import { sessionTitleRoster } from '../../utils/sessionRoster'
+import { useLanguageGeneration } from '../../i18n/useLanguageGeneration'
 import { AnimatePresence, motion } from 'framer-motion'
 import { isSidePanelHidden, shouldMountSidePanel, sidePanelDockMotion } from '../chat/sidePanelMount'
 import SidePanel, { SIDE_PANEL_MIN_W, type SidePanelLeadingTab, type SidePanelWithholdable } from '../chat/SidePanel'
@@ -49,7 +50,7 @@ import { type ChatSlot } from '../../types'
 import { type MembersPageProfileFlight, type MembersPageProfileState } from './MembersPageProfile'
 import { type MembersPageRosterView } from './MembersPageRoster'
 import { type MembersPageThreadState } from './MembersPageThread'
-import { CREW_DASHBOARD_TAB_ID, CREW_PANEL_TAB_IDS, DRIVING_VISIBLE, MEMBERS_UNCONFIRMED_WITHHELD_VIEWS, MEMBERS_WITHHELD_VIEWS, PANEL_GAPS_W, type ProfileCardOpen } from './membersPageModel'
+import { CREW_DASHBOARD_TAB_ID, CREW_PANEL_TAB_IDS, MEMBERS_UNCONFIRMED_WITHHELD_VIEWS, MEMBERS_WITHHELD_VIEWS, PANEL_GAPS_W, type ProfileCardOpen } from './membersPageModel'
 import { type MembersPageDrawers } from './useMembersPageDrawers'
 import { type MembersPageLayout } from './useMembersPageLayout'
 import { type MembersPageNavigation } from './useMembersPageNavigation'
@@ -114,8 +115,7 @@ export function useMembersPageSidePanel({
   // on every WS slots frame and `lastActivityEpoch` advances whenever a worker
   // does anything, so sorting per render moves rows under the cursor mid-click —
   // and each row is a jump into a session, so a shifted row navigates into the
-  // WRONG one. It also decides which rows sit behind the DRIVING_VISIBLE fold,
-  // so a live re-sort can pull a row out from under the pointer entirely.
+  // WRONG one.
   // Row CONTENT still updates from every frame (status dot, title, timestamp);
   // only the positions hold, until the driven set changes (a worker opens or
   // closes) or the member does, either of which re-sorts from scratch by
@@ -235,13 +235,6 @@ export function useMembersPageSidePanel({
     if (!unmountsCard || !schedAtStakeRef.current()) { focus(); return }
     void schedGuardRef.current().then((ok) => { if (ok) focus() })
   }, [tabsCtl, beside, setDockedOpen, profile, schedAtStakeRef, schedGuardRef, setOverlayOpen, setProfile])
-  // The spawn_run launch card's "Open Subagents panel" (the one tool row a
-  // crewmate's chat draws, #21138). On the chat page the card drives the chat
-  // store's panel; here the panel is this page's own tab model, so the card
-  // takes this opener — the same reveal-and-focus path the Workspace tile
-  // uses for Files — and never touches `chat.activeSlot`, which this page
-  // deliberately leaves alone.
-  const openSubagentsView = useCallback(() => openCrewView('subagents'), [openCrewView])
   // Session routing inside the DM transcript. A crewmate's prose names sessions
   // constantly -- "picked this up in `chat-2235-…`", a `/chat?sid=…` link to the
   // worker it dispatched -- and until now every one of those was inert here
@@ -254,7 +247,10 @@ export function useMembersPageSidePanel({
   // snapshot has arrived and the socket is up: absent means "this surface does
   // not know which sessions exist", which is the honest answer then, and it
   // leaves the link plain rather than live-looking and dead.
-  const sessionRoster = useMemo(() => sessionTitleRoster(liveSlots), [liveSlots])
+  // Rebuilt on a language switch too: the roster's "Untitled session" label is localized (#23059).
+  const languageGeneration = useLanguageGeneration()
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- languageGeneration is the trigger, not an input
+  const sessionRoster = useMemo(() => sessionTitleRoster(liveSlots), [liveSlots, languageGeneration])
   // A foreign slot is NOT hosted in this page's own pane -- it belongs to the
   // chat page, with its sidebar, its history paging and its composer. Same
   // primitive the Driving-sessions rows use.
@@ -435,12 +431,6 @@ export function useMembersPageSidePanel({
     committedDrivingRef.current = { member: activeMemberKey, keys }
     return keys.map((k) => byKey.get(k)).filter((s): s is (typeof mine)[number] => !!s)
   }, [liveSlots, activeMemberKey])
-  // Collapsed past DRIVING_VISIBLE rows. Keyed to the member: the fold is a
-  // reading position in ONE member's list, so switching members starts the
-  // next list folded rather than inheriting the previous member's expansion.
-  const [drivingExpandedFor, setDrivingExpandedFor] = useState('')
-  const drivingExpanded = drivingExpandedFor === activeMemberKey
-  const visibleDriving = drivingExpanded ? drivingSessions : drivingSessions.slice(0, DRIVING_VISIBLE)
   // A PREVIEW LINK -- `?dashboard=preview`, the link `dashboard_preview` hands the
   // crewmate to show the person -- opens the side panel on the Dashboard tab, where
   // the staged page is drawn under its preview label. Once per crewmate and strip
@@ -488,12 +478,12 @@ export function useMembersPageSidePanel({
 
   return {
     panelDefaultW, profileCardW, activeMemberKey, tabsCtl, projectDir, hiddenViews, openMemberSideChat,
-    openCrewWorkLog, openCrewView, openSubagentsView, sessionRoster, retryThreadsFlag, threadsFlagFailed, threadsFlagRetrying,
+    openCrewWorkLog, openCrewView, sessionRoster, retryThreadsFlag, threadsFlagFailed, threadsFlagRetrying,
     threadsOn, openThreadMid, threadsQuery, closeReplyThread, threadHooks, setShownTabId, schedAtStake,
     setSchedAtStake, schedReleased, schedulesMountedRef, dashboardVisitedFor, closeOverlay, sidePanelOnScreen,
     sidePanelHiddenNow, actionError, setActionError, actionInfo, showActionError, revealPanelAfterOpen, openArtifact,
     openFile, openWorkingTreeDiff, saveFile, submitComments, runInTerminalScope, openFileGuarded, openArtifactGuarded,
-    openSessionGuarded, drivingSessions, setDrivingExpandedFor, drivingExpanded, visibleDriving,
+    openSessionGuarded, drivingSessions,
     dashboardPreviewLink, focusPanelTab, leaveDashboardPreview, requestCloseOverlay,
   }
 }

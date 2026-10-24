@@ -17,9 +17,10 @@ from kiro_crew.image_refs import strip_image_refs
 from kiro_crew.llm_helpers import _steer_host_deny
 from kiro_crew.providers.base import EVENT_COMPLETE, EVENT_PERMISSION_REQUEST, EVENT_TEXT_CHUNK
 from kiro_crew.security import (
+    _URL_RE,
     contains_injection,
     redact_credentials,
-    redact_exfiltration_urls,
+    redact_exfiltration_urls_with_records,
 )
 from kiro_crew.sel import sel
 
@@ -34,6 +35,10 @@ _OPTIMIZER_DENY_REASON = (
     "the prompt optimizer runs no tools: it only rewrites the prompt it was "
     "given and answers with text, so every tool call is refused here"
 )
+
+#: Sentence punctuation ``_URL_RE`` can include at the end of a match. Stripped
+#: from both the draft's URLs and the redacted addresses before they are compared.
+_URL_TRAILING_PUNCT = ".,;:!?]"
 
 # Placeholder the frontend collapses large pastes into (mirrors formatToken in
 # pasteTokens.ts: "[ Paste #N · M lines ]"). The middle dot is U+00B7. Captured
@@ -127,6 +132,36 @@ def _paste_token_counts(text: str) -> Counter:
     still present, but the exact string no longer matches so the token is left
     unexpanded) both change this multiset and are rejected."""
     return Counter(m.group(0) for m in PASTE_TOKEN_REGEX.finditer(text))
+
+
+# The zero-width stable-id run inside a paste token (see PASTE_TOKEN_REGEX).
+_PASTE_ID_RUN_REGEX = re.compile(r"\u2063[\u200b\u200c]+\u2063")
+
+
+def _restore_paste_ids(optimized: str, prompt: str) -> str:
+    """Put each paste token in *optimized* back to the exact string the draft used.
+
+    The stable id is an invisible bit run the model cannot be relied on to copy,
+    and a rewrite that drops or garbles it still names the same visible paste.
+    So every token the model wrote is matched by its VISIBLE form
+    (``[ Paste #N · M lines ]``) and replaced with the draft's own full token,
+    id run and all. Only a visible form that maps to exactly ONE full token in
+    the draft is rewritten; when two draft tokens look the same but carry
+    different ids, the model's spelling is kept untouched, so the exact-string
+    multiset guard still decides for them. This never adds or removes a token,
+    so a dropped, duplicated or re-counted placeholder is still rejected by
+    that guard."""
+    by_visible: dict[str, set[str]] = {}
+    for m in PASTE_TOKEN_REGEX.finditer(prompt):
+        by_visible.setdefault(_PASTE_ID_RUN_REGEX.sub("", m.group(0)), set()).add(m.group(0))
+
+    def _swap(m: re.Match[str]) -> str:
+        full = by_visible.get(_PASTE_ID_RUN_REGEX.sub("", m.group(0)))
+        if full is not None and len(full) == 1:
+            return next(iter(full))
+        return m.group(0)
+
+    return PASTE_TOKEN_REGEX.sub(_swap, optimized)
 
 
 def _build_pasted_content_block(pastes: object, referenced_seqs: set[str], nonce: str) -> str:
@@ -408,7 +443,10 @@ async def handle_optimize(request: web.Request) -> web.Response:
     # its "· M lines" text (seq present but the exact string no longer matches,
     # so the token is left unexpanded) would pass yet corrupt the submitted
     # prompt. Require the full-token multiset to match exactly; otherwise discard
-    # the rewrite and keep the original.
+    # the rewrite and keep the original. The invisible stable-id run is not the
+    # model's to reproduce, so each token is first put back to the draft's own
+    # spelling by its visible form (_restore_paste_ids) and only then compared.
+    optimized = _restore_paste_ids(optimized, prompt)
     if prompt_paste_tokens != _paste_token_counts(optimized):
         logger.warning(
             "Optimizer altered paste placeholder(s) (expected %s, got %s) — "
@@ -418,8 +456,21 @@ async def handle_optimize(request: web.Request) -> web.Response:
         )
         return web.json_response({"optimized": prompt, "changed": False})
 
-    # Redact any exfiltration URLs or credentials from LLM output
-    optimized, _ = redact_exfiltration_urls(optimized)
+    # Redact any exfiltration URLs or credentials from LLM output. When the pass
+    # removes a URL the user wrote in the draft, the rewrite would hand back a
+    # placeholder for their own link, so keep the draft instead. Nothing in the
+    # model's text is exempted: the whole reply is redacted either way. A URL
+    # match can swallow the sentence punctuation after it, so both sides drop
+    # trailing ``.,;:!?]`` before the comparison; a looser match only ever
+    # keeps the user's own draft.
+    removed: list[tuple[str, str]] = []
+    optimized, _, _ = redact_exfiltration_urls_with_records(optimized, removed_out=removed)
+    draft_urls = {m.group(0).rstrip(_URL_TRAILING_PUNCT) for m in _URL_RE.finditer(prompt)}
+    if any(address.rstrip(_URL_TRAILING_PUNCT) in draft_urls for address, _ in removed):
+        logger.info("Optimizer rewrite redacted a URL from the draft; returning original")
+        return web.json_response(
+            {"optimized": prompt, "changed": False, "reason": "draft_url_redacted"}
+        )
     optimized, _ = redact_credentials(optimized)
 
     changed = optimized.lower().strip() != prompt.lower().strip()

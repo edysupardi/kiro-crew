@@ -35,12 +35,9 @@ from dataclasses import replace as dataclasses_replace  # noqa: F401 - owners re
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
-# The owners the hook subsystem's rules live in, and the names they define. Every
-# one is re-exported here unchanged: ``kiro_crew.hooks`` is the import path and the
-# patch surface for all of them, and ``compose`` at the foot of this module runs each
-# of their functions on these globals. See :mod:`kiro_crew.hook_runtime`.
-from kiro_crew import hook_runtime as _hook_runtime
 from kiro_crew import jsonl_util, pinned_fs, platform_compat, security, webhooks  # noqa: F401
+from kiro_crew._facade_compose import compose as _facade_compose
+from kiro_crew._facade_compose import rebind as _facade_rebind
 
 # The xattr ACL-carry policy is shared with atomic_write.atomic_write: both
 # install a fresh inode and must reproduce the source's access controls or
@@ -58,6 +55,11 @@ from kiro_crew.config import paths as _config_paths
 # one copy, owned with the other config field coercers. Re-exported here because
 # ``dashboard/handlers/security.py`` imports it from this module.
 from kiro_crew.config.fields import _coerce_bool  # noqa: F401
+
+# The owners the hook subsystem's rules live in, and the names they define. Every
+# one is re-exported here unchanged: ``kiro_crew.hooks`` is the import path and the
+# patch surface for all of them, and ``compose`` at the foot of this module runs each
+# of their functions on these globals. See :mod:`kiro_crew.hook_runtime`.
 from kiro_crew.hook_runtime import denied_commands as _owner_denied_commands
 from kiro_crew.hook_runtime import descriptor_identity as _owner_descriptor_identity
 from kiro_crew.hook_runtime import gate_tiers as _owner_gate_tiers
@@ -149,6 +151,7 @@ from kiro_crew.hook_runtime.pinned_writes import (  # noqa: F401
     verified_replace_file_nolink,
 )
 from kiro_crew.hook_runtime.safe_reads import (  # noqa: F401
+    PathDecline,
     safe_copy_file_nolink,
     safe_file_identity,
     safe_read_file,
@@ -156,6 +159,8 @@ from kiro_crew.hook_runtime.safe_reads import (  # noqa: F401
     safe_read_file_bytes_nolink,
     safe_read_file_bytes_with_identity,
     safe_read_prefix,
+    screen_file_path,
+    screen_windows_linked_ancestors,
     stat_identity,
     validate_file_path,
 )
@@ -187,7 +192,9 @@ from kiro_crew.hook_runtime.tool_identity import (  # noqa: F401
     _builtin_app_for_agent,
     _context_matches,
     _has_global_inline_flags,
+    _host_builtin_alias,
     _is_declared_builtin_mcp_server,
+    _is_deepseek_read_only_builtin,
     _is_first_party_app,
     _is_harness_read_only_builtin,
     _is_host_read_only_builtin,
@@ -230,6 +237,9 @@ from kiro_crew.platform.governance import (
 # / ``hooks.target_paths`` (and the work caps) stay importable at their historic
 # names; hooks keeps its HARD-DENY reading of ``TargetPaths.truncated``.
 from kiro_crew.platform.tool_names import (  # noqa: F401  (read by hook_runtime owners)
+    DEEPSEEK_READ_ONLY_TOOLS,
+    KIRO_TOOL_ALIASES,
+    deepseek_policy_alias,
     policy_alias_split,
     policy_aliases,
 )
@@ -249,6 +259,7 @@ from kiro_crew.security import (  # noqa: F401 - the path owners read these
     is_sensitive_write_path,
     is_unverifiable_path_refusal,
     sensitive_path_refusal,
+    sensitive_write_path_refusal,
 )
 from kiro_crew.security.readonly_bash import (  # noqa: F401 - the owners read them
     command_invokes_git,
@@ -719,6 +730,7 @@ class HookManager:
         mcp_identity_unreadable: bool = False,
         kas_builtin_ids: bool = False,
         harness_builtin_tool: str = "",
+        deepseek_tool_name: str = "",
         spawn_target: str = "",
         resolved_agent: str = "",
         classifier_only: bool = False,
@@ -752,6 +764,7 @@ class HookManager:
                 identity_unreadable=mcp_identity_unreadable,
                 kas_builtin_ids=kas_builtin_ids,
                 harness_builtin_tool=harness_builtin_tool,
+                deepseek_tool_name=deepseek_tool_name,
                 spawn_target=spawn_target,
                 resolved_agent=resolved_agent,
             ),
@@ -827,26 +840,12 @@ _READ_ONLY_TOOL_KINDS: frozenset[str] = frozenset({"read", "fetch"})
 # Every name here maps to a read scope in ``governance.BUILTIN_TOOL_SCOPES``
 # (``filesystem.read`` / ``network.egress``) and never to ``filesystem.write``
 # or ``commands`` — ``test_host_read_only_builtins_map_only_to_read_scopes``
-# (``test/test_hooks.py``) pins that, so a write-capable built-in (``code``,
+# (``test/test_hooks_trusted_identity.py``) pins that, so a write-capable built-in (``code``,
 # ``fs_write``) cannot join by mistake. Add conservatively: an entry here runs
 # unattended on a surface with no approver.
 _HOST_READ_ONLY_BUILTIN_TOOLS: frozenset[str] = frozenset(
     {"fs_read", "glob", "grep", "web_fetch", "web_search"}
 )
-
-# kiro-cli's own spellings of the names above. It stamps its file-read built-in
-# ``read``; ``fs_read`` is the alias a spec may still use, and the spelling the
-# allowlist and ``BUILTIN_TOOL_SCOPES`` carry. ``_is_host_read_only_builtin``
-# resolves the stamped name through this table before the membership test, so
-# a value here must be an allowlist name (never a new proof of its own). Only
-# the read-only aliases are spelled here, because the table that owns the
-# mapping (``acp.kas_permissions.KIRO_TOOL_ALIASES``) lives under ``acp`` and
-# the agent-SDK boundary keeps application code off that layer;
-# ``test_host_read_only_aliases_agree_with_kiro_tool_aliases``
-# (``test/test_hooks.py``) joins the two, so a ``write`` or ``shell`` alias
-# cannot join by mistake and a renamed one breaks there rather than silently
-# refusing every file read on a surface with no approver.
-_HOST_READ_ONLY_BUILTIN_ALIASES: Mapping[str, str] = {"read": "fs_read"}
 
 
 # Semantic kinds known to mutate/execute. DOCUMENTATION ONLY — the gate does not
@@ -1177,13 +1176,27 @@ _DRIVE_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
 
 
-def _screen_windows_links(target: str) -> str | None:
+def _screen_windows_links(
+    target: str,
+    read_errors: list[OSError] | None = None,
+    *,
+    follow_leaf: bool = True,
+) -> str | None:
     """Replace Windows links with screened targets before ``realpath``.
 
     ``first_linked_ancestor`` walks root-first without traversing a link.
     Reading that link's own reparse metadata is safe. Replacing the linked
     prefix with its vetted target preserves the remaining child path while
     avoiding the blanket rejection of benign local junctions.
+
+    ``read_errors``, when given, collects the ``OSError`` of a link whose own
+    target could not be read. The path is refused either way; the list tells a
+    caller that this refusal comes from a read that did not complete, not from
+    a target the screen does not accept.
+
+    ``follow_leaf=False`` rewrites linked ancestors only and returns as soon as
+    none is left, so a caller with its own leaf-link rule applies that rule to
+    the returned path's leaf. See :func:`screen_windows_linked_ancestors`.
     """
     for _ in range(_WINDOWS_LINK_CHAIN_MAX):
         if target.count("\\") + target.count("/") > _MAX_SCREENED_PATH_DEPTH:
@@ -1193,6 +1206,13 @@ def _screen_windows_links(target: str) -> str | None:
         if linked is not None:
             try:
                 raw_target = os.readlink(linked)  # lgtm[py/path-injection]
+            except OSError as exc:
+                if read_errors is not None:
+                    read_errors.append(exc)
+                return None
+            except ValueError:
+                return None
+            try:
                 suffix = os.path.relpath(target, linked)
             except (OSError, ValueError):
                 return None
@@ -1204,11 +1224,13 @@ def _screen_windows_links(target: str) -> str | None:
             target = os.path.normpath(os.path.join(normalized, suffix))
             continue
 
-        if not platform_compat.is_link_or_junction(target):
+        if not follow_leaf or not platform_compat.is_link_or_junction(target):
             return target
         try:
             raw_target = os.readlink(target)  # lgtm[py/path-injection]
-        except OSError:
+        except OSError as exc:
+            if read_errors is not None:
+                read_errors.append(exc)
             return None
         normalized = _normalize_windows_link_target(target, raw_target)
         if normalized is None:
@@ -1222,7 +1244,14 @@ MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB safety cap
 
 
 class FileTooLargeError(Exception):
-    """Raised when a file exceeds MAX_FILE_BYTES."""
+    """Raised when a file exceeds MAX_FILE_BYTES or a caller's own byte cap.
+
+    *size* is the measured size in bytes when the raiser knows it, else ``None``.
+    """
+
+    def __init__(self, *args: object, size: int | None = None) -> None:
+        super().__init__(*args)
+        self.size = size
 
 
 # ---------------------------------------------------------------------------
@@ -1612,7 +1641,7 @@ _global_script_hook_store: ScriptHookStore | None = None
 # including the two UNC root memos primed above, which stay here because a priming
 # call to an owner function would run before this line and write its memo into the
 # owner's namespace.
-_hook_runtime.compose(
+_facade_compose(
     globals(),
     (
         _owner_denied_commands,
@@ -1640,7 +1669,7 @@ setattr(
     ScriptHookStore,
     "_atomic_mutation",
     contextmanager(
-        _hook_runtime._rebind(vars(ScriptHookStore)["_atomic_mutation"].__wrapped__, globals())
+        _facade_rebind(vars(ScriptHookStore)["_atomic_mutation"].__wrapped__, globals())
     ),
 )
 

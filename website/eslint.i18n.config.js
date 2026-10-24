@@ -274,6 +274,13 @@ export default [
       // Key glyphs / key-cap names only (⌘ ⇧ ⌥ / Ctrl Win Alt) — a machine
       // grammar the OS parses, not translatable copy. Same rationale as above.
       'src/apps/mochi/src/shared/shortcut.ts',
+      // Two DOM `KeyboardEvent.key` protocol values ('Backspace'/'Delete') the
+      // composer's atomic @mention delete compares against (#18186) — physical
+      // key names, never rendered copy. Same key-name do-not-translate rationale
+      // as `shortcut.ts` above; the module is export-only (imports nothing, no DOM
+      // or render path), so the filename IS the boundary and its consumer
+      // `LexicalComposerInput.tsx` stays fully covered.
+      'src/components/domDeleteKeys.ts',
       // CSS text injected through <style>; a stylesheet is not translatable copy.
       'src/apps/spec-builder/inlineStyles.ts',
       // Inline `style.cssText` declarations for the fixed auth banners in
@@ -310,6 +317,18 @@ export default [
       // module parser-facing only, and keep it DOM-free, which is the property
       // that makes that easy to check.
       'src/hooks/themeCss.ts',
+      // The Paste CSS tab's parser and serialiser: every literal is stylesheet
+      // text (the `.dark` / `.light` block template, the placeholder's sample
+      // values) or a CSS pattern, handed to a CSS reader, never shown as words.
+      // The parse result carries property NAMES and counts, not sentences; the
+      // tab's messages are resolved from the catalog in `themeEditor.tsx`, which
+      // stays fully gated.
+      //
+      // Verified copy-free by the same mechanical boundary as `themeCss.ts`
+      // above: no `i18nT` / `useTranslation` import, no JSX, no DOM access.
+      // Stated as a false-negative class: copy added to THIS path will not be
+      // reported, so keep it data in, data out.
+      'src/lib/themeCssImport.ts',
       // The Kiro-ghost avatar generator's art tables. Every literal in the module
       // is SVG handed to the SVG parser: the shipped mark's `d` path data, the
       // per-part fragments built from it, and the hex tile colors. Translating any
@@ -327,6 +346,17 @@ export default [
       // user-visible copy ever added to THIS path will not be reported — keep the
       // module parser-facing only, and keep it DOM-free.
       'src/lib/kiroGhostAvatar.ts',
+      // The icon-tier pose composer, by the same boundary: its literals are the
+      // SVG group wrapper that puts a pose under the ghost's body motion
+      // (`<g class="kg-bob">…`) and a background fill — markup handed to the SVG
+      // parser, where a translated tag name renders a blank tile. It imports the
+      // pose art as raw text, imports no `i18nT` / `useTranslation`, and touches
+      // no DOM; every export is data in, SVG `string` out, consumed by the same
+      // fully gated `components/CrewAvatar.tsx` behind `alt=""` / `aria-hidden`.
+      //
+      // Same false-negative class as the ghost: copy added to THIS path is not
+      // reported, so keep it parser-facing and DOM-free.
+      'src/lib/avatarPoses.ts',
       // Same rationale, different convention: this app keeps its seed prompts in a
       // dedicated `lib/prompts.ts` rather than a `*Prompt.ts` file. Also prompt
       // payload sent over the wire, never rendered.
@@ -915,13 +945,14 @@ export default [
               // the same reason and enforced there by `glossary.test.ts`: "GitLab" is
               // "GitLab" in every language, and a localized spelling would name a
               // product that does not exist. They reach the UI as the provider name in
-              // Issue Radar's connect picker and as the `{{provider}}` value
-              // interpolated into its refresh tooltips, so the bare brand is the whole
+              // Issue Radar's connect picker, as the `{{provider}}` value
+              // interpolated into its refresh tooltips, and as the source provider's
+              // name in the pull-request panel header, so the bare brand is the whole
               // literal. Whole-value-anchored like the entry above, so a sentence that
               // merely mentions a forge is still reported — only the bare name is
               // exempt, and the sentences AROUND it stayed in the catalog (that is
               // what `{{provider}}` is for).
-              '^(GitHub|GitLab|Azure DevOps)$',
+              '^(GitHub|GitLab|Azure DevOps|Bitbucket Server)$',
               // The PPTX Maker chat-token KEYWORDS (`[Style: name]`,
               // `[Template: name]`). Enumerated and whole-value-anchored, exactly like
               // the modifier-key caps below: the agent prompts parse this literal
@@ -1296,6 +1327,22 @@ export default [
   // for `src/lib/**` would silence real copy in its neighbours.
   {
     files: ['src/lib/commitProfiler.tsx'],
+    rules: {
+      'i18next/no-literal-string': 'off',
+    },
+  },
+
+  // Debug-only developer diagnostics, same class as `commitProfiler.tsx` above:
+  // `startDashboardLoadTiming` emits the Dashboard-tab load step timers (#20952)
+  // to the browser console and the User Timing panel for whoever is profiling,
+  // never to a user through the UI. The format of each line IS the interface
+  // (`[dashboard-timing] member:oncall step2-sandbox-post +18ms (t=42ms)`), so a
+  // localised copy would destroy the only property that makes it useful, exactly
+  // as it would for a `console.log`. Whole-file and scoped to this one module,
+  // which renders nothing and holds only these diagnostics; product copy added
+  // here later belongs in the catalog, not under this exemption.
+  {
+    files: ['src/lib/dashboardTiming.ts'],
     rules: {
       'i18next/no-literal-string': 'off',
     },

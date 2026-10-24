@@ -2,7 +2,8 @@
 
 ``run_gateway`` with its boot preflight (the token signing key) and the background
 sweeps it starts (KAS kiro-cli floor, predecessor work directories, orphaned
-read-only specs).
+read-only specs), and the remote session environments' retention sweeper with its
+shutdown stop.
 
 Orchestrator fields read: none.
 Orchestrator fields written: none.
@@ -23,8 +24,6 @@ if TYPE_CHECKING:
     import threading
 
     from kiro_crew.slack.gateway import (
-        _SIGNING_KEY_PREFLIGHT_TIMEOUT_SECS,
-        BOOT_RESTART_HINT,
         Any,
         GatewayOrchestrator,
         KiroCrewConfig,
@@ -53,6 +52,7 @@ if TYPE_CHECKING:
     _AGENTS_JANITOR_TASK: asyncio.Task[None] | None
     _AGENT_SCRATCH_SWEEP_TASK: asyncio.Task[None] | None
     _KIRO_CLI_LOG_CAP_TASK: asyncio.Task[None] | None
+    _CODER_RETENTION_TASK: asyncio.Task[None] | None
 
 
 def _live_session_work_dirs(sessions: Any) -> list[str]:
@@ -162,7 +162,28 @@ def signing_key_preflight() -> None:
     alone when an earlier caller already memoized the secret.
     Blocking filesystem I/O: call it off the event loop.
     """
-    state, key_path = token_secret.signing_key_health()
+    # The single confinement probe (sandbox.agent_confinement_evidence) reads the
+    # kirocrew-agents.slice cgroup on Linux, so a masked key inside the sandbox is
+    # not read as truncated here. Local import: cli.main() has popped the launcher
+    # marker by now, and token_secret keeps kiro_crew.sandbox off its import chain,
+    # so the caller supplies the verdict.
+    #
+    # Two bits, so a FOREIGN macOS Seatbelt sandbox (one Kiro Crew did not create,
+    # which can leave the real key readable) does not skip the truncated-key
+    # refusal: masked requires the open to be refused ONLY when the sole signal is
+    # the Seatbelt verdict (agent_confinement_is_kirocrew_own() is false). Inside
+    # Kiro Crew's own sandbox the key is masked regardless of readability — the
+    # Linux mask falls back to a readable empty stand-in when its tmpfs mount fails.
+    from kiro_crew.sandbox import (
+        agent_confinement_evidence,
+        agent_confinement_is_kirocrew_own,
+    )
+
+    confined = agent_confinement_evidence() is not None
+    state, key_path = token_secret.signing_key_health(
+        confined=confined,
+        require_denied_open=confined and not agent_confinement_is_kirocrew_own(),
+    )
     if state in ("ok", "absent", "short", "unstatable"):
         loaded = token_secret.load_boot_secret()
         if loaded in ("loaded", "short"):
@@ -196,19 +217,113 @@ def _start_kas_cli_floor(cfg: KiroCrewConfig) -> "asyncio.Task[None]":
     the gateway binds without waiting for it. Until it lands, a configured KAS
     stays selected, which is also what a check that cannot run leaves. Failure is
     logged and contained: the backend stays as configured.
+
+    Resolved KAS roles arm :mod:`kiro_crew.agent_sdk.kas_floor_wait` using only
+    in-memory fields. The task reads stored declarations off-loop and releases
+    explicit choices before probing. Defaulted roles wait for the verdict
+    (bounded) instead of starting KAS on a kiro-cli that rejects it. Boot itself
+    never waits for either the declaration read or the probe.
     """
     global _KAS_CLI_FLOOR_TASK
+    from kiro_crew.acp_backends import ACP_BACKEND_KAS
+    from kiro_crew.agent_sdk import kas_floor_wait
 
     async def _run() -> None:
         try:
-            await asyncio.to_thread(apply_kas_cli_floor, cfg)
+            main_default, member_default = await asyncio.to_thread(_kas_floor_gates_spawns, cfg)
+            kas_floor_wait.release_kas_floor_wait(
+                task, main=not main_default, member=not member_default
+            )
+            kas_defaulted = (
+                (main or member) and (not main or main_default) and (not member or member_default)
+            )
+            await asyncio.to_thread(apply_kas_cli_floor, cfg, kas_defaulted=kas_defaulted)
         except Exception:
             logging.getLogger(__name__).warning(
                 "KAS kiro-cli floor check failed; continuing", exc_info=True
             )
 
-    _KAS_CLI_FLOOR_TASK = asyncio.create_task(_run(), name="kas-cli-floor")
+    agent = getattr(cfg, "agent", None)
+    bundle = getattr(agent, "kas_bundle", False)
+    main = not bundle and getattr(agent, "acp_backend", None) == ACP_BACKEND_KAS
+    member = not bundle and getattr(agent, "member_acp_backend", None) == ACP_BACKEND_KAS
+    task = asyncio.create_task(_run(), name="kas-cli-floor")
+    _KAS_CLI_FLOOR_TASK = task
+    kas_floor_wait.arm_kas_floor_wait(task, main=main, member=member)
     return _KAS_CLI_FLOOR_TASK
+
+
+def _kas_floor_gates_spawns(cfg: KiroCrewConfig) -> tuple[bool, bool]:
+    """Read off-loop whether each role must keep waiting for the probe.
+
+    An explicit backend choice releases its role, and the bundle route, which
+    the floor never probes, gates neither. A config that cannot be read releases
+    both roles, leaving the spawn's configured backend unchanged.
+    """
+    from kiro_crew.acp_backends import ACP_BACKEND_KAS
+
+    agent = getattr(cfg, "agent", None)
+    if getattr(agent, "kas_bundle", False):
+        return False, False
+    kas_main = getattr(agent, "acp_backend", None) == ACP_BACKEND_KAS
+    kas_member = getattr(agent, "member_acp_backend", None) == ACP_BACKEND_KAS
+    if not (kas_main or kas_member):
+        return False, False
+    try:
+        from kiro_crew.config.loader import acp_backend_declared, member_acp_backend_declared
+
+        return (
+            kas_main and not acp_backend_declared(),
+            kas_member and not member_acp_backend_declared(),
+        )
+    except Exception:
+        logging.getLogger(__name__).debug("backend declared-check failed", exc_info=True)
+        return False, False
+
+
+def _start_coder_retention(cfg: KiroCrewConfig) -> None:
+    """Activate the optional Coder subsystem only after readiness/configuration."""
+    global _CODER_RETENTION_TASK
+    from kiro_crew.session_environment import session_environments_enabled
+
+    if not session_environments_enabled() or not cfg.session_environments.coder_url:
+        return
+    if _CODER_RETENTION_TASK is not None and not _CODER_RETENTION_TASK.done():
+        return
+
+    async def run() -> None:
+        from kiro_crew.coder.retention import run_sweeper
+
+        await run_sweeper()
+
+    _CODER_RETENTION_TASK = asyncio.create_task(run(), name="coder-retention")
+
+
+async def _stop_session_environments() -> None:
+    """Stop the remote session environments on shutdown; bounded, never raises."""
+    sweeper = _CODER_RETENTION_TASK
+    if sweeper is None:
+        return
+    if not sweeper.done():
+        sweeper.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweeper
+    try:
+        from kiro_crew.coder.retention import (
+            SHUTDOWN_STOP_SECS,
+            stop_for_shutdown,
+            stop_on_shutdown_enabled,
+        )
+
+        if not await stop_on_shutdown_enabled():
+            # Fast restarts chosen: each guest still stops on its own once no gateway
+            # reaches it (the worker's orphan timeout).
+            return
+        await asyncio.wait_for(stop_for_shutdown(), timeout=SHUTDOWN_STOP_SECS)
+    except asyncio.TimeoutError:
+        logger.warning("Session environments did not all stop in time; they stop when idle")
+    except Exception:  # noqa: BLE001 -- the gateway exits regardless
+        logger.warning("Session environments shutdown stop failed", exc_info=True)
 
 
 async def run_gateway(
@@ -452,7 +567,7 @@ async def run_gateway(
     # Detached daemon thread, NOT awaited: ``beacon.send`` is blocking urllib
     # with a 5s timeout, and boot must never wait on the network (nor pin
     # interpreter exit — hence daemon=True, matching the model-download helper's
-    # reasoning in embeddings.py). Errors are swallowed inside ``send``; a failed
+    # reasoning in embeddings_download.py). Errors are swallowed inside ``send``; a failed
     # heartbeat is invisible by design. ``test_mode`` skips it entirely so the
     # offline E2E gate can never make an outbound request.
     #
@@ -494,3 +609,14 @@ async def run_gateway(
         # Includes failures before READY, when the restore worker was never
         # scheduled. Release only this gateway's latch after closing its handle.
         await asyncio.to_thread(orchestrator._stop_memory_startup)
+
+
+# Restart step named by the boot refusal. Deliberately static: probing for the
+# installed service would stat HOME, which may be a hung network mount.
+BOOT_RESTART_HINT = "kirocrew restart"
+
+
+# Boot deadline for the signing-key preflight. Its lstat and key load normally
+# take milliseconds (the loader's own retry budget is well under a second), so a
+# preflight still running at this point is stuck on the filesystem.
+_SIGNING_KEY_PREFLIGHT_TIMEOUT_SECS = 30.0

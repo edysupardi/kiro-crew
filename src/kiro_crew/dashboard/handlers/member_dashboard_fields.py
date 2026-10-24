@@ -43,7 +43,7 @@ import threading
 import uuid
 from typing import Any, Callable, Final, Mapping
 
-from kiro_crew.dashboard_templates.manifest import FieldSpec, TemplateManifest
+from kiro_crew.dashboard_templates.manifest import FieldSpec, Shape, TemplateManifest
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,15 @@ def package_manifest(
                 continue
             kind = _TYPE_MAP.get(str(spec.get("type") or ""), "string")
             if source.get("agentic") is True:
-                fields[name] = FieldSpec(name, kind, None, None, True, None)
+                # An `enum` field keeps its declared choices as the shape's `enum`, so
+                # the write's own shape check refuses a value outside the catalog.
+                choices = spec.get("choices") if spec.get("type") == "enum" else None
+                shape = (
+                    Shape(kind, enum=tuple(choices))
+                    if isinstance(choices, list) and choices
+                    else None
+                )
+                fields[name] = FieldSpec(name, kind, None, None, True, shape)
                 continue
             fold = str(source.get("fold") or "")
             path = str(source.get("path") or "")
@@ -510,7 +518,35 @@ def render_package_page(
     # validator's answer is about the page that was written.
     if not scripts:
         html = dashboard_frame.fill_bindings_as_text(html, read)
-    return dashboard_frame.compose_body(html, read)
+    return dashboard_frame.compose_body(_theme_style(package) + html, read)
+
+
+def _theme_style(package: Mapping[str, Any]) -> str:
+    """The package's ``theme`` as a ``<style>`` element ahead of its page, or ``""``.
+
+    After the host's own stylesheet, which :func:`~kiro_crew.dashboard_frame.compose_body`
+    puts first, so a token the package sets wins over the host's default for it. A theme
+    the gate would refuse draws nothing, so the page still renders in the host's look.
+    Redacted the way the page's markup is (``member_dashboard._template_text_safe``).
+    """
+    from kiro_crew.artifact_store.dashboard_package import theme_stylesheet
+    from kiro_crew.artifact_store.model import ArtifactValidationError
+
+    raw = package.get("theme")
+    if raw is None:
+        return ""
+    try:
+        sheet = theme_stylesheet(raw)
+    except ArtifactValidationError:
+        logger.warning("dashboard package theme refused at render; drawing the page without it")
+        return ""
+    if not sheet:
+        return ""
+    # Scrubbed like the page's own markup: the crewmate wrote the tokens and the css,
+    # and this text leaves in the page the read route returns.
+    from kiro_crew.dashboard.handlers.member_dashboard import _template_text_safe
+
+    return _template_text_safe(f"<style>{sheet}</style>\n")
 
 
 #: What the script-grant audit calls a page that is staged and has no artifact of its own.
@@ -519,9 +555,9 @@ _STAGED: Final[str] = "(staged)"
 
 
 def authored_html(package: Mapping[str, Any]) -> str | None:
-    """The page an agent wrote as ``view.html``, or ``None`` for a block layout.
+    """The page an agent wrote as ``view.html``, or ``None`` when *package* has none.
 
-    A block layout has no script of its own, so there is nothing to run.
+    A canonical package always has one; ``None`` answers a view that is not a page.
     """
     view = package.get("view")
     html = view.get("html") if isinstance(view, Mapping) else None
@@ -537,11 +573,11 @@ def verify_package_page(
 ) -> dict[str, Any] | None:
     """Run an authored page once over a SYNTHETIC copy of *crew*'s read; the result in wire form.
 
-    ``None`` when the package draws from blocks. Otherwise the wire form of a
+    ``None`` when the package holds no page. Otherwise the wire form of a
     :class:`~kiro_crew.dashboard_verify.Verification`, which says ``passed``, ``failed``
     with each error and where it was thrown, ``timed_out`` or ``skipped`` with the reason.
 
-    The page is staged and no person has approved it, so it is never given the record: the
+    The page is only saved and may never go live, so it is never given the record: the
     read is taken here exactly as the tab is served it (:meth:`LivePage.arm` over the same
     manifest, redaction and folds, then disarmed), and ``dashboard_verify`` copies it into
     a record of the same shape with invented values and runs the page over that. *package*

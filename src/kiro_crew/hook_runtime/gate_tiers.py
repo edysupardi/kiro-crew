@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from kiro_crew.hooks import (
         _GATE_TIER_KINDS,
-        _HOST_READ_ONLY_BUILTIN_ALIASES,
         _READ_ONLY_TOOL_KINDS,
         GateRule,
         GateTier,
@@ -35,7 +34,9 @@ if TYPE_CHECKING:
         _builtin_app_for_agent,
         _cu_read_only_auto_approve,
         _governance_denial,
+        _host_builtin_alias,
         _is_declared_builtin_mcp_server,
+        _is_deepseek_read_only_builtin,
         _is_first_party_app,
         _is_harness_read_only_builtin,
         _is_host_read_only_builtin,
@@ -46,16 +47,18 @@ if TYPE_CHECKING:
         audit_bash_exfiltration,
         command_invokes_git,
         current_context,
+        deepseek_policy_alias,
         edit_target_candidates,
         is_edit_call,
         is_read_only_bash,
         is_sensitive_bash_command,
-        is_sensitive_write_path,
+        is_unverifiable_path_refusal,
         mcp_identity_ref,
         policy_alias_split,
         policy_aliases,
         security,
         sensitive_path_refusal,
+        sensitive_write_path_refusal,
         target_paths,
         title_is_trusted_mcp_identity,
         untruncated_shell_title,
@@ -334,19 +337,20 @@ class GateFacts:
                 targets.append(self.canonical_mcp_name)
             if call.mcp_tool and call.mcp_tool not in targets:
                 targets.append(call.mcp_tool)
-            # kiro-cli stamps ``read`` where a rule is written ``fs_read``; the
-            # read-only proof resolves that alias, so a rule must reach it too.
-            # Built-ins only: a server's own tool called ``read`` is not the
-            # host's file reader, and the proof excludes it the same way.
-            alias = (
-                "" if call.mcp_server else _HOST_READ_ONLY_BUILTIN_ALIASES.get(call.mcp_tool, "")
-            )
+            alias = _host_builtin_alias(call.mcp_tool, call.mcp_server)
             if alias and alias not in targets:
                 targets.append(alias)
             # claude states no _meta.kiro identity, so this is the only form in
             # which a rule written as ``web_fetch`` meets claude's WebFetch.
             if call.harness_builtin_tool and call.harness_builtin_tool not in targets:
                 targets.append(call.harness_builtin_tool)
+            # A deepseek call's own name and its kiro-cli policy name, on the
+            # READ_ONLY turn that may approve it: its permission frame carries no
+            # title, so a rule on ``read`` or ``fs_read`` meets dsh's ``read`` here.
+            deepseek = call.deepseek_tool_name if self.classifier_only else ""
+            for name in (deepseek, deepseek_policy_alias(deepseek)):
+                if name and name not in targets:
+                    targets.append(name)
             if call.command and call.command not in targets:
                 targets.append(call.command)
             for raw_command in self.raw_shell_commands:
@@ -661,10 +665,16 @@ def _tier_write_protected(facts: GateFacts, tier: GateTier) -> ToolHookResult | 
                 "Blocked: file edit names no target path to verify (deny-by-default)"
             )
         for wpath in candidates:
-            if is_sensitive_write_path(wpath):
-                return ToolHookResult.deny(
-                    f"Blocked: modification of write-protected config path: {wpath}"
-                )
+            # Same decision as ``is_sensitive_write_path`` (a stall still refuses);
+            # a stall gets the timed-out wording instead of naming a config file.
+            reason = sensitive_write_path_refusal(wpath)
+            if reason is None:
+                continue
+            if is_unverifiable_path_refusal(reason):
+                return ToolHookResult.deny(reason)
+            return ToolHookResult.deny(
+                f"Blocked: modification of write-protected config path: {wpath}"
+            )
     return None
 
 
@@ -827,29 +837,44 @@ def _tier_governance(facts: GateFacts, tier: GateTier) -> ToolHookResult | None:
     # That id is asked on its own name (``extra_titles``) and ``fs_write`` only for
     # an explicit deny (``deny_aliases``).
     #
-    # Otherwise the trusted name and, where kiro-cli stamped an alias (``read``)
-    # on a built-in, the spelling a rule is written in (``fs_read``) -- the same
-    # spelling the read-only proof resolves it to. A server's own ``read`` is
-    # not the host's file reader and gets no alias. Both in the one query;
-    # neither repeats the title.
+    # A built-in kiro-cli stamped under a short name (``write``) is the same ONE
+    # identity in two spellings, so it is asked the same way: the stamp beside the
+    # spec spelling a rule is written in (``_host_builtin_alias``, the call the
+    # read-only proof resolves it through). Only a provenance-verified stamp may
+    # ADMIT under its alias; an unverified one is asked on its own name and the
+    # alias may only deny. Otherwise just the trusted name; nothing repeats the title.
     identity: tuple[str, ...] = ()
     alias_groups: tuple[tuple[str, ...], ...] = ()
     deny_aliases: tuple[str, ...] = ()
+    alias = _host_builtin_alias(call.mcp_tool, call.mcp_server)
     if facts.policy_alias_names:
         admitting, deny_aliases = policy_alias_split(call.mcp_tool)
         if admitting:
             alias_groups = ((call.mcp_tool, *admitting),)
         elif call.mcp_tool != call.title:
             identity = (call.mcp_tool,)
+    elif alias and call.identity_trusted:
+        alias_groups = ((call.mcp_tool, alias),)
     else:
-        alias = "" if call.mcp_server else _HOST_READ_ONLY_BUILTIN_ALIASES.get(call.mcp_tool, "")
         # claude states no _meta.kiro identity: its read built-in is named by
         # harness_builtin_tool, so a ceiling's deny on web_search binds it too.
         identity = tuple(
             name
-            for name in dict.fromkeys((call.mcp_tool, alias, call.harness_builtin_tool))
+            for name in dict.fromkeys((call.mcp_tool, call.harness_builtin_tool))
             if name and name != call.title
         )
+        if alias:
+            deny_aliases = (alias,)
+        # A deepseek call on the READ_ONLY turn that may approve it: its own name,
+        # and for a read built-in the kiro-cli name beside it as ONE identity, so a
+        # ceiling on either ``read`` or ``fs_read`` binds dsh's ``read`` there.
+        deepseek = call.deepseek_tool_name if facts.classifier_only else ""
+        if deepseek and not call.mcp_server:
+            deepseek_alias = deepseek_policy_alias(deepseek)
+            if deepseek_alias:
+                alias_groups = ((deepseek, deepseek_alias),)
+            elif deepseek != call.title:
+                identity = (*identity, deepseek)
     gov_reason = _governance_denial(
         facts.ctx,
         call.title,
@@ -877,7 +902,7 @@ def _tier_app_own_server(facts: GateFacts, tier: GateTier) -> ToolHookResult | N
     """A FIRST-PARTY (builtin) app agent calling its OWN app-scoped MCP server.
 
     That is intra-app, not a host surface. A builtin app's declared server is
-    registered under the ``<app>:<server>`` key (see ``apps/bridges.py``) and IS the
+    registered under the ``<app>:<server>`` key (see ``apps/bridges_mcp.py``) and IS the
     gateway's own shipped code, so it only touches the app's own data -- never
     fs/network/exec/exfil on the host. Once a shipped app agent stopped
     pre-authorizing tools (no template ``allowedTools``, the "no template
@@ -906,7 +931,7 @@ def _tier_app_own_server(facts: GateFacts, tier: GateTier) -> ToolHookResult | N
     per-app special-casing.
 
     ``_app_owns_mcp_server`` only proves the NAME is ``<app>:``-prefixed;
-    ``_own_mcp_servers`` (bridges.py) injects app servers into the agent by reading
+    ``_own_mcp_servers`` (bridges_agents.py) injects app servers into the agent by reading
     that prefix from the MUTABLE global MCP config, so a ``<app>:evil`` entry that
     landed there (not declared by the app) would otherwise be trusted. The server
     must be DECLARED in the app's SHIPPED manifest
@@ -1149,17 +1174,23 @@ def _tier_read_only(facts: GateFacts, tier: GateTier) -> ToolHookResult | None:
         # which under READ_ONLY refuses.
         if kind and kind not in _READ_ONLY_TOOL_KINDS:
             return ToolHookResult.allow()
-        if _is_host_read_only_builtin(
-            call.mcp_tool,
-            call.mcp_server,
-            mcp_identity_trusted=call.identity_trusted,
-            kas_builtin_ids=call.kas_builtin_ids,
-        ) or _is_harness_read_only_builtin(call.harness_builtin_tool, call.mcp_server):
+        if (
+            _is_host_read_only_builtin(
+                call.mcp_tool,
+                call.mcp_server,
+                mcp_identity_trusted=call.identity_trusted,
+                kas_builtin_ids=call.kas_builtin_ids,
+            )
+            or _is_harness_read_only_builtin(call.harness_builtin_tool, call.mcp_server)
+            or _is_deepseek_read_only_builtin(
+                call.deepseek_tool_name, call.mcp_server, call.raw_params
+            )
+        ):
             return ToolHookResult.auto_approve(read_only=True)
         return ToolHookResult.allow()
     # Trust the SEMANTIC kind, as an ALLOW-list. ``kind`` is passed through
-    # verbatim from the ACP ``kind`` field (``acp/_dispatch.py``), so it is an
-    # arbitrary agent-influenced string and a DENYLIST of mutating kinds can never
+    # verbatim from the ACP ``kind`` field (``acp/_dispatch_parts/permission_requests.py``),
+    # so it is an arbitrary agent-influenced string and a DENYLIST of mutating kinds can never
     # be complete -- ``kind="other"`` is a real ACP value. Only these two spellings
     # mean "this cannot change anything".
     if kind in _READ_ONLY_TOOL_KINDS:

@@ -420,11 +420,13 @@ Each cycle:
    `action=verdict` (with `fails` when you are counting retries).
 
    Verdicts: `pass` / `fail` are final for this cycle. `pending` means keep
-   waiting. `refused` means the spec asked for something the evaluator will not
-   do — most often naming a command, which it does not accept from a spec at all.
-   Re-express the condition as `pr_checks` (or ask the user for a purpose-built
-   kind); never try to route around a refusal. `error` is a broken spec or
-   environment — fix the spec or ask.
+   waiting, within the budget below. `refused` means the spec asked for
+   something the evaluator will not do — most often naming a command, which it
+   does not accept from a spec at all. Re-express the condition as `pr_checks`
+   (or ask the user for a purpose-built kind); never try to route around a
+   refusal. `error` is a broken spec or environment — fix the spec or ask.
+
+   **A `pending` acceptance has a budget.** An item whose `pending_overdue` flag is true has read `pending` for 24 hours on end: a check that never reports, a runner that never frees up, a fork run nobody approves. Evaluate it once more with the rest of the batch, so the evidence you show is current. If it still answers `pending`, surface it the way you surface a `refused` verdict: ask the user with `ask_question`, quoting that evidence, whether to keep waiting or drop it, and do not evaluate it again before they answer. To keep waiting, write its bar again with `action=accept`: that ends the run, so the next `pending` verdict starts a fresh 24 hours. To drop it, close it `abandoned`. Either answer clears the flag, so after a restart or a compaction there is nothing to ask again; a card that expires or is withdrawn is handled as for a `human_approval` item below. Any verdict other than `pending` ends the run too. A `human_approval` item never goes overdue, because it is settled by asking.
 
    **Two-phase acceptance: the server omits the item, you promote the value.** A
    condition may name a value that only exists after the item starts — a PR number for
@@ -624,7 +626,8 @@ Run it before you ask, and run it again on every cycle while the ask is open —
 the item may no longer need it. The risk check comes FIRST: a default never
 settles a risky choice. A `human_approval` item skips steps 1 and 2: its
 acceptance IS a person's answer, so it is always asked (step 3 still parks it
-alone).
+alone). So does a `pending_overdue` item: its budget exists to put it to a
+person.
 
 1. **Is it credentials, spend, deleting or overwriting someone's work, or
    irreversible?** Then do not pick a default for it, even if one exists. If

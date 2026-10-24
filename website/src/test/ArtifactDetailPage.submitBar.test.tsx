@@ -124,6 +124,28 @@ describe('ArtifactDetailPage comment submit bar', () => {
     expect(await screen.findByText('2 comments to send to this chat')).toBeInTheDocument()
   })
 
+  it('marks each row the count is made of, and no other', async () => {
+    renderPage([
+      mkComment('h1'),
+      mkComment('h2'),
+      mkComment('a1', { is_agent: true }),
+      mkComment('s1'),
+    ], { sentIds: ['s1'] })
+    await screen.findByText('2 comments to send to this chat')
+    const marked = (id: string) => !!screen.getByText(`note ${id}`).closest('.group')!
+      .querySelector('[data-testid="comment-pending-submit"]')
+    expect(screen.getAllByTestId('comment-pending-submit')).toHaveLength(2)
+    expect([marked('h1'), marked('h2'), marked('a1'), marked('s1')]).toEqual([true, true, false, false])
+  })
+
+  it('unmarks the rows once the batch is sent', async () => {
+    renderPage([mkComment('h1')])
+    await bar()
+    expect(screen.getAllByTestId('comment-pending-submit')).toHaveLength(1)
+    fireEvent.click(submit())
+    await waitFor(() => expect(screen.queryByTestId('comment-pending-submit')).toBeNull())
+  })
+
   it('leaves a resolved thread out of the batch, reply included', async () => {
     // This page has its OWN pending-batch derivation, separate from
     // ArtifactPanel's. Filtering only the panel's would show the page's filtered
@@ -195,7 +217,7 @@ describe('ArtifactDetailPage comment submit bar', () => {
     await bar()
     fireEvent.click(submit())
     await waitFor(() => expect(vi.mocked(api).sendChat).toHaveBeenCalledTimes(1))
-    expect(await screen.findByText(/slot agent mismatch/)).toBeInTheDocument()
+    expect(await screen.findByText(/Couldn't send/)).toBeInTheDocument()
     expect(localStorage.getItem(SENT_KEY)).toBeNull()
     expect(screen.getByText('1 comment to send to this chat')).toBeInTheDocument()
   })
@@ -219,12 +241,40 @@ describe('ArtifactDetailPage comment submit bar', () => {
     expect(localStorage.getItem(SENT_KEY)).toBeNull()
   })
 
+  it('says a refusal beside the button, not in the page notice, and hands back the instruction', async () => {
+    // The page notice sits at the top; on a scrolled artifact it is off screen
+    // while the button is in the sidebar footer (#12320).
+    vi.mocked(api).sendChat = vi.fn().mockResolvedValue(refused())
+    renderPage([mkComment('h1')])
+    await bar()
+    fireEvent.click(screen.getByRole('button', { name: 'Add overall instruction' }))
+    fireEvent.change(await screen.findByLabelText('Overall instruction'), { target: { value: 'ship it today' } })
+    fireEvent.click(submit())
+    // The server reason is framed by what happened and what is safe, never bare.
+    const notice = await screen.findByText("Couldn't send — your comments are still pending. (slot agent mismatch)")
+    const alert = notice.closest('[role="alert"]')!
+    expect(alert.parentElement?.contains(submit())).toBe(true)
+    expect(screen.queryByText(/Comment action failed/)).toBeNull()
+    expect(screen.getByLabelText('Overall instruction')).toHaveValue('ship it today')
+  })
+
+  it('names the draft action for its outcome and keeps it quieter than Submit', async () => {
+    renderPage([mkComment('h1')])
+    await bar()
+    const draft = screen.getByRole('button', { name: /Draft a prompt in chat/ })
+    expect(draft).toHaveAttribute('title', expect.stringMatching(/Nothing is sent until you send it yourself/))
+    // Styled as a quiet link: no border or accent fill a reader could take for a second Submit.
+    expect(draft.className).toMatch(/\bborder-none\b/)
+    expect(draft.className).not.toMatch(/\b(text-accent|bg-accent|border-accent)/)
+  })
+
   it('offers no bar when the artifact has no companion session', async () => {
-    // "Ask agent to address" is the affordance there, and it states what it does.
+    // "Draft a prompt in chat" is the affordance there, and it states what it does.
     renderPage([mkComment('h1')], { bound: false })
-    await waitFor(() => expect(screen.getByRole('button', { name: /Ask agent to address/ })).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('button', { name: /Draft a prompt in chat/ })).toBeInTheDocument())
     expect(screen.queryByText(/to send to this chat/)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Submit$/ })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('comment-pending-submit')).not.toBeInTheDocument()
   })
 
   it('keeps the comments pending when the send times out', async () => {
@@ -335,7 +385,7 @@ describe('ArtifactDetailPage comment submit follows the busy-send mode', () => {
     vi.mocked(api).sendChat = vi.fn().mockResolvedValue(refused())
     await submitWith({ running: true })
     expect(steerArg()).toBe(true)
-    expect(await screen.findByText(/slot agent mismatch/)).toBeInTheDocument()
+    expect(await screen.findByText(/Couldn't send/)).toBeInTheDocument()
     expect(localStorage.getItem(SENT_KEY)).toBeNull()
   })
 })

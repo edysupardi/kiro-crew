@@ -20,8 +20,11 @@ Instance fields read: ``_child_fidelity_aware``, ``_crew_agent``, ``_on_gate_acq
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
+import os
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -44,9 +47,15 @@ from kiro_crew.acp.runtime import AcpRuntime, AcpRuntimeError
 from kiro_crew.acp.session_handle import AcpSessionHandle
 from kiro_crew.acp.session_mcp import agent_spec_snapshot
 from kiro_crew.acp.session_provider import AcpSessionProvider
+from kiro_crew.acp.transport_errors import AcpDelegateLaunchFailed
 from kiro_crew.acp.types import ACP_BACKENDS_HARNESS_OWNED_SESSIONS
 from kiro_crew.agent_sdk import host_auth
 from kiro_crew.agent_sdk.backends import model_registry_namespace
+from kiro_crew.agent_sdk.tool_gate import (
+    ADAPTER_EXPOSED_CREDENTIAL_LEAVES,
+    adapter_expose_files,
+    label_for,
+)
 from kiro_crew.agent_sdk.tool_search import resume_takes_tool_search_replay
 from kiro_crew.config.paths import kiro_sessions_dir
 from kiro_crew.messaging.link import telemetry_channel_of
@@ -129,6 +138,90 @@ def _is_transient_resume_lock_error(exc: BaseException) -> bool:
     return any(marker in text for marker in _RESUME_TRANSIENT_LOCK_MARKERS)
 
 
+# What codex writes on stderr when the AWS SDK finds no credential it can read. The
+# ACP answer itself is the SDK's generic -32000 ``Authentication required``, which a
+# codex signed out of a non-AWS provider gives too, so it alone names no AWS cause.
+_MASKED_CREDENTIAL_AUTH_RE = re.compile(r"failed to load aws credentials", re.IGNORECASE)
+
+#: Names the mask in a startup auth failure, so the deliberate layout is not taken
+#: for a broken one. Fixed text: it never echoes a path's contents or a secret.
+CREDENTIAL_MASK_AUTH_NOTE = (
+    "Kiro Crew hides ~/.aws/credentials and ~/.aws/sso/cache from {label} on "
+    "purpose; only ~/.aws/config is readable, so Bedrock via {label} needs a "
+    "self-contained credential_process in that file, not SSO or static keys. Keep "
+    "static keys in ~/.aws/credentials, not ~/.aws/config, and do not make "
+    "~/.aws/config a symlink."
+)
+
+
+def _with_credential_mask_note(
+    runtime: object, message: str, cause: BaseException, *, read_stderr: bool = True
+) -> str:
+    """*message*, plus :data:`CREDENTIAL_MASK_AUTH_NOTE` when the mask explains *cause*.
+
+    Added only when all three hold: this spawn ran under a credential mask, that
+    mask re-exposes ``~/.aws/config`` (so ``~/.aws`` itself is hidden), and the
+    failure or the child's stderr says the AWS SDK could not load a credential.
+    Never added twice. ``read_stderr=False`` matches *cause* alone: the stderr
+    tail lives as long as the runtime, so a turn must not inherit an old line.
+    """
+    backend = getattr(runtime, "acp_backend", None)
+    hidden = getattr(runtime, "sandbox_hidden_dirs", None)
+    if not isinstance(backend, str) or not isinstance(hidden, tuple) or not hidden:
+        return message
+    config = os.path.join(os.path.expanduser("~"), ".aws", "config")
+    if config not in adapter_expose_files(backend, hidden):
+        return message
+    tail_reader = getattr(runtime, "redacted_stderr_tail", None) if read_stderr else None
+    tail = tail_reader() if callable(tail_reader) else ""
+    haystack = f"{cause}\n{tail if isinstance(tail, str) else ''}"
+    if not _MASKED_CREDENTIAL_AUTH_RE.search(haystack):
+        return message
+    note = CREDENTIAL_MASK_AUTH_NOTE.format(label=label_for(backend))
+    return message if note in message else f"{message} {note}"
+
+
+def _name_credential_mask(runtime: object, exc: BaseException, *, read_stderr: bool = True) -> None:
+    """Append the mask note to *exc*'s own text in place, keeping its type.
+
+    *read_stderr* is passed through to :func:`_with_credential_mask_note`.
+    """
+    text = str(exc)
+    named = _with_credential_mask_note(runtime, text, exc, read_stderr=read_stderr)
+    if named != text:
+        exc.args = (named,)
+
+
+def _launch_agent(provider: AcpProvider) -> str:
+    """The launch copy kiro-cli is asked for in place of *provider*'s agent, or ``""``.
+
+    Only kiro-cli takes an agent name on its command line and in ``set_mode``;
+    every other runtime host keeps the agent's own name.
+    """
+    launch = getattr(provider, "app_launch_agent", "")
+    return launch if isinstance(launch, str) and launch and provider.is_kiro_backend else ""
+
+
+def _choices_file_may_exist(session_key: str | None = None) -> bool:
+    """Whether session choices may be on disk, or ``session_key`` keeps the marker of
+    a binding whose file is gone; a check that fails counts as yes. Never while the
+    developer flag is off: then every session runs here."""
+    from kiro_crew.coder.session_launch import SessionEnvironmentChoices
+    from kiro_crew.session_environment import choices_path, session_environments_enabled
+
+    if not session_environments_enabled():
+        return False
+    try:
+        choices_path().stat()
+    except (FileNotFoundError, NotADirectoryError):
+        if not session_key:
+            return False
+        return SessionEnvironmentChoices(choices_path()).may_be_bound(session_key)
+    except OSError:
+        return True
+    return True
+
+
 async def _start_kiro_runtime(self: AcpProvider) -> None:
     """Spawn an AcpRuntime + session; time the kiro cold-start split.
 
@@ -185,7 +278,7 @@ def _emit_kiro_startup_metric(
     try:
         # circular import: importing get_recorder at module top would form a
         # config.loader -> ... -> metrics.provider -> config.loader cycle
-        # (same reason as the lazy import in acp/client.py's ensure_ready).
+        # (same reason as the lazy import in acp/client_start.py's ensure_ready).
         # Keep it lazy so provider is never loaded during config.loader's
         # import chain.
         from kiro_crew.metrics.provider import get_recorder
@@ -264,6 +357,23 @@ def _owning_channel_id(self: AcpProvider) -> str | None:
     """
     channel = getattr(self._client, "_channel_id", None)
     return channel if isinstance(channel, str) and channel else None
+
+
+def _delegate_launch_failure(runtime: AcpRuntime) -> AcpDelegateLaunchFailed | None:
+    """Translate a startup death into an actionable delegate-launch error, or None.
+
+    Checked on every startup-death path alongside
+    :func:`sandbox_init_failure_for_runtime` and :meth:`saw_not_logged_in`: the
+    ``kiro-cli-chat`` delegate failing to launch is deterministic (so the pool
+    replacing the worker only reproduces it) and is fixed by repairing the Kiro
+    CLI install, not by a retry or a model switch. Raised as
+    :class:`AcpDelegateLaunchFailed` -- a non-retryable ``AcpError``, NOT an
+    ``AcpProcessDied`` -- so the chat surfaces' process-death respawn arms never
+    see it and their terminal error arm shows the install-repair message.
+    """
+    if not runtime.saw_delegate_launch_failure():
+        return None
+    return AcpDelegateLaunchFailed()
 
 
 def _member_session_key(self: AcpProvider) -> str:
@@ -473,10 +583,68 @@ async def _start_kiro_runtime_impl(
         # this runtime, not the placeholder client, is the process the
         # subagent runs in, so the second window has to be mounted HERE.
         shared_scratch=self._shared_scratch,
+        launch_agent=_launch_agent(self),
     )
     # One priority for both start queues this path enters, set by the session
     # layer for this start (rule: ``kiro_crew.start_priority``).
     start_priority = self.start_priority
+    # Persisted choices, including inherited subagent choices, outlive configuration.
+    from kiro_crew.coder.session_launch import prepare_for_session
+    from kiro_crew.config import live
+    from kiro_crew.config.loader import KiroCrewConfig
+    from kiro_crew.session_environment import session_environments_enabled
+
+    config = live.snapshot()
+    if config is None:
+        config = await asyncio.to_thread(KiroCrewConfig.load)
+    section = config.session_environments
+    remote = (
+        await prepare_for_session(
+            session_key, before_compute=runtime.check_remote_workspace_supported
+        )
+        if session_environments_enabled()
+        and (
+            bool(section.coder_url or section.profiles)
+            or await asyncio.to_thread(_choices_file_may_exist, session_key)
+        )
+        else None
+    )
+
+    async def attach_remote_workspace(target: AcpRuntime) -> None:
+        # A fresh guest worker per runtime: the bridge spends its one-use secret.
+        assert remote is not None
+        target.check_remote_workspace_supported()
+        server = await remote.launch.workspace_server(remote.workdir)
+        relay = remote.launch.relay
+        target.set_remote_workspace(
+            {
+                "server": server,
+                "workdir": remote.workdir,
+                "write_token": relay.write_token,
+                # Awaited by the runtime's kill, so a reset returns only once the
+                # guest workers (and any command they ran) have stopped; the
+                # end-watcher below still covers a runtime that dies on its own.
+                "close": functools.partial(remote.launch.close_relay, relay),
+            }
+        )
+
+    from kiro_crew.session_environment import (
+        forget_remote_workspace,
+        remember_remote_workspace,
+    )
+
+    if remote is not None:
+        await attach_remote_workspace(runtime)
+        # Per-message context names the guest directory, not the gateway project.
+        remember_remote_workspace(session_key, remote.profile_name, remote.workdir, owner=runtime)
+        if remote.created and getattr(self._client, "_resume_session_id", None):
+            # A conversation that already ran got a new, empty workspace.
+            from kiro_crew.session_environment import mark_workspace_recreated
+
+            mark_workspace_recreated(session_key)
+    else:
+        forget_remote_workspace(session_key)
+    session_cwd: str | Path = work_dir
     _t_spawn = time.monotonic()
     try:
         await runtime.spawn(
@@ -495,6 +663,13 @@ async def _start_kiro_runtime_impl(
         sandbox_failure = await sandbox_init_failure_for_runtime(runtime)
         if sandbox_failure is not None:
             raise sandbox_failure from exc
+        # A ``kiro-cli-chat`` delegate that would not launch is checked next, for
+        # the same reason and on all three paths: deterministic, fixed by repairing
+        # the install rather than a retry, so it must not fall through to the
+        # generic process-death card the ladder reproduces identically.
+        delegate_failure = _delegate_launch_failure(runtime)
+        if delegate_failure is not None:
+            raise delegate_failure from exc
         # kiro-cli can exit during initialize when not authenticated —
         # surface an actionable login prompt (parity with AcpClient) rather
         # than a generic runtime-death error.
@@ -504,14 +679,24 @@ async def _start_kiro_runtime_impl(
             # (it is the value passed as ``acp_backend`` above) — so the
             # sign-in advice names the harness that actually failed to
             # authenticate rather than assuming kiro-cli.
-            raise AcpAuthRequired(
-                host_auth.signed_out_message(self._client.backend),
-                backend=self._client.backend,
-            ) from exc
+            signed_out = host_auth.signed_out_message(self._client.backend)
+            # One synchronous table read, so the kiro path compares and stops (H13).
+            if self._client.backend in ADAPTER_EXPOSED_CREDENTIAL_LEAVES:
+                signed_out = _with_credential_mask_note(runtime, signed_out, exc)
+            raise AcpAuthRequired(signed_out, backend=self._client.backend) from exc
+        if self._client.backend in ADAPTER_EXPOSED_CREDENTIAL_LEAVES:
+            _name_credential_mask(runtime, exc)
         raise
     finally:
         # subprocess launch + ACP `initialize` handshake
         phases["spawn_init"] = (time.monotonic() - _t_spawn) * 1000.0
+        if remote is not None:
+            # Closed once this runtime ends (at once if the spawn failed); its
+            # placement entry goes with it, so the bounded table holds live ones.
+            remote.launch.close_relay_when_ended(
+                runtime.is_alive,
+                functools.partial(forget_remote_workspace, session_key, owner=runtime),
+            )
 
     # Everything AFTER a successful spawn() must be guarded: until the
     # AcpSessionProvider is constructed and assigned to self._client, NOTHING
@@ -546,7 +731,7 @@ async def _start_kiro_runtime_impl(
                 # ``should_load`` permanently False — the file is never
                 # written for them — so every reopen would silently start a
                 # fresh session and drop the conversation. ``AcpClient``
-                # reads the same set for the same reason (client.py's
+                # reads the same set for the same reason (client_start.py's
                 # ``file_ok`` branch). KAS is named separately because it is
                 # NOT a member: adding it would change that client path too.
                 session_file = None
@@ -568,7 +753,7 @@ async def _start_kiro_runtime_impl(
                         runtime,
                         str(session_file) if session_file else "",
                         resume_sid,
-                        work_dir,
+                        session_cwd,
                         agent,
                         member_session_key=self._member_session_key(),
                         session_key=self._owning_session_key(),
@@ -623,7 +808,13 @@ async def _start_kiro_runtime_impl(
                     # The dead runtime's tree, for the same reason a restart
                     # joins it (above): its sessions' work is there.
                     shared_scratch=self._shared_scratch or runtime.work_scratch_dir,
+                    launch_agent=_launch_agent(self),
                 )
+                if remote is not None:
+                    await attach_remote_workspace(runtime)
+                    remember_remote_workspace(
+                        session_key, remote.profile_name, remote.workdir, owner=runtime
+                    )
                 try:
                     await runtime.spawn(
                         start_priority=start_priority,
@@ -634,15 +825,26 @@ async def _start_kiro_runtime_impl(
                     sandbox_failure = await sandbox_init_failure_for_runtime(runtime)
                     if sandbox_failure is not None:
                         raise sandbox_failure from exc
+                    delegate_failure = _delegate_launch_failure(runtime)
+                    if delegate_failure is not None:
+                        raise delegate_failure from exc
                     if runtime.saw_not_logged_in():
-                        raise AcpAuthRequired(
-                            host_auth.signed_out_message(self._client.backend),
-                            backend=self._client.backend,
-                        ) from exc
+                        signed_out = host_auth.signed_out_message(self._client.backend)
+                        if self._client.backend in ADAPTER_EXPOSED_CREDENTIAL_LEAVES:
+                            signed_out = _with_credential_mask_note(runtime, signed_out, exc)
+                        raise AcpAuthRequired(signed_out, backend=self._client.backend) from exc
+                    if self._client.backend in ADAPTER_EXPOSED_CREDENTIAL_LEAVES:
+                        _name_credential_mask(runtime, exc)
                     raise
+                finally:
+                    if remote is not None:
+                        remote.launch.close_relay_when_ended(
+                            runtime.is_alive,
+                            functools.partial(forget_remote_workspace, session_key, owner=runtime),
+                        )
             try:
                 handle = await runtime.create_session(
-                    cwd=work_dir,
+                    cwd=session_cwd,
                     agent=agent or None,
                     member_session_key=self._member_session_key(),
                     memory_mode=self.memory_mode,
@@ -656,11 +858,16 @@ async def _start_kiro_runtime_impl(
                 sandbox_failure = await sandbox_init_failure_for_runtime(runtime)
                 if sandbox_failure is not None:
                     raise sandbox_failure from exc
+                delegate_failure = _delegate_launch_failure(runtime)
+                if delegate_failure is not None:
+                    raise delegate_failure from exc
                 if runtime.saw_not_logged_in():
-                    raise AcpAuthRequired(
-                        host_auth.signed_out_message(self._client.backend),
-                        backend=self._client.backend,
-                    ) from exc
+                    signed_out = host_auth.signed_out_message(self._client.backend)
+                    if self._client.backend in ADAPTER_EXPOSED_CREDENTIAL_LEAVES:
+                        signed_out = _with_credential_mask_note(runtime, signed_out, exc)
+                    raise AcpAuthRequired(signed_out, backend=self._client.backend) from exc
+                if self._client.backend in ADAPTER_EXPOSED_CREDENTIAL_LEAVES:
+                    _name_credential_mask(runtime, exc)
                 raise
             finally:
                 # In a finally, mirroring session_load: a start that BLEW its
@@ -846,6 +1053,13 @@ async def _note_zero_tool_servers(self: AcpProvider) -> None:
     session's MCP report (the dashboard MCP panel and run summaries read
     it), and logs a warning. Naming the clash is all it does: which server
     wins is the backend's tool table, not Crew's.
+
+    MCP Tool Search deferral, on by default, also leaves a running server
+    absent from ``/tools``. :func:`servers_exposing_no_tools` tells the two
+    apart from the ``/tools`` result itself -- the loader tool is present
+    exactly when the session defers -- so a deferred server is not mistaken
+    for a clash victim; without that this would warn for nearly every server
+    on a default install.
 
     ``/tools`` is only read when at least two servers are running, since a
     clash needs two. Bounded, and never fails the start: on any error the

@@ -48,10 +48,10 @@ _BASE_NAMES: dict[str, str] = {
     "KAS_RELAY_ENGINE": "value:str",
     "KIRO_AGENTS_DIR": "value:NoneType",
     "KIRO_CLI_BIN": "value:str",
-    "KiroCrewConfig": "class:kiro_crew.config.loader",
+    "KiroCrewConfig": "class:kiro_crew.config.loader_config",
     "LEGACY_CONFIG_DIR_NAME": "value:str",
     "MIN_NODE_VERSION": "value:tuple",
-    "McpServerInfo": "class:kiro_crew.mcp_discovery",
+    "McpServerInfo": "class:kiro_crew.mcp_discovery_server_info",
     "NATIVE_SKILL_ALIAS_PREFIX": "value:str",
     "PATH_ONLY_INSTALL_NOTE": "value:str",
     "Path": "class:pathlib",
@@ -161,7 +161,7 @@ _BASE_NAMES: dict[str, str] = {
     "_open_slot_agent_names": "own-func",
     "_os_fix_hint": "own-func",
     "_plat": "module:platform",
-    "_platform_libs_dirname": "func:kiro_crew.embeddings",
+    "_platform_libs_dirname": "func:kiro_crew.embeddings_native",
     "_print_wrapped": "own-func",
     "_process_apparmor_confinement": "own-func",
     "_process_userns_vantage_confined": "own-func",
@@ -171,7 +171,7 @@ _BASE_NAMES: dict[str, str] = {
     "_report_kas_backend": "own-func",
     "_report_kas_spec_permissions": "own-func",
     "_report_node": "own-func",
-    "_resolve_model_url": "func:kiro_crew.embeddings",
+    "_resolve_model_url": "func:kiro_crew.embeddings_download",
     "_runtime_tmpfs_roots": "own-func",
     "_safe_display": "own-func",
     "_scan_cli_installer_residue": "own-func",
@@ -199,7 +199,7 @@ _BASE_NAMES: dict[str, str] = {
     "credential_vendor_server_ids": "func:kiro_crew.deny_guidance",
     "current_context": "func:kiro_crew.platform.context",
     "data_home": "func:kiro_crew.config.paths",
-    "default_model_path": "func:kiro_crew.embeddings",
+    "default_model_path": "func:kiro_crew.embeddings_model",
     "dep_sync": "module:kiro_crew.dep_sync",
     "describe": "func:kiro_crew.stall_attribution",
     "diagnostics": "module:kiro_crew.diagnostics",
@@ -209,7 +209,7 @@ _BASE_NAMES: dict[str, str] = {
     "dump_superseded": "func:kiro_crew.dashboard.crash_dump_store",
     "dumps_with_stacks": "func:kiro_crew.dashboard.crash_dump_store",
     "ensure_ffmpeg_in_path": "func:kiro_crew.transcribe",
-    "env_path": "func:kiro_crew.config.loader",
+    "env_path": "func:kiro_crew.config.loader_credentials",
     "format_node_version": "func:kiro_crew.constants",
     "get_dumps_dir": "func:kiro_crew.dashboard.crash_dump_store",
     "install_url": "module:kiro_crew.discord.install_url",
@@ -219,7 +219,7 @@ _BASE_NAMES: dict[str, str] = {
     "is_claude_code": "func:kiro_crew.agent_sdk.provider_identity",
     "is_dispatchable_member_name": "func:kiro_crew.members",
     "is_local_only": "func:kiro_crew.dashboard.urls",
-    "is_registered_agent_name": "func:kiro_crew.validation",
+    "is_registered_agent_name": "func:kiro_crew.validation_parts.input_bounds",
     "is_sensitive_path": "func:kiro_crew.security.paths",
     "job_pause_state_from_disk": "func:kiro_crew.cron",
     "json": "module:json",
@@ -229,7 +229,7 @@ _BASE_NAMES: dict[str, str] = {
     "machine_hostname": "func:kiro_crew.dashboard.urls",
     "may_skip_gate_now": "func:kiro_crew.platform.governance",
     "mcp_governance_may_apply": "func:kiro_crew.kiro_cli",
-    "model_file_present": "func:kiro_crew.embeddings",
+    "model_file_present": "func:kiro_crew.embeddings_model",
     "newest_dump_with_stacks": "func:kiro_crew.dashboard.crash_dump_store",
     "node_too_old_message": "func:kiro_crew.constants",
     "node_version_meets_floor": "func:kiro_crew.constants",
@@ -242,13 +242,13 @@ _BASE_NAMES: dict[str, str] = {
     "pip_install_command_for": "func:kiro_crew.extras",
     "platform_compat": "module:kiro_crew.platform_compat",
     "platform_context": "module:kiro_crew.platform.context",
-    "probe_server": "func:kiro_crew.mcp_discovery",
+    "probe_server": "func:kiro_crew.mcp_discovery_probe",
     "project_agent_files": "func:kiro_crew.agent_discovery",
     "project_agent_name": "func:kiro_crew.agent_discovery",
     "project_agents_dir": "func:kiro_crew.config.paths",
     "render_doctor_section": "func:kiro_crew.config.superseded_defaults",
-    "resolve_agent_bindings": "func:kiro_crew.config.loader",
-    "resolve_custom_model": "func:kiro_crew.embeddings",
+    "resolve_agent_bindings": "func:kiro_crew.config.loader_agents",
+    "resolve_custom_model": "func:kiro_crew.embeddings_model",
     "resolve_effective_model": "func:kiro_crew.config.loader",
     "resolve_kiro_cli": "func:kiro_crew.kiro_cli",
     "safe_context_call": "func:kiro_crew.platform.context",
@@ -268,9 +268,9 @@ _BASE_NAMES: dict[str, str] = {
     "tempfile": "module:tempfile",
     "textwrap": "module:textwrap",
     "unhealthy_jobs_from_disk": "func:kiro_crew.cron",
-    "unsandboxed_exec_declared": "func:kiro_crew.config.loader",
+    "unsandboxed_exec_declared": "func:kiro_crew.config.loader_document",
     "urllib": "module:urllib",
-    "verify_vendored_libs": "func:kiro_crew.embeddings",
+    "verify_vendored_libs": "func:kiro_crew.embeddings_native",
     "warm_backend": "func:kiro_crew.sandbox_wrap",
 }
 
@@ -449,11 +449,22 @@ def _bare_loads(source: str) -> list[tuple[int, str]]:
     ]
 
 
+def _facade_and_parts() -> list[Path]:
+    """The facade's file and its ``cli_doctor_parts`` owners, whose functions run on the
+    facade's namespace and so resolve a bare global exactly as the facade's own do."""
+    from kiro_crew import cli_doctor_parts
+
+    parts = sorted(Path(cli_doctor_parts.__file__).resolve().parent.glob("*.py"))
+    assert len(parts) > 1, "the cli_doctor_parts owners were not found"
+    return [Path(cli_doctor.__file__), *parts]
+
+
 def test_the_facade_reads_no_reexported_name_as_a_bare_global() -> None:
     """A function defined here resolves a bare global through this module's own
     namespace, which ``__getattr__`` never sees; such a read would ``NameError``."""
-    source = Path(cli_doctor.__file__).read_text(encoding="utf-8")
-    assert _bare_loads(source) == []
+    for path in _facade_and_parts():
+        source = path.read_text(encoding="utf-8")
+        assert _bare_loads(source) == []
 
 
 def test_the_bare_global_scan_can_fail() -> None:
@@ -503,7 +514,8 @@ def test_the_facade_imports_no_family_at_module_scope() -> None:
     tree = ast.parse(Path(cli_doctor.__file__).read_text(encoding="utf-8"))
     runtime = [
         node.module
-        for node in tree.body
+        for path in _facade_and_parts()
+        for node in ast.parse(path.read_text(encoding="utf-8")).body
         if isinstance(node, ast.ImportFrom)
         and (node.module or "").startswith(doctor_checks.__name__)
     ]

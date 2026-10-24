@@ -162,7 +162,7 @@ describe('card registry', () => {
 describe('card layout', () => {
   const INSET = /(^|\s)(?:[a-z0-9@[\]:-]*:)?-?(?:p[xlrse]|m[xlrse])-/
 
-  it('names the crewmate that proposed it, and Kiro Crew outside a crewmate chat', async () => {
+  it('names the mate that proposed it, and Kiro Crew outside a mate chat', async () => {
     pending = [card({ reason: 'You asked for shorter replies.' })]
     const rows = pending.map(c => row(c))
     qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -225,7 +225,7 @@ describe('card layout', () => {
 })
 
 describe('change card', () => {
-  it('re-reads the crewmate roster once a crewmate card has run, so the sidebar count moves', async () => {
+  it('re-reads the mate roster once a mate card has run, so the sidebar count moves', async () => {
     pending = [card({
       kind: 'crewmate.create',
       plan: { apply: [{ method: 'POST', path: '/api/agents', body: { name: 'radar' } }], undo: null },
@@ -426,6 +426,31 @@ describe('change card', () => {
     expect((screen.getByTestId('change-card-apply') as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it('names the servers an import card would run without asking in its widen warning', async () => {
+    pending = [card({ kind: 'crewmate.import', risk: 'widen', changes: [{ field: 'template_auto_approve', label: 'Runs without asking', after: [{ name: 'github', host: 'api.github.com' }] }] })]
+    renderCards()
+    await screen.findByTestId('change-card-widen-ack')
+    expect(screen.getByTestId('change-card-risk').textContent).toContain(L('risk_widen_import', { servers: 'github' }))
+  })
+
+  it('says beside an import press what it does and how to take it back, and names the decline', async () => {
+    pending = [card({ kind: 'crewmate.import', risk: 'code_exec', params: { name: 'Q' } })]
+    renderCards()
+    expect((await screen.findByTestId('change-card-press-note')).textContent).toBe(L('note_crewmate_import'))
+    // Read beside the code_exec warning, before any code.
+    expect(within(screen.getByTestId('change-card-risk')).getByTestId('change-card-press-note')).toBeTruthy()
+    // The title is rebuilt in the reader's language, not the gateway's English.
+    expect(screen.getByRole('heading', { name: L('title_crewmate_import', { name: 'Q' }) })).toBeTruthy()
+    expect(screen.getByTestId('change-card-cancel').textContent).toBe(L('decline_crewmate_import'))
+  })
+
+  it('keeps the generic decline and no press note on other kinds', async () => {
+    pending = [card()]
+    renderCards()
+    expect((await screen.findByTestId('change-card-cancel')).textContent).toBe(L('cancel'))
+    expect(screen.queryByTestId('change-card-press-note')).toBeNull()
+  })
+
   it('still gates on the acknowledgement when a code_exec card also carries the widen flag', async () => {
     // A capabilities card that BOTH launches a server and expands auto-approval
     // reads risk: code_exec (the worst label) yet carries widen separately, so
@@ -483,7 +508,7 @@ describe('change card', () => {
   it('continues an apply a reload interrupted, from the step the gateway expects', async () => {
     pending = [card({
       kind: 'crewmate.create',
-      title: 'Create crewmate Scout',
+      title: 'Create mate Scout',
       status: 'applying',
       params: { name: 'Scout', goal: 'g', schedule: { cron_expr: '0 9 * * *' } },
       plan: {
@@ -533,7 +558,7 @@ describe('change card', () => {
     server.use(http.delete('/api/agents/:name', () => HttpResponse.json({ ok: true })))
     pending = [card({
       kind: 'crewmate.create',
-      title: 'Create crewmate Scout',
+      title: 'Create mate Scout',
       status: 'applied',
       params: { name: 'Scout', goal: 'g', schedule: { cron_expr: '0 9 * * *' } },
       plan: {

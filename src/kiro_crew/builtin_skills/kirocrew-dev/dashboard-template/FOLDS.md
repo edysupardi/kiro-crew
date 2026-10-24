@@ -43,6 +43,8 @@ reaches a fold by its bus scope and a tree fold has none. A fold marked
 | `subagents` | session | Which children this session dispatched, and for each one what happened, how long it ran and what it cost |
 | `class` *(internal)* | session | What KIND of session this log belongs to, over the log's whole life |
 | `outline` *(internal)* | session | The conversation one row per turn: the first line the human typed and the reply the turn settled on, both clipped, with no injected context and no tool output |
+| `otel_usage` *(internal)* | session | Whether this session opened and which closed agent_kind value it opened under -- never the raw agent name, which the fold folds to that enum and does not keep -- and how many turns it has started per actor: the counts the OTel usage export reads to mint session and turn counters |
+| `otel_session_tree` *(internal)* | session | How many creators stood above this session in the session tree when it opened, and how many child sessions it has created -- the numbers the OTel export reads to count sessions by tree depth and children by ordinal |
 | `ledger` | slot | One workstream's goal, phase and next step, what was tried and rejected, and its artifacts |
 | `radar` | slot | An issue crew's items, counts, phase lines and recorded skips |
 | `work` | slot | A conductor's board: the header, every work item, and what the fold dropped |
@@ -50,6 +52,10 @@ reaches a fold by its bus scope and a tree fold has none. A fold marked
 | `agentic` | slot | Which dashboard fields this crewmate filled itself, with what value, of what declared type and when |
 | `mistakes` | slot | Which dashboard writes of this crewmate's were refused, grouped by reason and field, how often, and what worked instead |
 | `workstreams` | slot | Every workstream this crewmate is running: each board's goal and counts, each task's result, and what each task cost its own worker session |
+| `goal` | slot | This crewmate's goal record as the gateway last recorded it: its goals, each milestone's target and latest reading, whether it is met, and the counts |
+| `waiting` | slot | What this crewmate waits on the person for: its open questions and the cards still waiting on a button, newest first, with the count |
+| `workers` | slot | The worker sessions this crewmate created: each one's task, whether it is running, between turns, done, blocked, failed or closed, and what it last said |
+| `worker` *(internal)* | slot | One worker session's own row, the part of `workers` read from that worker's own log; not bound by a page |
 | `worktree` *(package only)* | tree | The shape of a fleet: every work board the tree reaches, which board each one hangs under, and which boards are its roots |
 
 ## `status`
@@ -206,6 +212,32 @@ Moved by: `message/received`, `message/sent`, `turn/completed`, `turn/refused`, 
 | `reply_chars` | `number` | no |
 | `turns` | `array` | no |
 
+## `otel_usage`
+
+Whether this session opened and which closed agent_kind value it opened under -- never the raw agent name, which the fold folds to that enum and does not keep -- and how many turns it has started per actor: the counts the OTel usage export reads to mint session and turn counters.
+
+Moved by: `session/opened`, `turn/started`.
+
+| Field | Type | Optional |
+|---|---|---|
+| `opened` | `boolean` | no |
+| `opened_agent_kind` | `string` | no |
+| `opened_ts` | `number` | no |
+| `turns` | `object` | no |
+
+## `otel_session_tree`
+
+How many creators stood above this session in the session tree when it opened, and how many child sessions it has created -- the numbers the OTel export reads to count sessions by tree depth and children by ordinal.
+
+Moved by: `session/opened`, `session/spawned`.
+
+| Field | Type | Optional |
+|---|---|---|
+| `agent_kind` | `string` | no |
+| `children` | `number` | no |
+| `depth` | `number` | yes |
+| `opened_ts` | `number` | no |
+
 ## `ledger`
 
 One workstream's goal, phase and next step, what was tried and rejected, and its artifacts.
@@ -318,6 +350,63 @@ Moved by: `background/completed`, `session/opened`, `subagent/completed`, `subag
 | `spenders_omitted` | `number` | no |
 | `unattributed` | `object` | no |
 | `units_omitted` | `number` | no |
+
+## `goal`
+
+This crewmate's goal record as the gateway last recorded it: its goals, each milestone's target and latest reading, whether it is met, and the counts.
+
+Moved by: `dashboard/goal_recorded`.
+
+| Field | Type | Optional |
+|---|---|---|
+| `changes` | `number` | no |
+| `goal` | `string` | no |
+| `goals` | `array` | no |
+| `goals_omitted` | `number` | no |
+| `goals_total` | `number` | no |
+| `milestones` | `array` | no |
+| `milestones_omitted` | `number` | no |
+| `milestones_total` | `number` | no |
+| `updated_at` | `string` | no |
+
+## `waiting`
+
+What this crewmate waits on the person for: its open questions and the cards still waiting on a button, newest first, with the count.
+
+Moved by: `dashboard/waiting_changed`.
+
+| Field | Type | Optional |
+|---|---|---|
+| `changes` | `number` | no |
+| `count` | `number` | no |
+| `items` | `array` | no |
+| `newest` | `string` | no |
+| `omitted` | `number` | no |
+| `updated_at` | `string` | no |
+
+## `workers`
+
+The worker sessions this crewmate created: each one's task, whether it is running, between turns, done, blocked, failed or closed, and what it last said.
+
+Moved by: `message/received`, `message/sent`, `session/adopted`, `session/closed`, `session/opened`, `session/released`, `session/spawned`, `turn/completed`, `turn/started`, `work/recorded`.
+
+| Field | Type | Optional |
+|---|---|---|
+| `counts` | `object` | no |
+| `items` | `array` | no |
+| `omitted` | `number` | no |
+| `total` | `number` | no |
+
+## `worker`
+
+One worker session's own row, the part of `workers` read from that worker's own log; not bound by a page.
+
+Moved by: `message/received`, `message/sent`, `session/adopted`, `session/closed`, `session/opened`, `session/released`, `turn/completed`, `turn/started`, `work/recorded`.
+
+| Field | Type | Optional |
+|---|---|---|
+| `parent` | `string` | no |
+| `row` | `object` | no |
 
 ## `worktree`
 

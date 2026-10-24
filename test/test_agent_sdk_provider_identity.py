@@ -47,6 +47,7 @@ SRC = Path(__file__).resolve().parent.parent / "src" / "kiro_crew"
 CONVERTED = (
     "context.py",
     "cli_doctor.py",
+    "cli_doctor_parts/model_section.py",
     "knowledge/llm_pool.py",
     "dashboard/chat_handlers.py",
     "dashboard/chat_runner.py",
@@ -170,13 +171,18 @@ def test_importing_this_module_does_not_load_the_acp_package() -> None:
 #: dashboard agents handlers run the functions ``dashboard/agent_admin`` defines on
 #: ``handlers/agents.py``'s globals, the chat handlers those ``dashboard/chat_api``
 #: defines on ``chat_handlers.py``'s, and the chat runner those ``dashboard/chat_turn``
-#: defines on its own, so the literal ratchet reads those owners as
-#: part of that file.
+#: defines on its own, and the doctor those ``cli_doctor_parts`` defines on
+#: ``cli_doctor.py``'s, so the literal ratchet reads those owners as part of that file.
 _COMPOSED_OWNERS = {
+    "cli_doctor.py": "cli_doctor_parts",
+    "context.py": "context_assembly",
     "dashboard/handlers/agents.py": "dashboard/agent_admin",
     "dashboard/chat_handlers.py": "dashboard/chat_api",
     "dashboard/chat_runner.py": "dashboard/chat_turn",
 }
+
+#: The doctor composes fewer owners than the floor the larger packages share.
+_MIN_COMPOSED_OWNERS = {"cli_doctor.py": 4}
 
 
 def _composed_owner_paths(rel: str) -> list[Path]:
@@ -185,7 +191,8 @@ def _composed_owner_paths(rel: str) -> list[Path]:
     if owner_dir is None:
         return []
     owners = sorted((SRC / owner_dir).glob("[!_]*.py"))
-    assert len(owners) >= 13, f"{owner_dir}: the composed owners were not found"
+    floor = _MIN_COMPOSED_OWNERS.get(rel, 13)
+    assert len(owners) >= floor, f"{owner_dir}: the composed owners were not found"
     return owners
 
 
@@ -233,7 +240,10 @@ def test_converted_files_ask_the_predicate(rel: str) -> None:
     Without this, deleting the branch (or renaming the file) would make the
     ratchet pass while the provider-specific logic went somewhere unwatched.
     """
-    body = (SRC / rel).read_text(encoding="utf-8")
+    # A composed file asks it in its own text or in an owner it composes.
+    body = "\n".join(
+        path.read_text(encoding="utf-8") for path in [SRC / rel, *_composed_owner_paths(rel)]
+    )
     assert "is_claude_code" in body, f"{rel} no longer asks is_claude_code()"
 
 

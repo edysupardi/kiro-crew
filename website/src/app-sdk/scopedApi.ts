@@ -62,6 +62,29 @@ export interface AppPermissions {
   events: string[]
 }
 
+/**
+ * Whether a newer version of this app is already published.
+ *
+ * The host reads this from the caches it already keeps, so it costs no network
+ * call and may be older than the registry. `checkedAt` is when that cache was
+ * last written, which is what lets an app say "last checked an hour ago"
+ * instead of implying the answer is current; it is `null` when the host knows
+ * the version but could not read the cache's timestamp.
+ *
+ * Advisory. It is what a surface SHOWS, never a licence to act: applying an
+ * update re-resolves the app's source server-side.
+ */
+export interface AppUpdate {
+  /** Whether `latestVersion` is strictly newer than the installed one. False
+   *  whenever the comparison cannot be made, so an update nobody can confirm is
+   *  never announced. */
+  available: boolean
+  /** The newest version the host has seen published for this app. */
+  latestVersion: string
+  /** ISO-8601 instant the host's cache was written, or null if unreadable. */
+  checkedAt: string | null
+}
+
 export interface AppInfo {
   name: string
   version: string
@@ -71,6 +94,16 @@ export interface AppInfo {
    *  mounted while hidden and reads this to pause polling or release global
    *  keys. Absent on hosts that predate the flag — treat `undefined` as `true`. */
   active?: boolean
+  /**
+   * Update state for this app, when the host has an answer.
+   *
+   * ABSENT means the host has not consulted anything yet — not that the app is
+   * current. Those are different claims, and rendering the first as the second
+   * tells the user "up to date" on no evidence. Treat `undefined` as unknown
+   * and show nothing; only `update.available === false` means "nothing newer".
+   * Also absent on hosts that predate this field.
+   */
+  update?: AppUpdate
 }
 
 export interface AppSdkContextValue {
@@ -111,7 +144,10 @@ function matchesDeclared(allowedPaths: readonly string[], normalized: string): b
  *  component uses it to hide a control whose request would be refused (the
  *  ChatEmbed attach control reads it for `/api/upload/file`). */
 export function apiPathAllowed(allowedPaths: readonly string[], path: string): boolean {
-  if (/^(?:https?:)?[/\\]{2}/i.test(path) || path.includes('\\')) return false
+  // Backslashes are inspected only before `?`/`#`: the URL parser treats `\`
+  // like `/` in the authority/path portion, while a `\` inside a query or
+  // fragment value is inert data (e.g. a regex parameter).
+  if (/^(?:https?:)?[/\\]{2}/i.test(path) || path.split(/[?#]/, 1)[0].includes('\\')) return false
   return matchesDeclared(allowedPaths, new URL(path, 'http://localhost').pathname)
 }
 
@@ -120,7 +156,8 @@ function createScopedApi(allowedPaths: string[], appName: string, sessionKey: st
     // Reject absolute and protocol-relative URLs to prevent SSRF. Backslashes
     // are rejected too: the URL parser treats `\` like `/`, so `/\evil.com` or
     // `\\evil.com` would otherwise be parsed as a protocol-relative authority.
-    if (/^(?:https?:)?[/\\]{2}/i.test(path) || path.includes('\\')) {
+    // Only the portion before `?`/`#` is inspected: a `\` in a query value is data.
+    if (/^(?:https?:)?[/\\]{2}/i.test(path) || path.split(/[?#]/, 1)[0].includes('\\')) {
       throw new Error(`[app-sdk] Absolute URLs are not allowed: ${path}`)
     }
     // Normalize BEFORE the allowlist check so `..` traversal cannot escape the
@@ -251,6 +288,7 @@ export function AppScopedApiProvider({
   appName,
   appDisplayName,
   appVersion = '0.0.0',
+  appUpdate,
   allowedEvents = NO_EVENTS,
   active = true,
   subscribeFn = noopSubscribe,
@@ -269,6 +307,9 @@ export function AppScopedApiProvider({
    */
   appDisplayName?: string
   appVersion?: string
+  /** Published as `info.update`. Omitted when the host has no cached answer,
+   *  which an app must read as unknown rather than as "nothing newer". */
+  appUpdate?: AppUpdate
   allowedEvents?: string[]
   /** Whether the app's host surface is currently visible; published as
    *  `info.active`. A routed page is always visible, so `true` is the default. */
@@ -296,6 +337,10 @@ export function AppScopedApiProvider({
   }
   const apiKey = JSON.stringify(allowedApiPaths)
   const eventsKey = JSON.stringify(allowedEvents)
+  // Serialized for the same reason the two lists above are: the host rebuilds
+  // this object from a fetch, so a fresh identity every render would rebuild
+  // the context — and with it the scoped API client — on every render.
+  const updateKey = JSON.stringify(appUpdate ?? null)
   const value = React.useMemo<AppSdkContextValue>(() => ({
     api: createScopedApi(allowedApiPaths, resolvedName, sessionKey, appDisplayName || resolvedName),
     info: {
@@ -303,12 +348,17 @@ export function AppScopedApiProvider({
       version: appVersion,
       permissions: { api: allowedApiPaths, events: allowedEvents },
       active,
+      // Spread, so the key is ABSENT rather than explicitly undefined when the
+      // host has no answer: `'update' in info` then separates "not consulted"
+      // from "consulted, nothing newer", which is the distinction the field
+      // exists to carry.
+      ...(appUpdate ? { update: appUpdate } : {}),
     },
     subscribe: subscribeFn,
     navigate: navigateFn,
     notify: notifyFn,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [resolvedName, appDisplayName, appVersion, apiKey, eventsKey, sessionKey, active, subscribeFn, navigateFn, notifyFn])
+  }), [resolvedName, appDisplayName, appVersion, updateKey, apiKey, eventsKey, sessionKey, active, subscribeFn, navigateFn, notifyFn])
 
   return React.createElement(AppSdkContext.Provider, { value }, children)
 }

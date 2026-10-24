@@ -16,6 +16,7 @@ import useMoveUndo from '../../../hooks/useMoveUndo'
 import type { Slot } from '../types'
 import { sessionRefBlockReason } from '../../../utils/sessionRefs'
 import { boardColumnFromDroppableId } from '../../../utils/boardFolderCollapse'
+import { sessionDisplayTitle } from '../../../utils/sessionDisplayTitle'
 import { CHAT_PANE_DROP_TYPE } from './collision'
 import type { FolderSortModeRead } from '../../../hooks/useFolderSortMode'
 import type { FolderMutations } from '../folders'
@@ -195,7 +196,8 @@ export function useSidebarMoveUndo({ localSlots, folders, moveFolderTo, queryCli
       toFolderId: to,
       toFolderName: dest?.name ?? null,
       toFolderColor: dest?.color,
-      itemTitle: slot?.title || slotKey,
+      // A session missing from the list keeps its key: its title is unknown.
+      itemTitle: slot ? sessionDisplayTitle(slot) : slotKey,
     })
   }, [localSlots, folders, armDragMove, dismissFolderMove])
   const moveFolderByDrag = useCallback((folderId: string, parentId: string | null) => {
@@ -219,7 +221,10 @@ export function useSidebarMoveUndo({ localSlots, folders, moveFolderTo, queryCli
       itemTitle: folder.name,
     })
   }, [queryClient, armFolderMove, dismissDragMove])
-  return { dragMove, undoDragMove, undoBar, folderMove, undoFolderMove, folderUndoBar, moveByDrag, moveFolderByDrag }
+  // Retire both move offers, for the manual sort's offer, which shares their
+  // slot below the lanes (and the one ⌘Z listener a slot may hold).
+  const dismissMoves = useCallback(() => { dismissDragMove(); dismissFolderMove() }, [dismissDragMove, dismissFolderMove])
+  return { dragMove, undoDragMove, undoBar, folderMove, undoFolderMove, folderUndoBar, moveByDrag, moveFolderByDrag, dismissMoves }
 }
 
 /** Which session card a board column is dragging with native HTML5 DnD -- the
@@ -270,7 +275,7 @@ export function useNativeSessionDrag() {
 }
 
 /** The DndContext lifecycle handlers shared by every lane. */
-export function useSidebarDragHandlers({ releaseHoverPin, setDragFrozen, hideFolderReorderHint, setActiveDrag, activeDrag, dragFrozen, folderReorderable, folderSortRead, showFolderReorderHint, moveFolderByDrag, reorderFolders, searchRanked, pinned, reorderPinned, localSlots, activeSlot, onDropSessionRef, moveByDrag, folders, boardFolderCollapsed, updateFolderMutation, clearBoardCollapse }: {
+export function useSidebarDragHandlers({ releaseHoverPin, setDragFrozen, hideFolderReorderHint, setActiveDrag, activeDrag, dragFrozen, folderReorderable, folderSortRead, showFolderReorderHint, moveFolderByDrag, reorderFolders, searchRanked, pinned, reorderPinned, reorderManual, localSlots, activeSlot, onDropSessionRef, moveByDrag, folders, boardFolderCollapsed, updateFolderMutation, clearBoardCollapse }: {
   releaseHoverPin: () => void
   setDragFrozen: Dispatch<SetStateAction<boolean>>
   hideFolderReorderHint: () => void
@@ -285,6 +290,7 @@ export function useSidebarDragHandlers({ releaseHoverPin, setDragFrozen, hideFol
   searchRanked: Map<string, number> | null
   pinned: Set<string>
   reorderPinned: (activeKey: string, overKey: string) => void
+  reorderManual: (activeKey: string, overKey: string) => void
   localSlots: Slot[]
   activeSlot: string | null
   onDropSessionRef: ((ref: { key: string; title: string; messages?: number | undefined; }) => void) | undefined
@@ -405,6 +411,15 @@ export function useSidebarDragHandlers({ releaseHoverPin, setDragFrozen, hideFol
         reorderPinned(a.key, o.key)
         return
       }
+      // A drop between two unpinned rows of one container, in any sort: the
+      // manual order (which switches the sort to Manual). A search ranks the
+      // list by relevance, so there is no between-rows place to drop into.
+      if (!searchRanked && o?.type === 'manual-session' && o.key
+        && a.pinned !== true && a.container === o.container
+        && !pinned.has(a.key) && !pinned.has(o.key)) {
+        reorderManual(a.key, o.key)
+        return
+      }
       // Drop targets, innermost-first via pointerWithinDeepest:
       //  chat-pane-ref → stage a LINK to this session in the open chat's composer
       //  folder-drop  → assign to that folder (folderId may be null for root lane)
@@ -426,7 +441,7 @@ export function useSidebarDragHandlers({ releaseHoverPin, setDragFrozen, hideFol
       if (o?.type === 'folder-drop') moveByDrag(a.key, o.folderId ?? null)
       else if (o?.type === 'folder') moveByDrag(a.key, over.id as string)
     }
-  }, [resetSidebarDrag, reorderFolders, reorderPinned, searchRanked, pinned, moveByDrag, moveFolderByDrag, localSlots, activeSlot, onDropSessionRef, folderReorderable, folderSortRead.known, showFolderReorderHint])
+  }, [resetSidebarDrag, reorderFolders, reorderPinned, reorderManual, searchRanked, pinned, moveByDrag, moveFolderByDrag, localSlots, activeSlot, onDropSessionRef, folderReorderable, folderSortRead.known, showFolderReorderHint])
   const handleSidebarDragCancel = resetSidebarDrag
   // Auto-expand collapsed folders when a dragged item hovers over them for 500ms.
   const dragExpandTimer = useRef<{ id: string; timer: ReturnType<typeof setTimeout> } | null>(null)

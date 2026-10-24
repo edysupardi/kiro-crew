@@ -34,7 +34,7 @@ which cell a measurement would pay for.
 Five things keep the exception from growing into the per-harness table this
 projection exists to remove:
 
-* an entry is admissible ONLY where the deciding set's own comment in ``backends.py``
+* an entry is admissible ONLY where the deciding set's own comment in its ``backends_*`` owner
   says the gap is evidence. ``test_backend_cards`` reads that comment and fails an
   entry the vocabulary does not support, so the table cannot drift away from the
   prose and the threshold is a gate rather than a convention to remember;
@@ -159,7 +159,7 @@ grows the other's fields.
 
 It cannot live in ``backends.py`` either: the ``vocabulary-home`` ratchet
 (``scripts/check_harness_parity.py``, H8) reserves the ``ACP_BACKENDS_*`` spelling
-for that module, so a projection over those sets is a function in a module of its
+for that module and its owners, so a projection over those sets is a function in a module of its
 own -- the same shape, and for the same reason, as
 ``host_auth.backends_retired_by_host_logout()``.
 """
@@ -181,7 +181,7 @@ from kiro_crew.agent_sdk.backend_mcp_ability import ability_payload
 LINE_CREW_TOOLS = "crew_tools"
 #: A crew-member chat gets the session-control tools mounted.
 LINE_MEMBER_THREAD_TOOLS = "member_thread_tools"
-#: An enrolled member's whole saved agent spec is loaded at spawn.
+#: An enrolled member's saved spec is loaded or projected at spawn.
 LINE_MEMBER_SAVED_AGENT = "member_saved_agent"
 #: A Side Chat turn may execute read-only tools.
 LINE_SIDE_CHAT_TOOLS = "side_chat_tools"
@@ -226,9 +226,9 @@ NOTE_HARNESS_MODEL_LIST = "harness_model_list"
 #: Off the card, on the same terms: which channel carries a slash command. A
 #: non-member is not command-less -- opencode and pi publish their own built-ins as
 #: an ``available_commands_update`` -- so the difference is the channel rather than
-#: the feature. Its input set stays a capability-line input (it is the kiro-family
-#: marker), which is why the decision is recorded here rather than in
-#: :data:`OFF_CARD_SETS`.
+#: the feature. Its input set stays a capability-line input (the reasoning-effort
+#: line's slash-command channel), which is why the decision is recorded here rather
+#: than in :data:`OFF_CARD_SETS`.
 NOTE_CREW_COMMAND_CHANNEL = "crew_command_channel"
 
 #: The auth declaration, rather than a membership set, decides a line.
@@ -265,13 +265,11 @@ USER_FACING_LINES: Tuple[_LineSpec, ...] = (
     # harness in NEITHER has none of Crew's tools in its sessions, which is the
     # single most consequential thing this card says.
     #
-    # ``ACP_BACKENDS_KIRO_SLASH_COMMANDS`` is the kiro-family marker and stands for
-    # that family here. The runtime set does NOT: codex is served by the shared
-    # runtime for TRANSPORT reasons while reading none of Crew's agent spec, so a
-    # line keyed on it would hand codex this claim by the wrong route.
-    _LineSpec(
-        LINE_CREW_TOOLS, ("ACP_BACKENDS_SESSION_MCP_ARRAY", "ACP_BACKENDS_KIRO_SLASH_COMMANDS")
-    ),
+    # ``ACP_BACKENDS_KIRO_FAMILY`` names that family here. The runtime set does
+    # NOT: codex is served by the shared runtime for TRANSPORT reasons while reading
+    # none of Crew's agent spec, so a line keyed on it would hand codex this claim
+    # by the wrong route.
+    _LineSpec(LINE_CREW_TOOLS, ("ACP_BACKENDS_SESSION_MCP_ARRAY", "ACP_BACKENDS_KIRO_FAMILY")),
     _LineSpec(LINE_MEMBER_THREAD_TOOLS, ("ACP_BACKENDS_MEMBER_DISPATCH",)),
     _LineSpec(LINE_SIDE_CHAT_TOOLS, ("ACP_BACKENDS_SIDE_READONLY",)),
     # Three verbs carry a user's mid-turn message: kiro-cli's ``_session/steer``,
@@ -289,20 +287,21 @@ USER_FACING_LINES: Tuple[_LineSpec, ...] = (
     _LineSpec(LINE_MANUAL_COMPACT, ("ACP_BACKENDS_COMPACT",)),
     # Effort travels down one of two channels, and neither set alone answers the
     # question a user asks. The config-option members advertise an ``effort``
-    # option; the kiro family changes effort by slash command and is absent from
-    # that set entirely, so reading the config set alone would report the default
-    # harness as unable to do what it has always done.
+    # option; kiro-cli changes effort by the ``/effort`` slash command and is absent
+    # from that set entirely, so reading the config set alone would report the
+    # default harness as unable to do what it has always done. KAS takes effort as
+    # a config option, so it answers through the first set.
     _LineSpec(
         LINE_REASONING_EFFORT,
         ("ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION", "ACP_BACKENDS_KIRO_SLASH_COMMANDS"),
     ),
     # Same shape for the model: the config-option members take a switch as
     # ``session/set_config_option``, and the kiro family takes it as the native
-    # set-model request no membership set names positively -- so the kiro-family
-    # marker stands for it, as on the first line above.
+    # set-model request -- so the kiro-family set stands for it, as on the first
+    # line above.
     _LineSpec(
         LINE_MODEL_SWITCH,
-        ("ACP_BACKENDS_MODEL_VIA_CONFIG_OPTION", "ACP_BACKENDS_KIRO_SLASH_COMMANDS"),
+        ("ACP_BACKENDS_MODEL_VIA_CONFIG_OPTION", "ACP_BACKENDS_KIRO_FAMILY"),
     ),
 )
 
@@ -314,8 +313,11 @@ USER_FACING_LINES: Tuple[_LineSpec, ...] = (
 #: panel can show them behind a folded disclosure, and kept OUT of the card's
 #: count so "supports N of M" is a number over the core set alone.
 DETAIL_LINES: Tuple[_LineSpec, ...] = (
-    # Only kiro-cli loads an enrolled member's whole saved spec at spawn. The
-    # question a user asks -- does a crewmate get Crew's tools here? -- is the
+    # Whether an enrolled member's saved spec is loaded (kiro-cli, KAS) or its
+    # projection confirmed (Claude, Codex, DeepSeek) at spawn. The label says
+    # "saved agent", not "whole": a projecting backend reports some fields as
+    # gaps, and the card's "will not take effect" list names them. The question
+    # a user asks -- does a crewmate get Crew's tools here? -- is the
     # member-thread line on the card; this one says how the spec arrives.
     _LineSpec(LINE_MEMBER_SAVED_AGENT, ("ACP_BACKENDS_MEMBER_CAPABILITIES",)),
     # ``spawn_continue`` is a verb the AGENT calls, not a control the user
@@ -358,6 +360,13 @@ OPERATOR_LINES: Tuple[_LineSpec, ...] = (
 #: DEFECT rather than an absent feature, and a card that listed defect classes in
 #: front of someone choosing a harness would be worse than one line shorter.
 OFF_CARD_SETS: Mapping[str, str] = {
+    "ACP_BACKENDS_MATE_WORKER_KIT": (
+        "whether a crewmate's worker may run here with its kit. A worker always runs "
+        "on its crewmate's backend, so the choice it depends on is the member "
+        "backend, and a non-member refuses the hand-off with an error that names "
+        "the backends that can carry it. Nothing runs without its kit, so a card "
+        "line would describe a refusal the user meets with its own remedy"
+    ),
     "ACP_BACKENDS_SERIAL_SESSION_STARTS": (
         "which backend's process answers session starts and mode switches one at a "
         "time. It decides only what a timed-out start's error says about the "
@@ -470,6 +479,10 @@ OFF_CARD_SETS: Mapping[str, str] = {
         "reports whether /compact works, which is what a reader choosing a harness "
         "acts on"
     ),
+    "ACP_BACKENDS_UNMARKED_COMPACTION_PAIR": (
+        "which frame shape the compaction parser reads; the compaction itself is "
+        "the manual_compact line"
+    ),
     "ACP_BACKENDS_HARNESS_MANAGED_COMPACTION": (
         "what answers a full context on a harness Crew cannot hand /compact to. The "
         "card already reports whether /compact works, which is the part a reader "
@@ -492,6 +505,14 @@ OFF_CARD_SETS: Mapping[str, str] = {
     "ACP_BACKENDS_SEED_LOCAL_SETTINGS": (
         "whether a settings file is re-seeded on a model switch. Invisible when "
         "right, a stale model when wrong"
+    ),
+    "ACP_BACKENDS_EFFORT_OVERLAY": (
+        "which channel carries a reasoning-effort level to the engine at spawn -- the "
+        "workspace cli.json overlay for this set, a config option or a slash command "
+        "for the rest. The card's effort line already says whether effort can be "
+        "changed, and every channel applies the level the user chose. A wrong "
+        "membership is a defect: the level is written where the engine never reads "
+        "it, or a session is started at a level another session left in that file"
     ),
     "ACP_BACKENDS_TOOL_SEARCH_OVERLAY": (
         "which channel carries the Tool Search setting to the engine -- the "
@@ -604,10 +625,11 @@ MEMBERSHIP_FLOOR_SET = "ACP_BACKENDS_KNOWN"
 #: The set that marks the kiro family, for the union lines that stand on it.
 #:
 #: Two lines read it as "the family that loads Crew's agent spec and takes the
-#: native set-model request", and no set says that positively. The runtime set
-#: cannot stand in for it: it is a TRANSPORT property, and codex sits in it while
-#: reading no agent spec of Crew's. A test holds both lines to reading THIS set.
-KIRO_FAMILY_MARKER_SET = "ACP_BACKENDS_KIRO_SLASH_COMMANDS"
+#: native set-model request". The runtime set cannot stand in for it: it is a
+#: TRANSPORT property, and codex sits in it while reading no agent spec of Crew's.
+#: Nor can the command-verb set: KAS refuses that verb but is in the family. A test
+#: holds both lines to reading THIS set.
+KIRO_FAMILY_MARKER_SET = "ACP_BACKENDS_KIRO_FAMILY"
 
 #: A capability the harness's own source says it serves, which no live run has
 #: confirmed -- the evidence CLASS the deciding set holds its members to.
@@ -650,6 +672,24 @@ class UnmeasuredLine:
 #: are stated only when they HOLD, so an unmeasured one is already absent rather than
 #: crossed out, and a third level would have nothing to correct.
 DECLARED_UNMEASURED: Mapping[Tuple[str, str], UnmeasuredLine] = {}
+
+#: Card lines the runtime also gates on a field the adapter advertises, with that
+#: field. For these lines a membership set is not the whole answer: the runtime
+#: refuses the line when the session's handshake lacks the field.
+#:
+#: ``test_backend_cards_advertised`` counts the runtime sites that gate one of these
+#: lines on a deciding set instead, against a shrink-only allowlist, so a new site
+#: reads the field rather than adding another set test.
+ADVERTISED_FIELD_BY_LINE: Mapping[str, str] = {
+    # claude only, in ``acp.client_turn_control._steering_request_ready``.
+    LINE_MID_TURN_STEER: "initialize._meta.steering.supported",
+    # KAS only, in ``acp.session_handle_compaction._kas_compact_advertised``.
+    LINE_MANUAL_COMPACT: "initialize.agentCapabilities._meta.kiro.extensionMethods",
+    # The effort option's values, in ``acp.client_model_selection.get_valid_effort_levels``.
+    LINE_REASONING_EFFORT: "session.configOptions[effort option].options",
+    # The model select, in ``acp.session_handle_model_selection.model_select_envelope``.
+    LINE_MODEL_SWITCH: "session.configOptions[model] or session.models.availableModels",
+}
 
 
 @dataclass(frozen=True)

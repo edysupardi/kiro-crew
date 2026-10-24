@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         chunk_generation,
         deny_app_slot_access,
         effective_session_key,
+        folder_principal,
         history_corpus_unreadable,
         logger,
         parse_cls_meta,
@@ -83,6 +84,13 @@ async def api_chat_slots(request: web.Request) -> web.Response:
     # the full, unchanged response (an app row is already app-scoped downstream).
     from kiro_crew.dashboard.token_auth import MEMBER_CHAT_PRINCIPAL_KEY
 
+    if folder_principal(state, request):
+        # ``pin_rank`` is a place in the person's whole pinned order; an app or
+        # member caller gets none of it, so a filtered list's rank gaps cannot
+        # count the pinned sessions it is not shown.
+        from kiro_crew.dashboard.pinned_session_order import PIN_ORDER_FIELDS
+
+        payloads = [{k: v for k, v in p.items() if k not in PIN_ORDER_FIELDS} for p in payloads]
     if str(request.get(MEMBER_CHAT_PRINCIPAL_KEY) or "").startswith("member:"):
         from kiro_crew.dashboard.session_control import member_owns_slot
 
@@ -297,14 +305,14 @@ def _same_persisted_body(
     verbatim (``chat_persistence.py:708-709``), so the window holds the redacted
     text; a save redacts every non-user role on the way out
     (``chat_persistence.py:1282-1284``) while the window keeps it verbatim
-    (``state.py:2107``), so in a session that was never restored the DISK holds the
-    redacted text instead. Redacting one side only cannot converge on that second
+    (``state_parts/slot_transcript.py`` ``append``), so in a session that was never restored the
+    DISK holds the redacted text instead. Redacting one side only cannot converge on that second
     pair — redacting an already-redacted body just reproduces it — so the row reads
     as un-flushed and the persisted suffix is appended twice.
 
     Applying the transform is also what separates a persisted row from a foreign
     row that merely shares a ``ts``: on a coarse clock two writers flooring off the
-    same previous row both emit ``previous + 1µs`` (``history.py:1179-1219``), so
+    same previous row both emit ``previous + 1µs`` (``history_schema.monotonic_transcript_ts``), so
     matching on ``ts`` alone treats an unrelated row as the window's own and drops
     an un-flushed message from a response the client uses as a replacement.
 
@@ -343,7 +351,7 @@ def _is_answered_permission(m: dict) -> bool:
     moves it after them and the rendered order does not match what happened.
 
     The decision is written into the row's ``cls`` JSON in place
-    (``state.py`` ``_mark_permission_resolved``), which is also the only place the
+    (``state_parts/transcript_rows.py`` ``_mark_permission_resolved``), which is also the only place the
     stale-sweep and the slot resolver read it, so ``cls`` is the single source of
     truth here. Truthiness rather than key presence mirrors the client's own
     ``!meta.resolved`` test (``store/chat/selectors.ts`` ``selectSlotPendingApproval``), so an
@@ -368,8 +376,8 @@ def _snapshot_slot_window(slot: "_ChatSlot") -> tuple[int, list[dict]]:
     there, which is why capturing inside the threaded scan is the weaker option.
 
     From a thread the pair can still tear, so retry: a front trim bumps
-    ``_disk_older_count`` (state.py:2191-2200) between the reads, and a PRE-trim
-    window paired with a POST-trim count shortens ``window_disk``, hides the
+    ``_disk_older_count`` (``state_parts/slot_transcript.py`` ``append``) between the reads, and a
+    PRE-trim window paired with a POST-trim count shortens ``window_disk``, hides the
     trimmed rows' ids and re-appends rows the disk read already returned. A trim
     is the only mutation that changes the window/count relationship, so read the
     count, copy the window, then confirm the count is unchanged. ``slot._lock``
@@ -449,7 +457,7 @@ def _append_unflushed_tail_from_offset(
     A row matches on role plus content, compared through the redaction transform
     on both sides (``_same_persisted_body``). A shared ``ts`` is never SUFFICIENT —
     on a coarse clock two writers flooring off the same previous row both emit
-    ``previous + 1µs`` (``history.py:1179-1219``), so accepting it alone drops an
+    ``previous + 1µs`` (``history_schema.monotonic_transcript_ts``), so accepting it alone drops an
     un-flushed message — but it is REQUIRED on the redaction-equivalent branch,
     where the only legitimate pair is a row and its own copy and the stamp is
     carried through verbatim.
@@ -624,7 +632,7 @@ def _append_unflushed_tail_from_offset(
         # mirrors it.
         #
         # Two symptoms, one cause. A trailing ``done`` reaches the bounded response and
-        # ``_prepare_messages`` then drops it while rendering (``chat_utils.py``), so a
+        # ``_prepare_messages`` then drops it while rendering (``chat_utils_display.py``), so a
         # page whose only row is that ``done`` renders EMPTY and replaces the transcript.
         # A trailing answered ``permission`` is instead re-ordered after every persisted
         # row -- the misordering ``_is_answered_permission`` exists to prevent.
@@ -1081,7 +1089,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
         # index; the fallback below already serves it from the resident window.
         if state.conversation_log and not requires_full_reader:
             # Imported here, not at module scope: this function runs on the
-            # handlers module's globals (``chat_api.compose``).
+            # handlers module's globals (``_facade_compose.compose``).
             from kiro_crew.dashboard.transcript_snapshot import (
                 PAGE,
                 SNAPSHOT_ATTEMPTS,
@@ -1250,6 +1258,12 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
     turn_running = slot.turn_running
     verdict_key = slot_history_key(slot)
     running = slot.running
+    # A turn another path runs on this slot's linked session (the Slack thread a
+    # channel-born tab is bound to) has no task here but IS in flight: the same
+    # read the slots summary makes, so the open pane and the sidebar agree and
+    # the pane does not offer Resume on a turn that is still answering.
+    if not running and slot.linked_turn_running:
+        running = True
     # Admission-only running has no numbered turn yet. Omitting the pair keeps
     # this response from naming the preceding turn as the one currently running.
     turn_identity: dict[str, object] = (
@@ -1284,7 +1298,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
     ]
     context_fields = await _context_snapshot_fields(state, slot)
     # Imported here, not at module scope: this function runs on the handlers
-    # module's globals (``chat_api.compose``).
+    # module's globals (``_facade_compose.compose``).
     from kiro_crew.dashboard import wire_render
 
     # One read shape of this session: the newest page (whatever its size),
@@ -1320,6 +1334,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
                     live_child=live_child,
                     workspace=workspace,
                     use_memo=use_memo,
+                    scope=memo_scope,
                 )
                 plan = slot_detail_delta.plan_page(
                     fragments,
@@ -1332,7 +1347,11 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
                 messages_json = "[" + ", ".join(plan.fragments) + "]"
             elif use_memo:
                 messages_json = wire_render.prepare_messages_json(
-                    messages, running, live_child=live_child, workspace=workspace
+                    messages,
+                    running,
+                    live_child=live_child,
+                    workspace=workspace,
+                    scope=memo_scope,
                 )
             else:
                 messages_json = json.dumps(

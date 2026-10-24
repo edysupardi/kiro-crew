@@ -29,10 +29,6 @@ import { __resetPanelTabs } from '../../hooks/usePanelTabs'
  *     Panel-only hides, file opens, Side Chat switches, and Workspace from a
  *     FLOATING card keep the Profile draft mounted and therefore do not ask;
  *     Workspace from the DOCKED column unmounts the card and does.
- *
- * Its own file rather than a block in `MembersPage.test.tsx`: the `below md`
- * describe there leaves `useIsMobile` answering mobile, so a later case that
- * needs the wide layout finds no header switcher at all.
  */
 
 vi.mock('../../api/client', () => ({
@@ -68,8 +64,16 @@ vi.mock('../../api/client', () => ({
     agentCatalog: vi.fn(() => Promise.resolve({ agents: [], default_agent: 'kirocrew' })),
     workspaces: vi.fn(() => Promise.resolve({ workspaces: [] })),
     kirocrewConfig: vi.fn(() => Promise.resolve({ agents: {} })),
+    // The goal record. The Schedules tab's Heartbeat row reads it too
+    // (`schedules.heartbeat`), so the quiet default is a whole record with no
+    // goal, not a bare `{ goals: [] }`.
     memberGoals: {
-      get: vi.fn(() => Promise.resolve({ goals: [] })), setGoal: vi.fn(), setKeyResults: vi.fn(), setSchedules: vi.fn(),
+      get: vi.fn(() => Promise.resolve({
+        slug: '', member: '', goals: [], key_results: [], reports: [], removed_goal: null, removed_key_result: null,
+        schedules: { time: '09:00', timezone: '', daily: false, weekly: false, weekday: 1, monthly: false, month_day: 1, heartbeat: false, interval: 60 },
+        limits: { goal_text_max_chars: 2000, key_result_text_max_chars: 200, key_result_value_max_chars: 40, key_result_reading_max_chars: 120 },
+      })),
+      setGoal: vi.fn(), setKeyResults: vi.fn(), setSchedules: vi.fn(),
     },
     sendChat: vi.fn(),
   },
@@ -261,7 +265,7 @@ describe('MembersPage Profile card Schedules tab', () => {
     expect(screen.queryByTestId('crew-wake-section')).toBeNull()
   })
 
-  it('lists this crewmate\'s schedules as readable rows — name, when, state — and no others', async () => {
+  it('lists this mate\'s schedules as readable rows — name, when, state — and no others', async () => {
     await openCrewmate()
     const list = await openSchedulesTab()
     await waitFor(() => expect(within(list).getAllByTestId('crew-schedule-row')).toHaveLength(2))
@@ -279,7 +283,7 @@ describe('MembersPage Profile card Schedules tab', () => {
     expect(screen.queryByTestId('member-schedules-count')).toBeNull()
   })
 
-  it('matches a private schedule on the crewmate\'s IMMUTABLE id, not its display name', async () => {
+  it('matches a private schedule on the mate\'s IMMUTABLE id, not its display name', async () => {
     // The fixtures above all have name === slug, which cannot tell the two identities
     // apart. A private schedule's `member_id` is the slug, so for a crewmate whose
     // display name is not already its own slug, matching on the name showed nothing.
@@ -298,7 +302,7 @@ describe('MembersPage Profile card Schedules tab', () => {
     await waitFor(() => expect(within(list).getAllByTestId('crew-schedule-row')).toHaveLength(2))
   })
 
-  it('does not hand the default crewmate a job that belongs to nobody', async () => {
+  it('does not hand the default mate a job that belongs to nobody', async () => {
     // `kirocrew` IS the default crew, and the crew editor's pane WOULD list the
     // ownerless job there (`wakesCrew`'s last fallback). The card does not: it answers
     // what wakes this crewmate, and a schedule with no crewmate is nobody's.
@@ -308,11 +312,11 @@ describe('MembersPage Profile card Schedules tab', () => {
     expect(list).not.toHaveTextContent('nightly backup')
   })
 
-  it('a crewmate nothing wakes gets the quiet line, in the panel\'s own words', async () => {
+  it('a mate nothing wakes gets the quiet line, in the panel\'s own words', async () => {
     vi.mocked(api.crons).mockResolvedValue({ jobs: [] } as never)
     await openCrewmate()
     const list = await openSchedulesTab()
-    expect(await within(list).findByTestId('crew-schedule-empty')).toHaveTextContent(/Nothing wakes this crewmate on its own yet/i)
+    expect(await within(list).findByTestId('crew-schedule-empty')).toHaveTextContent(/Nothing wakes this mate on its own yet/i)
     // No `0` anywhere — not on the rail, not in the list.
     expect(screen.queryByTestId('member-schedules-count')).toBeNull()
     expect(within(screen.getByTestId('crew-profile-tabs')).queryByText('0')).toBeNull()
@@ -327,7 +331,7 @@ describe('MembersPage Profile card Schedules tab', () => {
     await waitFor(() => expect(within(list).getAllByTestId('crew-schedule-row')).toHaveLength(2))
   })
 
-  it('an unreadable cron list is not reported as "nothing wakes this crewmate"', async () => {
+  it('an unreadable cron list is not reported as "nothing wakes this mate"', async () => {
     // Absence of an answer is not an answer of none. The old chip dropped its badge on a
     // failed read for exactly this reason; the list must not state the affirmative
     // empty line on the strength of a request that failed.
@@ -337,7 +341,7 @@ describe('MembersPage Profile card Schedules tab', () => {
     await waitFor(() => expect(vi.mocked(api.crons)).toHaveBeenCalled())
     await new Promise((r) => setTimeout(r, 50))
     expect(within(list).queryByTestId('crew-schedule-empty')).toBeNull()
-    expect(list).not.toHaveTextContent(/Nothing wakes this crewmate/i)
+    expect(list).not.toHaveTextContent(/Nothing wakes this mate/i)
   })
 
   it('a row opens that job on the Schedule page; the footer opens the page itself', async () => {
@@ -371,7 +375,7 @@ describe('MembersPage Profile card Schedules tab', () => {
 })
 
 describe('MembersPage Profile card — New schedule', () => {
-  it('pushes the crew editor\'s own pane as a page over the card, with a back control naming the crewmate', async () => {
+  it('pushes the crew editor\'s own pane as a page over the card, with a back control naming the mate', async () => {
     await openCrewmate()
     await openSchedulesTab()
     fireEvent.click(screen.getByTestId('crew-schedule-create'))
@@ -393,11 +397,11 @@ describe('MembersPage Profile card — New schedule', () => {
     // second "What wakes this crewmate" and no second close control under the bar.
     expect(section).toHaveAttribute('data-chromeless', 'true')
     expect(within(section).queryByTestId('crew-wake-add')).toBeNull()
-    expect(within(page).queryByText('What wakes this crewmate')).toBeNull()
+    expect(within(page).queryByText('What wakes this mate')).toBeNull()
     expect(within(page).queryAllByRole('button', { name: /cancel new schedule/i })).toHaveLength(0)
     // The form's pinned-crew hint speaks this page's noun: the reader is on the
     // crewmate's Profile, not in the crew editor the editor's sentence names.
-    expect(within(section).getByText("Created from this crewmate's profile, so the job runs as this crewmate.")).toBeInTheDocument()
+    expect(within(section).getByText("Created from this mate's profile, so the job runs as this mate.")).toBeInTheDocument()
     expect(within(section).queryByText(/this crew's editor/)).toBeNull()
     // A clean form: back pops to the list with no question asked.
     fireEvent.click(screen.getByTestId('crew-profile-back'))
@@ -406,7 +410,7 @@ describe('MembersPage Profile card — New schedule', () => {
     expect(screen.getByTestId('crew-schedule-list')).toBeInTheDocument()
   })
 
-  it('writes the provider TEMPLATE for a crewmate whose identity persists, filed under its NAME', async () => {
+  it('writes the provider TEMPLATE for a mate whose identity persists, filed under its NAME', async () => {
     // `agent` and `member_id` are different fields and the form has to pass both. For a
     // crewmate with a persisted identity the server keeps `member_id`, so `wakesCrew`
     // matches on that and `agent` is free to carry the template — which is what
@@ -436,7 +440,7 @@ describe('MembersPage Profile card — New schedule', () => {
     )).toBe(true)
   })
 
-  it('writes the DISPLAY NAME for a crewmate whose identity does not persist, and lists it back', async () => {
+  it('writes the DISPLAY NAME for a mate whose identity does not persist, and lists it back', async () => {
     // A legacy crewmate has no persisted identity, so the server CLEARS `member_id` as
     // the job is created and `wakesCrew` falls through to comparing `agent` against the
     // display name. Writing the provider template there matched neither field.
@@ -549,7 +553,7 @@ describe('MembersPage Profile card — unsaved schedule draft', () => {
     act(() => { release({ ok: true, id: 'j-new' }) })
   })
 
-  it('asks before a crewmate switch from the switcher discards a draft, and remounts the card once it does', async () => {
+  it('asks before a mate switch from the switcher discards a draft, and remounts the card once it does', async () => {
     // Two rules meet here. The card is keyed on the crewmate, so a switch REMOUNTS it and
     // the form cannot survive with its `memberId` silently rebound. And because that
     // remount destroys typed work, the switch asks first.
@@ -790,7 +794,7 @@ describe('MembersPage Profile card — Memory tile', () => {
     return await screen.findByTestId('crew-profile-memory')
   }
 
-  it("opens THAT crewmate's private memory page, the store preselected", async () => {
+  it("opens THAT mate's private memory page, the store preselected", async () => {
     const tile = await openProfile({
       name: 'radar', slug: 'radar', slot_key: 'member-radar',
       memory_store: 'member-radar', memory_version: 2, memory_owner: 'radar',
@@ -800,7 +804,7 @@ describe('MembersPage Profile card — Memory tile', () => {
     await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/settings/overview?view=memory&store=member-radar'))
   })
 
-  it('stays a readout for a crewmate on the shared store', async () => {
+  it('stays a readout for a mate on the shared store', async () => {
     const tile = await openProfile({
       name: 'scout', slug: 'scout', slot_key: 'member-scout',
       memory_store: 'default', memory_version: 1, memory_owner: '',
@@ -815,11 +819,11 @@ describe('MembersPage Profile card — Goals retention and delivery', () => {
     slug: 'oncall', member: 'oncall',
     goals: [{ id: 'g00000001', number: 1, text: 'Keep releases current', created_at: 0, updated_at: 0, updated_by: 'user' }],
     key_results: [{ id: 'k00000001', text: 'Release notes', target: '10', current: '', updated_at: 0, readings: [], goal_ids: ['g00000001'] }],
-    schedules: { daily: false, weekly: false, monthly: false, weekday: 1, month_day: 1, time: '09:00', timezone: '' },
+    schedules: { daily: false, weekly: false, monthly: false, weekday: 1, month_day: 1, time: '09:00', timezone: '', heartbeat: false, interval: 60 },
     reports: [], removed_goal: null, removed_key_result: null,
     limits: { goal_text_max_chars: 2000, key_result_text_max_chars: 200, key_result_value_max_chars: 40, key_result_reading_max_chars: 120 },
   }
-  type Draft = 'goal' | 'milestone' | 'tracking'
+  type Draft = 'goal' | 'milestone'
   const draftText = 'Keep this draft'
 
   beforeEach(() => {
@@ -829,28 +833,39 @@ describe('MembersPage Profile card — Goals retention and delivery', () => {
     vi.mocked(api.sendChat).mockResolvedValue({ ok: true, json: async () => ({ ok: true }) } as Response)
   })
 
-  async function openGoalsDraft(kind: Draft, docked = false) {
+  /** Open the Goals tab on the card. */
+  async function openGoalsTab(docked = false) {
     if (docked) localStorage.setItem('mc-members-panel-open', '0')
     await openCrewmate('oncall', ['scout'])
     fireEvent.click(screen.getByTestId('member-identity-pill'))
     fireEvent.click(await screen.findByRole('tab', { name: 'Goals' }))
+  }
+
+  async function openGoalsDraft(kind: Draft, docked = false) {
+    await openGoalsTab(docked)
     if (kind === 'goal') {
       fireEvent.click(await screen.findByTestId('crew-goals-goal'))
-    } else if (kind === 'milestone') {
+    } else {
       fireEvent.click(await screen.findByTestId('goal-key-result-open'))
       fireEvent.click(await screen.findByRole('button', { name: 'Edit milestone' }))
-    } else {
-      fireEvent.click(await screen.findByTestId('crew-goals-track'))
     }
     const input = kind === 'milestone'
       ? await screen.findByLabelText('Milestone')
-      : await screen.findByTestId(kind === 'goal' ? 'crew-goals-long-term-input' : 'crew-goals-track-input')
+      : await screen.findByTestId('crew-goals-long-term-input')
     fireEvent.change(input, { target: { value: draftText } })
     await waitFor(() => expect(holdsDocument()).toBe(true))
     return input
   }
 
-  it.each(['goal', 'milestone', 'tracking'] as const)('guards every local exit and the route for a %s draft', async kind => {
+  /** Open the New goal modal from the Goals card and press its one button. */
+  async function sendNewGoal() {
+    fireEvent.click(await screen.findByTestId('crew-goals-add'))
+    const dialog = await screen.findByRole('dialog', { name: 'New goal' })
+    fireEvent.click(within(dialog).getByTestId('crew-goals-new-goal-send'))
+    return dialog
+  }
+
+  it.each(['goal', 'milestone'] as const)('guards every local exit and the route for a %s draft', async kind => {
     const input = await openGoalsDraft(kind)
     const exits = [
       () => fireEvent.click(screen.getByTestId('crew-profile-close')),
@@ -882,7 +897,7 @@ describe('MembersPage Profile card — Goals retention and delivery', () => {
     await waitFor(() => expect(screen.queryByDisplayValue(draftText)).toBeNull())
   })
 
-  it.each(['goal', 'milestone', 'tracking'] as const)('keeps the %s draft on a declined member switch', async kind => {
+  it.each(['goal', 'milestone'] as const)('keeps the %s draft on a declined member switch', async kind => {
     const input = await openGoalsDraft(kind)
     fireEvent.click(screen.getByTestId('crewmate-switcher'))
     fireEvent.click(await screen.findByRole('option', { name: /scout/i }))
@@ -891,7 +906,7 @@ describe('MembersPage Profile card — Goals retention and delivery', () => {
     expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-oncall')
   })
 
-  it.each(['goal', 'milestone', 'tracking'] as const)('retains the same %s input below md and on a remote panel reveal', async kind => {
+  it.each(['goal', 'milestone'] as const)('retains the same %s input below md and on a remote panel reveal', async kind => {
     const original = window.matchMedia
     window.matchMedia = vi.fn().mockImplementation((query: string) => ({
       media: query, get matches() { return query.includes('max-width: 767px') && window.innerWidth < 768 },
@@ -915,19 +930,20 @@ describe('MembersPage Profile card — Goals retention and delivery', () => {
     } finally { window.matchMedia = original }
   })
 
-  it.each(['goal', 'milestone', 'tracking', 'checkins'] as const)('refuses all exits while a %s request is pending', async kind => {
+  it.each(['goal', 'milestone', 'checkins'] as const)('refuses all exits while a %s request is pending', async kind => {
     let finish: (value: never) => void = () => {}
     const pending = new Promise<never>(resolve => { finish = resolve })
-    const mutation = kind === 'goal' ? api.memberGoals.setGoal : kind === 'milestone' ? api.memberGoals.setKeyResults : kind === 'checkins' ? api.memberGoals.setSchedules : api.sendChat
+    const mutation = kind === 'goal' ? api.memberGoals.setGoal : kind === 'milestone' ? api.memberGoals.setKeyResults : api.memberGoals.setSchedules
     vi.mocked(mutation).mockReturnValue(pending)
     await openGoalsDraft(kind === 'checkins' ? 'goal' : kind)
     if (kind === 'checkins') {
       fireEvent.click(screen.getByTestId('crew-profile-back'))
       await answer('Discard')
-      fireEvent.click(await screen.findByTestId('crew-goals-checkins-open'))
+      // Any check-in tile opens the Check-ins page, where the switches are.
+      fireEvent.click(await screen.findByTestId('crew-goals-checkin-daily'))
       fireEvent.click(await screen.findByRole('switch', { name: 'Weekly report' }))
     } else {
-      fireEvent.click(screen.getByRole('button', { name: kind === 'tracking' ? 'Send' : 'Save' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     }
     await waitFor(() => expect(mutation).toHaveBeenCalledTimes(1))
     expect(holdsDocument()).toBe(true)
@@ -937,7 +953,25 @@ describe('MembersPage Profile card — Goals retention and delivery', () => {
     expect(askToLeave()).toBe('false')
     expect(screen.getByTestId('crew-profile-panel')).toHaveAttribute('data-tab', 'goals')
     expect(screen.queryByRole('dialog')).toBeNull()
-    await act(async () => { finish((kind === 'tracking' ? { ok: true, json: async () => ({ ok: true }) } : goals) as never) })
+    await act(async () => { finish(goals as never) })
+    await waitFor(() => expect(holdsDocument()).toBe(false))
+  })
+
+  it('refuses all exits while the New goal message is in flight, with no discard question', async () => {
+    let finish: (value: never) => void = () => {}
+    const pending = new Promise<never>(resolve => { finish = resolve })
+    vi.mocked(api.sendChat).mockReturnValue(pending)
+    await openGoalsTab()
+    const dialog = await sendNewGoal()
+    await waitFor(() => expect(api.sendChat).toHaveBeenCalledTimes(1))
+    expect(holdsDocument()).toBe(true)
+    fireEvent.click(screen.getByTestId('crew-profile-close'))
+    fireEvent.click(screen.getByRole('tab', { name: 'Sessions', hidden: true }))
+    expect(askToLeave()).toBe('false')
+    expect(screen.getByTestId('crew-profile-panel')).toHaveAttribute('data-tab', 'goals')
+    // The one dialog on screen is the modal itself; no discard question is asked.
+    expect(screen.getAllByRole('dialog')).toEqual([dialog])
+    await act(async () => { finish({ ok: true, json: async () => ({ ok: true }) } as never) })
     await waitFor(() => expect(holdsDocument()).toBe(false))
   })
 
@@ -950,18 +984,24 @@ describe('MembersPage Profile card — Goals retention and delivery', () => {
         json: async () => { if (status === 'unknown') throw new SyntaxError('unreadable'); return status === 'queued' ? { ok: true, queued: true } : { ok: status === 'dispatched' } },
       } as Response)
     }
-    const input = await openGoalsDraft('tracking')
-    fireEvent.click(screen.getByTestId('crew-goals-track-send'))
+    await openGoalsTab()
+    await sendNewGoal()
     if (status === 'dispatched' || status === 'queued') {
+      // Delivered: the modal closes and, floating over the thread, so does the card.
       await waitFor(() => expect(screen.queryByTestId('crew-profile-panel')).toBeNull())
+      expect(screen.queryByRole('dialog', { name: 'New goal' })).toBeNull()
       expect(holdsDocument()).toBe(false)
     } else {
-      const notice = await screen.findByTestId(status === 'refused' ? 'crew-goals-track-error' : 'crew-goals-track-unconfirmed')
+      const notice = await screen.findByTestId(status === 'refused' ? 'crew-goals-new-goal-error' : 'crew-goals-new-goal-unconfirmed')
       if (status !== 'refused') expect(notice).toHaveTextContent('check the conversation above before sending it again')
-      expect(input).toHaveValue(draftText)
-      expect(holdsDocument()).toBe(true)
+      // The modal stays open over the card, for another try.
+      expect(screen.getByRole('dialog', { name: 'New goal' })).toContainElement(notice)
       expect(screen.getByTestId('crew-profile-modal')).toBeInTheDocument()
+      expect(screen.getByTestId('crew-goals-new-goal-send')).toBeEnabled()
     }
     expect(api.sendChat).toHaveBeenCalledTimes(1)
+    const [message, slot] = vi.mocked(api.sendChat).mock.calls[0]
+    expect(message).toBe('I want to set a goal for you. Ask me what matters, then write it down for me to approve.')
+    expect(slot).toBe('member-oncall')
   })
 })

@@ -37,16 +37,18 @@ from kiro_crew.constants import (
     TOOL_APPROVAL_TIMEOUT,
 )
 from kiro_crew.llm_helpers import (
+    CREDENTIAL_RELOAD_RETRY_NOTICE,
     SESSION_NOT_FOUND_GIVE_UP_TEXT,
     SESSION_NOT_FOUND_NOT_REPLAYED_TEXT,
     SESSION_NOT_FOUND_RETRY_NOTICE,
     _steer_host_deny,
     acp_error_is_session_not_found,
+    acp_error_needs_fresh_credentials,
+    credential_give_up_text,
     is_prompt_busy,
     unfinished_turn_error,
 )
 from kiro_crew.messaging.renderer import count_redaction_tags, redaction_notice
-from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.trust_patterns import extract_bash_command
 
 logger = logging.getLogger(__name__)
@@ -208,12 +210,12 @@ CHANNEL_AGENT_BLOCKED_TOOLS: tuple[str, ...] = (
     # Pinning belongs with the tree verbs: it moves another session to or from
     # the top of the person's sidebar, and a channel agent names that session
     # from thread text other people wrote. This entry covers the permission
-    # prompt; the chat_session_pin handler in mcp_dashboard.py refuses a
-    # ``channel:`` caller at dispatch, which is what holds for auto-approval.
+    # prompt; the chat_session_pin handler in mcp_dashboard_tag_runs.py refuses
+    # a ``channel:`` caller at dispatch, which is what holds for auto-approval.
     "chat_session_pin",
     # The board-column writes, on the same reason as pinning: they rearrange
-    # the person's own sidebar board. The handlers in mcp_dashboard.py also
-    # refuse a ``channel:`` caller at dispatch, for auto-approved calls.
+    # the person's own sidebar board. The handlers in mcp_dashboard_tag_runs.py
+    # also refuse a ``channel:`` caller at dispatch, for auto-approved calls.
     # ``chat_tag_column_list`` stays available: the layout names no session.
     "chat_tag_column_create",
     "chat_tag_column_move",
@@ -221,6 +223,9 @@ CHANNEL_AGENT_BLOCKED_TOOLS: tuple[str, ...] = (
     # channel agent would name from thread text; the handler also refuses a
     # ``channel:`` caller at dispatch.
     "session_move_to_column",
+    # Reordering pins is the same containment case: it rewrites the person's
+    # sidebar order, and its handler refuses a ``channel:`` caller at dispatch.
+    "chat_session_pin_move",
     "session_revive",
     # Renaming a folder changes the person's sidebar the same way, and a channel
     # caller reaches the endpoint with the person's folder authority. The
@@ -480,6 +485,9 @@ class ChannelAgent:
     # titles and request-body patterns are LLM-influenced and never scope a
     # grant. Set while ``_approval_future`` is pending, cleared with it.
     _pending_approval_command: str = field(default="", repr=False)
+    # The provider's text when the last lost-session verdict was a credential
+    # failure ("" otherwise), so the recovery notices can name the real cause.
+    _credential_error: str = field(default="", repr=False)
     _task: asyncio.Task | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -1101,7 +1109,7 @@ async def run_channel_agent(
                         (
                             "❌ This agent's session is stuck and could not be recovered. "
                             if fault == _STREAM_BUSY
-                            else f"❌ {SESSION_NOT_FOUND_GIVE_UP_TEXT} "
+                            else f"❌ {_lost_give_up_text(agent)} "
                         )
                         + "Clear its context or wake it to try again.",
                         from_role=agent.role,
@@ -1179,6 +1187,12 @@ _STREAM_LOST = "lost"
 _STREAM_LOST_AFTER_TOOL = "lost_after_tool"
 
 _LOST_AFTER_TOOL_TEXT = f"⟳ {SESSION_NOT_FOUND_NOT_REPLAYED_TEXT}"
+
+
+def _lost_give_up_text(agent: Any) -> str:
+    """The dead end of a lost verdict: the provider's remedy when credentials caused it."""
+    cause = getattr(agent, "_credential_error", "")
+    return credential_give_up_text(cause) if cause else SESSION_NOT_FOUND_GIVE_UP_TEXT
 
 
 async def _reset_busy_session(sessions: Any, agent: ChannelAgent) -> Any | None:
@@ -1270,7 +1284,11 @@ async def _recover_busy_agent(
     if cause == _STREAM_LOST:
         await channel.post(
             agent.id,
-            SESSION_NOT_FOUND_RETRY_NOTICE,
+            (
+                CREDENTIAL_RELOAD_RETRY_NOTICE
+                if getattr(agent, "_credential_error", "")
+                else SESSION_NOT_FOUND_RETRY_NOTICE
+            ),
             from_role=agent.role,
             msg_type="system",
             thread_id=thread_id,
@@ -1388,8 +1406,9 @@ async def _stream_task(
                 tool_seen = True
                 # Don't post messages — broadcast status like chat page footer
                 tool_name = event.text or ""
-                tool_name, _ = redact_exfiltration_urls(tool_name)
-                tool_name, _ = redact_credentials(tool_name)
+                from kiro_crew.security import redact
+
+                tool_name = redact(tool_name)
                 channel._broadcast(
                     "channel_agent_status",
                     {
@@ -1597,8 +1616,9 @@ async def _stream_task(
                 # authority. ``tool_input_redacted`` is transport provenance:
                 # re-running the scanners cannot reveal bytes an ACP transport
                 # already removed. Either signal makes the command display-only.
-                _safe_cmd, _cmd_credential_redacted = redact_credentials(_cmd)
-                _safe_cmd, _cmd_url_redacted = redact_exfiltration_urls(_safe_cmd)
+                from kiro_crew.security import redact_with_findings
+
+                _safe_cmd, _cmd_credential_redacted, _cmd_url_redacted = redact_with_findings(_cmd)
                 _command_grantable = bool(_cmd) and not (
                     bool(getattr(event, "tool_input_redacted", False))
                     or _cmd_credential_redacted
@@ -1635,8 +1655,9 @@ async def _stream_task(
                     )
                 else:
                     _card_name = event.text or event.title or ""
-                sanitized_name, _ = redact_exfiltration_urls(_card_name)
-                sanitized_name, _ = redact_credentials(sanitized_name)
+                from kiro_crew.security import redact
+
+                sanitized_name = redact(_card_name)
                 if len(sanitized_name) > _APPROVAL_FIELD_MAX_CHARS:
                     # Fail closed. Cutting the title would put a live Approve
                     # button beside a command the reader cannot read in full
@@ -1837,6 +1858,7 @@ async def _stream_task(
             logger.warning(
                 "Backend lost the session of channel agent %s (%s): %s", agent.id, agent.role, exc
             )
+            agent._credential_error = str(exc) if acp_error_needs_fresh_credentials(exc) else ""
             return _STREAM_LOST_AFTER_TOOL if tool_seen else _STREAM_LOST
         logger.exception("LLM stream error for agent %s (%s)", agent.id, agent.role)
         await channel.post(
@@ -1852,8 +1874,9 @@ async def _stream_task(
     if not full_text:
         return _STREAM_OK
     # Sanitize LLM output before posting
-    full_text, _ = redact_exfiltration_urls(full_text)
-    full_text, _ = redact_credentials(full_text)
+    from kiro_crew.security import redact
+
+    full_text = redact(full_text)
     # Extract @mentions from agent's response
     mention_ids = [
         m.id for m in channel.members.values() if m.id != agent.id and f"@{m.role}" in full_text

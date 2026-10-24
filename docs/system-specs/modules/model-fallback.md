@@ -3,7 +3,7 @@
 `agent.fallback_model` controls an optional retry after an active model exhausts
 its transient-error budget before activity begins. The implementation is
 Kiro Crew-side: `llm_helpers.advance_fallback_candidate` changes the model through
-the substitute `set_model` seam, and `test/test_llm_helpers.py` pins that a
+the substitute `set_model` seam, and `test/test_llm_helpers_fallback_chain.py` pins that a
 successful swap is observable before it is recorded.
 
 On the ACP provider that seam is `AcpProvider.set_model`, so every fallback swap
@@ -24,13 +24,14 @@ is the shared derivation used by the fallback callers:
 - An empty value produces an empty chain, so the fallback branch remains inert
   and the existing terminal error path handles the failure.
 
-`TestFallbackModelLoad` in `test/test_config_loader.py` and
+`TestFallbackModelLoad` in `test/test_config_loader_agent_section.py` and
 `TestCoerceFallbackModel` in `test/test_role_models.py` pin the default,
 normalization, concrete-value ordering, and empty-value opt-out. The dashboard
-PATCH schema in `dashboard/handlers/core.py` applies the model-id grammar and
+PATCH schema in `dashboard/handlers/core_config_schema.py` applies the model-id grammar and
 `_validate_role_model`; that validator allows the automatic and empty values,
 rejects a known unusable concrete value, and permits a concrete value when no
-advertised-model set is available.
+advertised-model set is available, except that on an `acp`-namespace backend it
+refuses a registered model with no kiro id (`model_registry.lacks_acp_id`).
 
 ## Trigger and candidate walk
 
@@ -38,7 +39,7 @@ The fallback path is eligible only after the normal transient retry budget is
 spent on a transient error with no qualifying prior activity. Each surface
 tracks that condition in its own stream loop: `llm_helpers.stream_and_collect`
 requires no result text or tool activity, `dashboard/chat_runner.py` requires
-no emitted or thought activity, and `subagent_manager/run.py::RunEventCoordinator._run_impl`'s nested `_stream_with_transient_retry`
+no emitted or thought activity, and `subagent_manager/run_turn.py::_run_inner_impl`'s nested `_stream_with_transient_retry`
 requires no activity. Post-activity recovery does not enter the model-fallback
 walk.
 
@@ -64,12 +65,12 @@ walked/active records all carry the advertised spelling of the candidate
 bookkeeping. `TestSetModelWitness`,
 `TestAdvanceFallbackCandidateAutoPrimary`,
 `TestAdvanceFallbackCandidateNamespacedChain`, and `TestFallbackState` in
-`test/test_llm_helpers.py` cover no-op handling, marker-seeded primary
+`test/test_llm_helpers_fallback_chain.py` cover no-op handling, marker-seeded primary
 selection, advertised-model filtering, spelling folds, and chain progress.
 
 `FallbackState.should_retry_active` owns the per-candidate retry allowance, and
 `fallback_rewound_transient_budget` derives the dashboard counter from the same
-allowance. The pinning tests in `test/test_llm_helpers.py` and
+allowance. The pinning tests in `test/test_llm_helpers_fallback_restore.py` and
 `TestRunChatModelFallback` in `test/test_dashboard_chat.py` prevent the three
 surfaces from granting different candidate budgets.
 
@@ -89,12 +90,12 @@ and each error surface must receive the same safe text.
   heartbeat work, then `annotate_model_fallback` prefixes a delivered result
   while the provider marker remains active.
 - `dashboard/chat_runner.py` swaps through `_fallback_swap_for_turn`
-  (`dashboard/chat_turn/model_fallback.py`, which owns the dashboard's four swap
-  and restore helpers named below) after its
-  pre-activity transient branch, persists a notice, and requeues the same
-  message as a synthetic recovery item. Its fallback condition excludes nested
-  prompts. On exhaustion it renders the slot-local walk in the terminal error.
-- `subagent_manager/run.py::RunEventCoordinator._run_impl`'s nested `_stream_with_transient_retry` follows the zero-activity branch,
+  (`dashboard/chat_turn/model_fallback.py`, which owns the dashboard's four swap and restore
+  helpers named below) after its pre-activity transient branch; `_on_acp_transient_exhausted`
+  (`chat_turn/acp_recovery.py`) persists a notice and requeues the same message as a synthetic
+  recovery item. The swap's condition excludes nested prompts. On exhaustion `_on_acp_error_card`
+  (`chat_turn/turn_failures.py`) renders the slot-local walk in the terminal error.
+- `subagent_manager/run_turn.py::_run_inner_impl`'s nested `_stream_with_transient_retry` follows the zero-activity branch,
   uses the shared candidate helper, and applies `annotate_model_fallback` to
   the completed result.
 
@@ -124,7 +125,7 @@ fallback selection from becoming a persistent user pin.
 `TestRunChatModelFallback` in `test/test_dashboard_chat.py` and
 `TestSlotProbeWrapsSharedRestoreBody` in `test/test_dashboard_chat_model_pick.py`,
 together with the restore tests in
-`test/test_llm_helpers.py`, pin the stale-record, explicit-pick, and backfill
+`test/test_llm_helpers_fallback_restore.py`, pin the stale-record, explicit-pick, and backfill
 invariants.
 
 ## Refusal fallback (`agent.refusal_fallback_model`)
@@ -143,7 +144,7 @@ families — a different model routinely accepts what another's filter declined
   refusal envelope names, resolving to disabled when it names none; a concrete
   id is used directly. The dashboard PATCH schema applies the same grammar and
   validator as `agent.fallback_model`.
-- `chat_runner._refusal_fallback_retry` (nested in `_run_chat`) gates the
+- `chat_turn.model_fallback._refusal_fallback_retry` (called with the turn) gates the
   retry: interactive prompts only (no nested depth, and only a turn whose
   ledger actor is `user` — a cron, autonudge, or sub-agent wake keeps the
   terminal refusal, since nobody attends its announced swap), not while a
@@ -181,8 +182,8 @@ families — a different model routinely accepts what another's filter declined
   preserves that recorded primary instead of overwriting it with the stale
   fallback the session is stranded on, so the eventual restore returns to the
   user's real model rather than to fallback A. While the record is live,
-  both `slot.model` backfill sites (which run only for a slot that inherits
-  no resolved default, see model-selection.md) treat the
+  both `slot.model` backfill sites (which write only a slot whose mate
+  pins a model, see model-selection.md) treat the
   session like an active throttle fallback: the provider's resolved model is
   the temporary candidate and must never be persisted into the durable pin,
   and usage rows attribute to the model that actually served the turn.
@@ -339,10 +340,11 @@ sub-agents) keep the terminal refusal behavior.
 
 ## Tests
 
-`test/test_llm_helpers.py` covers chain derivation, candidate selection, retry
-state, story handling, and unattended restore. `test/test_dashboard_chat.py`
-covers dashboard fallback and slot restore. `test/test_subagent_turn_resilience.py`
+`test/test_llm_helpers_fallback_chain.py` and
+`test/test_llm_helpers_fallback_restore.py` cover chain derivation, candidate
+selection, retry state, story handling, and unattended restore. `test/test_dashboard_chat.py`
+covers dashboard fallback and slot restore. `test/test_subagent_turn_resilience_retry.py`
 and `test/test_cron_gateway_integration_llm.py` cover sub-agent and gateway wiring.
-`test/test_config_loader.py`, `test/test_role_models.py`, and
+`test/test_config_loader_agent_section.py`, `test/test_role_models.py`, and
 `test/test_dashboard_handlers_core_coverage_agent_settings.py` cover configuration
 loading and PATCH validation.

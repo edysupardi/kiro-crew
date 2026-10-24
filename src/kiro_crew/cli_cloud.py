@@ -551,6 +551,26 @@ def _cloud_iam_boundary(args: argparse.Namespace) -> int:
     return 0
 
 
+#: The doctor's next step for a refused ``aws`` CLI or plugin with no fix command,
+#: by ``ssm`` refusal code. A root gateway and the strict policy are not cleared
+#: by an ownership change, and another account's file must not be made trusted:
+#: the step for it is a copy from AWS, in folders only root or this account own.
+_REFUSAL_NEXT_STEP = {
+    "other_owner": (
+        "Install a copy with AWS's own installer, then rerun. That copy runs only if "
+        "it and every folder above it belong to root or to the account the gateway "
+        "runs as. If a folder such as /usr/local/bin belongs to the other account, an "
+        "administrator must make root its owner first (see the Remote Crew on EC2 guide)."
+    ),
+    "root_gateway": "Start the gateway from a regular account instead of root, then rerun.",
+    "strict_policy": (
+        "Install it where only root can change the file and its folders, at a path "
+        "with no symbolic links, then rerun."
+    ),
+    "": "Fix the file's ownership or permissions so the check passes, then rerun.",
+}
+
+
 def _cloud_doctor(args: argparse.Namespace) -> int:
     """Read-only diagnostics for the cloud launcher prerequisites."""
     import shutil
@@ -561,12 +581,31 @@ def _cloud_doctor(args: argparse.Namespace) -> int:
     # (the shared deploy-engine resolver), so the doctor's verdict agrees with
     # what `kirocrew cloud` commands actually run under a GUI-launched
     # gateway's minimal PATH.
+    cli_refusal = None
     if shutil.which(resolve_aws_bin()):
         ui.ok("aws CLI found")
+    elif (cli_refusal := ssm.aws_cli_refusal()) is not None:
+        # Found but refused: the install link would put the same refused file back.
+        ui.fail(f"aws CLI found at {cli_refusal.path} but refused: {cli_refusal.reason}")
+        ui.detail(_REFUSAL_NEXT_STEP.get(cli_refusal.code, _REFUSAL_NEXT_STEP[""]))
     else:
         ui.fail("aws CLI not found — install it (https://aws.amazon.com/cli/)")
     if ssm.session_manager_plugin_installed():
         ui.ok("session-manager-plugin found")
+    elif (refusal := ssm.session_manager_plugin_refusal()) is not None:
+        ui.warn(f"session-manager-plugin found at {refusal.path} but refused: {refusal.reason}")
+        if refusal.remedy_command:
+            # Making the tree root-owned turns whatever binary is in it into an
+            # accepted credential receiver, so the user confirms it is AWS's first.
+            ui.detail(
+                "If you did not install it from AWS yourself, or are not sure, reinstall "
+                "it from AWS first."
+            )
+            ui.detail(
+                f"Then make its install directory root-owned and rerun: {refusal.remedy_command}"
+            )
+        else:
+            ui.detail(_REFUSAL_NEXT_STEP.get(refusal.code, _REFUSAL_NEXT_STEP[""]))
     else:
         ui.warn("session-manager-plugin not found — needed to connect over SSM")
         ui.detail(ssm.session_manager_plugin_install_hint())
@@ -581,7 +620,13 @@ def _cloud_doctor(args: argparse.Namespace) -> int:
             )
     else:
         ui.fail("AWS not reachable")
-        ui.detail(reach.get("note", ""))
+        # With the CLI refused, the profile was never checked: the note's
+        # credential or helper advice would send the user to the wrong fix.
+        ui.detail(
+            "The aws CLI above was refused, so the profile was not checked."
+            if cli_refusal is not None
+            else reach.get("note", "")
+        )
     return 0
 
 

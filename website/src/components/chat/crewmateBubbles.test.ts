@@ -18,15 +18,15 @@ const at = (iso: string) => iso
 const user = (ts: string, content = 'hi'): ChatMessage => ({ role: 'user', content, cls: 'msg msg-u', ts })
 const said = (ts: string, content = 'Found the cause.'): ChatMessage => ({ role: 'assistant', content, cls: '', ts })
 const tool = (ts: string): ChatMessage => ({ role: 'tool', content: '🔧 gh issue list', cls: '', ts, meta: { tool_call_id: `tc-${ts}` } })
-/** The `spawn_run` launch row as the gateway persists it: a tool row whose
+/** A `spawn_run` launch row as the gateway persists it: a tool row whose
  *  output carries the launch header and one line per accepted worker. */
 const spawn = (ts: string): ChatMessage => ({
   role: 'tool', content: '🔧 spawn_run', cls: '', ts,
-  meta: { tool_call_id: `spawn-${ts}`, tool_name: 'spawn_run', output: 'Spawned 2 subagent(s).\n  3f9c1e2a (default): Bisect #4213 on main\n  b7d04c11 (default): Reproduce #4213 on release-1.4\n' },
+  meta: { tool_call_id: `spawn-${ts}`, tool_name: 'spawn_run', output: 'Spawned 1 subagent(s).\n  3f9c1e2a (default): Bisect on main\n' },
 })
 
 describe('filterCrewmateChat', () => {
-  it('drops the machinery and keeps what the crewmate says plus the user', () => {
+  it('drops the machinery and keeps what the mate says plus the user', () => {
     const rows: ChatMessage[] = [
       user(at('2026-09-20T09:12:00Z')),
       tool(at('2026-09-20T09:12:06Z')),
@@ -108,35 +108,16 @@ describe('filterCrewmateChat', () => {
   })
 })
 
-describe('filterCrewmateChat and the spawn_run launch (#21138)', () => {
-  const opener = user(at('2026-10-16T06:40:00Z'), 'Take #4213 first.')
-  const onIt = said(at('2026-10-16T06:40:19Z'), 'On it. I am sending two workers out.')
-  const launch = spawn(at('2026-10-16T06:40:26Z'))
-  const launchDone: ChatMessage = { role: 'tool', content: '✅ done', cls: '', ts: at('2026-10-16T06:40:28Z'), meta: { tool_call_id: launch.meta!.tool_call_id } }
-
-  it('draws the spawn_run launch row and nothing else of the turn\'s machinery', () => {
-    const drawn = filterCrewmateChat([opener, onIt, launch, launchDone, tool(at('2026-10-16T06:40:41Z'))])
-    expect(drawn).toEqual([opener, onIt, launch])
-    expect(isCrewmateChatRow(launch)).toBe(true)
-  })
-
-  it('an ordinary tool row, even one named spawn_run with no launch output, stays hidden', () => {
-    const bare: ChatMessage = { role: 'tool', content: '🔧 spawn_run', cls: '', ts: at('2026-10-16T06:40:26Z'), meta: { tool_call_id: 'x', tool_name: 'spawn_run' } }
-    expect(isCrewmateChatRow(bare)).toBe(false)
-    expect(isCrewmateChatRow(tool(at('2026-10-16T06:40:41Z')))).toBe(false)
-  })
-
-  it('the drawn card is a run boundary: the reply after it opens a new run', () => {
-    const back = said(at('2026-10-16T06:52:10Z'), 'Both workers are back. The cause is PR #4102.')
-    const transcript = [opener, onIt, launch, launchDone, back]
-    const drawn = filterCrewmateChat(transcript)
-    expect(drawn).toEqual([opener, onIt, launch, back])
-    expect(crewmateRunPosition(drawn, drawn.indexOf(onIt), transcript)).toBe('single')
-    expect(crewmateRunPosition(drawn, drawn.indexOf(back), transcript)).toBe('single')
-  })
-
-  it('a launch alone is content: the quiet hint does not show over a live card', () => {
-    expect(filterCrewmateChat([launch, launchDone])).toEqual([launch])
+describe('filterCrewmateChat and a spawn_run launch', () => {
+  // A crewmate's chat hands work to worker sessions and starts no sub-agents
+  // (the 2026-10-17 crewmate-chat decision entry, shipped in PR #22444),
+  // so a launch row, from scrollback written before that, is machinery like any tool row.
+  it('draws no spawn_run launch row', () => {
+    const opener = user(at('2026-10-16T06:40:00Z'), 'Take it first.')
+    const onIt = said(at('2026-10-16T06:40:19Z'), 'On it.')
+    const launch = spawn(at('2026-10-16T06:40:26Z'))
+    expect(isCrewmateChatRow(launch)).toBe(false)
+    expect(filterCrewmateChat([opener, onIt, launch])).toEqual([opener, onIt])
   })
 })
 
@@ -178,7 +159,7 @@ describe('crewmateRunPosition', () => {
     expect(crewmateRunPosition(rows, 1)).toBe('single')
   })
 
-  it("a change card joins the reply that explains it, so it sits under the crewmate's avatar", () => {
+  it("a change card joins the reply that explains it, so it sits under the mate's avatar", () => {
     const card: ChatMessage = { role: 'card', content: 'Shorter replies', cls: 'msg msg-card', ts: iso(5_000) }
     // Drawn: user, card, reply. The tool step that proposed the card is filtered.
     const transcript = [user(iso(-60_000)), tool(iso(1_000)), card, said(iso(9_000))]
@@ -420,7 +401,7 @@ describe('withQueuedAsBubbles', () => {
 describe('awaitingCrewmateReply', () => {
   const sent = (meta: Record<string, unknown> = {}): ChatMessage => ({ ...user('2026-10-14T08:00:00Z', 'ping'), meta: { sendId: 's1', ...meta } })
 
-  it('waits from the send until the crewmate answers', () => {
+  it('waits from the send until the mate answers', () => {
     expect(awaitingCrewmateReply([sent({ optimistic: true })], 's1')).toBe(true)
     expect(awaitingCrewmateReply([sent(), tool('2026-10-14T08:00:01Z')], 's1')).toBe(true)
     expect(awaitingCrewmateReply([sent(), said('2026-10-14T08:00:02Z')], 's1')).toBe(false)

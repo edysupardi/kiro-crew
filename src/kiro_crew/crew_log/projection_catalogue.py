@@ -13,8 +13,10 @@ from typing import Any, Final, Literal
 
 from kiro_crew.crew_log.entry_types import (
     DASHBOARD_FOLD_NAME,
+    GOAL_FOLD_NAME,
     MISTAKES_FOLD_NAME,
     SESSION_ENTRY_TYPES,
+    WAITING_FOLD_NAME,
 )
 from kiro_crew.crew_log.schema import Entry
 
@@ -51,7 +53,21 @@ PROJECTION_NAMES: Final[tuple[str, ...]] = (
 #: one caller does -- and an outline moves on the three entries of every turn, so
 #: advertising it would push a frame to every owner socket on each of them for a
 #: projection the panel set has no reader for.
-INTERNAL_PROJECTION_NAMES: Final[tuple[str, ...]] = ("class", "outline")
+#: ``otel_usage`` joins them for the same reason: its one reader is the OTel export
+#: subscriber (:mod:`kiro_crew.metrics.crew_log_export`), which asks for the fold by
+#: name through the crew-log bus rather than through a side panel, so advertising it
+#: would push a frame to every owner socket on every turn for a reader that is not a
+#: browser.
+#: ``otel_session_tree`` joins them for the reason ``otel_usage`` does: its one reader
+#: is the OTel export subscriber (:mod:`kiro_crew.metrics.crew_log_export`), which asks
+#: for the fold by name through the crew-log bus, so advertising it would push a frame
+#: to every owner socket for a reader that is not a browser.
+INTERNAL_PROJECTION_NAMES: Final[tuple[str, ...]] = (
+    "class",
+    "outline",
+    "otel_usage",
+    "otel_session_tree",
+)
 
 #: Folds keyed by one SESSION, which are the ones the projection kernel drives
 #: (:func:`_session_registry`). The advertised panel set plus the internal ``class``:
@@ -64,6 +80,13 @@ SESSION_FOLD_NAMES: Final[tuple[str, ...]] = PROJECTION_NAMES + INTERNAL_PROJECT
 #: constants because :data:`SLOT_PROJECTION_NAMES` below names it and that table is
 #: built at import, before the fold's own section is reached.
 WORKSTREAMS_FOLD_NAME: Final[str] = "workstreams"
+#: The worker sessions a crewmate created and what each is doing
+#: (:mod:`~kiro_crew.crew_log.projection_workers`).
+WORKERS_FOLD_NAME: Final[str] = "workers"
+#: One worker session's own row, folded over that worker's own units only. Read only
+#: through ``workers`` (:func:`~kiro_crew.crew_log.projection_readers.read_slot_projection`
+#: merges one per worker), so each worker's cell continues on its own growth.
+WORKER_FOLD_NAME: Final[str] = "worker"
 
 #: Projections keyed by a SLOT instead of by one crew log. A slot owns one ACP
 #: session id at a time, so a fact that belongs to the slot for its whole life --
@@ -86,7 +109,16 @@ SLOT_PROJECTION_NAMES: Final[tuple[str, ...]] = (
     DASHBOARD_FOLD_NAME,
     MISTAKES_FOLD_NAME,
     WORKSTREAMS_FOLD_NAME,
+    GOAL_FOLD_NAME,
+    WAITING_FOLD_NAME,
+    WORKERS_FOLD_NAME,
 )
+
+#: Slot-keyed folds no page binds and no route serves: each is a PART of an advertised
+#: slot fold, read only by the reader that merges it. ``worker`` is one worker's row,
+#: kept in a cell of its own so one worker's growth continues that cell instead of
+#: refolding every worker's log (``workers`` with two or more workers did).
+INTERNAL_SLOT_PROJECTION_NAMES: Final[tuple[str, ...]] = (WORKER_FOLD_NAME,)
 
 #: The slot-keyed fold served by its OWNER and by no generic route. This fold's owner
 #: (the Issue Radar crew store) orders a crew's units by the order the crew recorded
@@ -135,7 +167,11 @@ TREE_PROJECTION_NAMES: Final[tuple[str, ...]] = (WORKTREE_FOLD_NAME,)
 
 #: Every fold the registry (``_FOLDS``) holds, in registry order.
 FOLD_NAMES: Final[tuple[str, ...]] = (
-    PROJECTION_NAMES + INTERNAL_PROJECTION_NAMES + SLOT_PROJECTION_NAMES + TREE_PROJECTION_NAMES
+    PROJECTION_NAMES
+    + INTERNAL_PROJECTION_NAMES
+    + SLOT_PROJECTION_NAMES
+    + INTERNAL_SLOT_PROJECTION_NAMES
+    + TREE_PROJECTION_NAMES
 )
 
 #: The SHAPE of what these folds store, which is what a savepoint holds. It lives

@@ -57,7 +57,7 @@ export function MembersPageThreadHeader({
   const { pillFaceRef, openProfile, schedGuardRef, schedAtStakeRef, requestCloseProfile, togglePanel } = profileCard
   const { rosterDrawerOpen, openRosterDrawer, rosterDrawerAvailable } = drawers
   const { isRunning, orderedMembers } = rosterView
-  const { activeSlot } = thread
+  const { activeSlot, entranceFaceHidden } = thread
   const {
     threadHeaderRef, setSwitcherOpenRequest, switcherOpenRequest, topbarSlot, headerInBar, pillActivity,
   } = threadView
@@ -113,6 +113,7 @@ export function MembersPageThreadHeader({
           onCreate={createHeld ? undefined : openQuick}
           onShowRoster={() => setRosterPin(true)}
           openRequest={switcherOpenRequest}
+          faceOnStageFor={entranceFaceHidden ? active.name : ''}
         />
         </div>
         <Glass
@@ -177,7 +178,9 @@ export function MembersPageThreadHeader({
         // press closes it (through the draft guard — see requestCloseProfile)
         // instead of re-opening on the default tab, which remounted the card.
         onClick={() => { if (profile) requestCloseProfile(); else openProfile() }}
-        className={`glass-shadow flex items-center gap-2.5 pl-3.5 pr-3.5 ${headerInBar ? 'py-0' : 'py-1.5'} min-w-0 max-w-full justify-self-center cursor-pointer text-left focus-ring pointer-events-auto`}
+        // The left padding equals the vertical gap around the face, so the
+        // round face sits concentric with the pill's round end.
+        className={`glass-shadow flex items-center gap-2.5 pr-3.5 ${headerInBar ? 'pl-0.5 py-0' : 'pl-1.5 py-1.5'} min-w-0 max-w-full justify-self-center cursor-pointer text-left focus-ring pointer-events-auto`}
         title={t('pages.membersPage.profile_card')}
         aria-expanded={!!profile}
         data-testid="member-identity-pill"
@@ -188,11 +191,14 @@ export function MembersPageThreadHeader({
         {/* When the card docks and the pill steps out, the face flies to
             the card's head as `CrewFaceFlight`'s copy, above everything;
             this one holds its place unpainted while a flight is up. */}
+        {/* And while the first Mate is centre stage (#23207), the slot waits
+            empty, reserved width and all, for the face to fly into it. */}
         <span
           ref={pillFaceRef}
           className="relative flex shrink-0 rounded-full"
-          style={faceFlight || (profile && profile.placement === 'floating') ? { visibility: 'hidden' } : undefined}
+          style={faceFlight || (profile && profile.placement === 'floating') || entranceFaceHidden ? { visibility: 'hidden' } : undefined}
           data-testid="member-pill-face"
+          data-entrance-empty={entranceFaceHidden ? '' : undefined}
         >
           <CrewMonitoredAvatar
             seed={active.name}

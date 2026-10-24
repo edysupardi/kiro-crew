@@ -149,7 +149,8 @@ budget or cap ran out, the `_stopped_row_is_replaceable` allowlist -- counts as
 no loop, whoever armed it, and is replaced by a fresh default: a new bind is new
 work. An inactive record a PERSON stopped is kept and the arm is refused with
 reason `user-stopped`. A refusal is logged at WARNING and the bind still
-succeeds; the bind reply carries `patrol: armed | existing | refused |
+succeeds; the shutdown refusal a dispatch racing the gateway's teardown meets is
+logged at DEBUG instead. the bind reply carries `patrol: armed | existing | refused |
 unsupported` and `patrol_reason` (`no-loop`, `replaced-system-stopped`,
 `active-work-ledger`, `active-other-watch`, `user-stopped`,
 `outside-arm-refused`, `session-cannot-host-loop`, `arm-failed`,
@@ -237,6 +238,31 @@ item ids and statuses, the same text `irq` may already persist outside the store
 gated read path. `AutoNudgeService.notify_turn_complete` brings the busy-retry
 forward to `delay=0` on turn end instead of waiting for the loop deadline, and the
 per-loop wake text is held in `_pending_monitor_wake`, a `dict` keyed by loop id.
+
+The steered wake keeps the ROW the fire writes. `steer_into_running_turn` takes the
+loop's `nudge_meta` (`{"cycle", "loop_id"}`) and persists the steer as a `nudge` row
+with `meta.steer`, so it draws as the nudge chip and never as a bubble the person
+typed; the sender names the origin, the role follows from it. A steer the turn ends
+before taking is requeued with `AUTOMATION_STEER_META` on its entry: the drain
+writes it as a `nudge` row too, and the entry drains alone, never merged into the
+person's own queued text (#22747).
+
+The wake reaches the steer through `session_deliver.deliver`, the session-side entry
+point a non-human sender calls with its origin (`automation`, `cron`, `app`). The
+sender never picks idle vs running or a row role: `origin_row` maps the origin to
+its row, an idle slot gets that row and a turn, and a running slot gets the steer
+(an automation wake) or a queued card (a cron notification, an app message). A
+script cron's result (`_deliver_script_result`) and a cron's `send_message` to its
+origin session (`api_send_message`), both with `evict_oldest` so a full live queue
+drops its oldest cron notification (never another kind of entry), and an MCP App's
+`ui/message`
+(`api_mcp_apps_message`) call it too, and so does a peer `session_send`
+(`send_to_target`) with a `peer` origin: a `user` row on both paths, a steer only
+when it asked for one and the slot is running. `send_to_target` keeps its audience
+fence, cancellation shield and post-RPC re-gate around those calls. The idle
+autonudge fire writes its nudge row through `session_deliver.write_origin_row` (the
+`automation` origin, plus its `monitor` record), the same mapping a steered wake
+uses, but still chooses idle vs running itself (#23064).
 
 The `monitoring/` package now has a different extension point:
 `models.MonitorProbe`, a structural Protocol with no behaviour inheritance, plus
@@ -1227,7 +1253,7 @@ positive reason. An installation that wants the cheap path for a few days is
 asking for exactly that shift, which is why the key is worth a row in the schema
 even though it changes no code path.
 
-It is read in `mcp_tools/control.py::schemas()`, which is the only place it is
+It is read in `mcp_tools/control_parts/schemas.py::schemas()`, which is the only place it is
 read, and read afresh on every build: `mcp_tools.build_tool_list` rebuilds
 descriptors per call rather than caching them, so a Settings write needs no
 gateway restart. It does not reach a session already open, because kiro-cli
@@ -1267,8 +1293,11 @@ corner case: a pull request reaches `readiness: passed` only once every non-PASS
 whole-design verdict carries a disposition, and those verdicts live in comment
 bodies. The digest wakes the owner when such a body changes, but a green typed
 board with an unanswered advisory finding whose text never changed is still
-indistinguishable to a probe, which is why the prompt loop keeps `gate=false` for
-that evidence in both positions of this key.
+indistinguishable to a probe, which is why that evidence stays on the prompt loop,
+whose agent turn reads the bodies, in both positions of this key. The comment-aware
+recipes arm that loop gated with `judge: false`: a finding's arrival changes its
+reading (a body digest, or the lane's check run finishing) and wakes it, and the
+quiet floor re-delivers a turn for one the woken turn left unanswered.
 
 The PR-level comment-body digest is carried as one condition,
 `review_comment_bodies:<digest>`, with severity `WAKE` and `resets_on` `NEVER`:

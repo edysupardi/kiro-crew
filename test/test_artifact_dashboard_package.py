@@ -52,6 +52,8 @@ def _owner_write(store: Any, slug: str, **kwargs: Any) -> Any:
 
 
 BOUND = "crewmate:mate"
+#: A root session's page.
+SESSION_BOUND = "session:mate-root"
 
 
 def package(
@@ -62,7 +64,10 @@ def package(
     tokens: dict[str, str] | None = None,
     css: str | None = None,
 ) -> dict[str, Any]:
-    """A valid package, with each part overridable so a test changes one thing."""
+    """A valid package, with each part overridable so a test changes one thing.
+
+    *blocks* writes the view as a stored view of blocks; the store reads it as its page.
+    """
     out: dict[str, Any] = {
         "kind": "dashboard",
         "bound_to": bound_to,
@@ -90,21 +95,35 @@ def package(
                 }
             )
         },
-        "view": {
-            "blocks": (
-                blocks
-                if blocks is not None
-                else [
-                    {"id": "prs", "type": "stat", "fields": ["open_prs"], "title": "Open PRs"},
-                    {"id": "runs", "type": "table", "fields": ["last_run", "lane"]},
-                ]
-            )
-        },
+        "view": (
+            {"blocks": blocks}
+            if blocks is not None
+            else {
+                "html": (
+                    '<h2 data-dashboard-field="open_prs"></h2>'
+                    '<p data-dashboard-field="last_run"></p>'
+                    '<p data-dashboard-field="lane"></p>'
+                )
+            }
+        ),
         "theme": {"tokens": tokens if tokens is not None else {"--panel-bg": "oklch(21% 0 0)"}},
     }
     if css is not None:
         out["theme"]["css"] = css
     return out
+
+
+#: A stored view of blocks.
+DEFAULT_BLOCKS: list[dict[str, Any]] = [
+    {"id": "prs", "type": "stat", "fields": ["open_prs"], "title": "Open PRs"},
+    {"id": "runs", "type": "table", "fields": ["last_run", "lane"]},
+]
+
+
+def _as_blocks(p: dict[str, Any]) -> list[dict[str, Any]]:
+    """Turn package *p*'s view into a saved block layout; its blocks."""
+    p["view"] = {"blocks": json.loads(json.dumps(DEFAULT_BLOCKS))}
+    return p["view"]["blocks"]
 
 
 def content(**kwargs: Any) -> str:
@@ -182,7 +201,7 @@ class TestSaveAndRead:
         parsed = dp.parse_package(read.content or "")
         assert parsed["bound_to"] == BOUND
         assert sorted(parsed["model"]["types"]) == ["lane", "last_run", "open_prs"]
-        assert [b["id"] for b in parsed["view"]["blocks"]] == ["prs", "runs"]
+        assert 'data-dashboard-field="open_prs"' in parsed["view"]["html"]
 
     def test_the_stored_bytes_are_canonical_not_the_authors(self, store) -> None:
         # Same package, keys shuffled and whitespace different: the stored form
@@ -291,7 +310,7 @@ class TestTheAgentToolMaySaveOne:
         # The refusal an agent is most likely to earn: valid JSON, right shape,
         # and values pasted into it. The rule it names is the one it broke.
         p = package()
-        p["view"]["blocks"][1]["data"] = [{"last_run": "now"}]
+        _as_blocks(p)[1]["data"] = [{"last_run": "now"}]
         out, _ = _save_through_the_tool(
             store, {"name": "With values", "content": json.dumps(p), "kind": "dashboard"}
         )
@@ -485,13 +504,97 @@ class TestVersionOnlyOnLayoutChange:
         art = _owner_write(store, saved.slug, content=content(types=types))
         assert art.version == 2
 
-    def test_reordering_blocks_is_a_layout_change(self, store, saved) -> None:
-        flipped = [
-            {"id": "runs", "type": "table", "fields": ["last_run", "lane"]},
-            {"id": "prs", "type": "stat", "fields": ["open_prs"], "title": "Open PRs"},
-        ]
-        art = _owner_write(store, saved.slug, content=content(blocks=flipped))
+    def test_reordering_the_page_is_a_layout_change(self, store, saved) -> None:
+        flipped = package()
+        flipped["view"]["html"] = (
+            '<p data-dashboard-field="lane"></p><p data-dashboard-field="last_run"></p>'
+            '<h2 data-dashboard-field="open_prs"></h2>'
+        )
+        art = _owner_write(store, saved.slug, content=json.dumps(flipped))
         assert art.version == 2
+
+    @pytest.mark.parametrize("bound_to", [BOUND, SESSION_BOUND])
+    def test_a_saved_block_layout_becomes_its_page(self, store, bound_to: str) -> None:
+        """One way: blocks go in, and the stored view is the page they become."""
+        blocks = package(bound_to=bound_to, blocks=DEFAULT_BLOCKS)
+        art = store.create(name="Blocks", kind="dashboard", content=json.dumps(blocks))
+        view = json.loads(art.content)["view"]
+        assert list(view) == ["html"]
+        assert view["html"] == (
+            "<section><h2>Open PRs</h2><dl><div><dt>Open PRs</dt>"
+            '<dd data-dashboard-field="open_prs"></dd></div></dl></section>'
+            '<section><dl><div><dt>Last run</dt><dd data-dashboard-field="last_run"></dd></div>'
+            '<div><dt>Lane</dt><dd data-dashboard-field="lane"></dd></div></dl></section>'
+        )
+        # Read back, the stored package is already the page: nothing turns it back.
+        assert dp.parse_package(art.content)["view"] == view
+        assert "blocks" not in art.content
+
+    def test_restoring_a_version_saved_as_blocks_restores_its_page(self) -> None:
+        live = json.dumps(package())
+        old = json.dumps(package(blocks=DEFAULT_BLOCKS))
+        view = json.loads(dp.revert_package(live, old))["view"]
+        assert list(view) == ["html"] and 'data-dashboard-field="lane"' in view["html"]
+
+    @pytest.mark.parametrize("fields", [1, [1], "open_prs", {"a": 1}])
+    def test_a_block_whose_fields_are_not_names_is_refused(self, fields: Any) -> None:
+        p = package(blocks=[{"id": "x", "type": "stat", "fields": fields}])
+        with pytest.raises(ArtifactValidationError, match=r"view\.blocks\[0\]\.fields"):
+            dp.parse_package(json.dumps(p))
+
+    def test_a_label_that_spells_a_binding_is_shown_not_bound(self) -> None:
+        """A label reading like a binding stays text, so the version still restores."""
+        p = package(blocks=[{"id": "x", "type": "stat", "fields": ["open_prs"]}])
+        p["model"]["types"]["open_prs"]["label"] = 'data-dashboard-field="open_prs"'
+        html = dp.parse_package(json.dumps(p))["view"]["html"]
+        assert html.count("data-dashboard-field") == 1
+        assert (
+            json.loads(dp.revert_package(json.dumps(package()), json.dumps(p)))["view"]["html"]
+            == html
+        )
+
+    def test_a_credential_in_a_migrated_title_or_label_is_still_redacted(self) -> None:
+        """A hyphenated secret is masked in the stored page and stays masked when read."""
+        from kiro_crew.platform.context import redact_via_context
+
+        secret = "xoxb-" + "1234567890-1234567890123-" + "a" * 24
+        p = package(blocks=[{"id": "x", "type": "stat", "fields": ["open_prs"], "title": secret}])
+        p["model"]["types"]["open_prs"]["label"] = f"see {secret}"
+        html = dp.parse_package(json.dumps(p))["view"]["html"]
+        assert secret not in html
+        assert secret not in redact_via_context(html)
+        assert "see " in html
+
+    def test_a_quoted_header_in_a_migrated_label_is_redacted_before_escaping(self) -> None:
+        """Escaping turns a quote into ``&quot;``, which the page's pass does not read."""
+        from kiro_crew.platform.context import redact_via_context
+
+        opaque = "Q" * 32
+        header = '{"Authorization": "Bearer ' + opaque + '"}'
+        assert opaque not in redact_via_context(header)
+        p = package(blocks=[{"id": "x", "type": "stat", "fields": ["open_prs"], "title": header}])
+        p["model"]["types"]["open_prs"]["label"] = header
+        html = dp.parse_package(json.dumps(p))["view"]["html"]
+        assert opaque not in html
+
+    def test_a_layout_whose_page_passes_the_cap_is_refused_while_it_is_built(
+        self, monkeypatch
+    ) -> None:
+        """Refused at the page limit before the whole page is held, not after."""
+        built: list[int] = []
+        real = dp._migrated_text
+        monkeypatch.setattr(dp, "_migrated_text", lambda t: built.append(1) or real(t))
+        monkeypatch.setattr(dp, "MAX_VIEW_HTML_BYTES", 2_000)
+        p = package(blocks=[{"id": "x", "type": "list", "fields": ["open_prs"] * 5_000}])
+        with pytest.raises(ArtifactValidationError, match="over the 2000-byte limit for a page"):
+            dp.parse_package(json.dumps(p))
+        assert len(built) < 100
+
+    def test_a_block_title_and_label_are_written_as_text(self) -> None:
+        p = package(blocks=[{"id": "x", "type": "stat", "fields": ["open_prs"], "title": "<b>&"}])
+        p["model"]["types"]["open_prs"]["label"] = "<i>PRs</i>"
+        html = dp.parse_package(json.dumps(p))["view"]["html"]
+        assert "<h2>&lt;b&gt;&amp;</h2>" in html and "<dt>&lt;i&gt;PRs&lt;/i&gt;</dt>" in html
 
     def test_a_rebind_alone_creates_no_version_but_is_stored(self, store, saved) -> None:
         # bound_to says WHERE the page hangs, not what it looks like, and a
@@ -736,26 +839,9 @@ class TestRejectInvalid:
                 id="agentic-false-is-not-a-source",
             ),
             pytest.param(
-                lambda p: p["view"]["blocks"][0].update({"type": "heatmap"}),
-                "unknown block type 'heatmap'",
-                id="unknown-block-type",
-            ),
-            pytest.param(
-                lambda p: p["view"]["blocks"][0].update({"fields": ["not_declared"]}),
+                lambda p: _as_blocks(p)[0].update({"fields": ["not_declared"]}),
                 "which model.types does not declare",
                 id="block-names-an-undeclared-field",
-            ),
-            pytest.param(
-                lambda p: p["view"]["blocks"][0].update({"fields": ["open_prs", "lane"]}),
-                "reads between 1 and 1 fields",
-                id="block-reads-too-many-fields",
-            ),
-            pytest.param(
-                lambda p: p["view"]["blocks"].append(
-                    {"id": "prs", "type": "stat", "fields": ["open_prs"]}
-                ),
-                "is used by an earlier block",
-                id="duplicate-block-id",
             ),
             pytest.param(
                 lambda p: p.update({"data": {"open_prs": 4}}),
@@ -768,7 +854,7 @@ class TestRejectInvalid:
                 id="a-value-on-a-field",
             ),
             pytest.param(
-                lambda p: p["view"]["blocks"][0].update({"rows": [1, 2]}),
+                lambda p: _as_blocks(p)[0].update({"rows": [1, 2]}),
                 "values stay in the crew log",
                 id="rows-on-a-block",
             ),
@@ -788,11 +874,6 @@ class TestRejectInvalid:
                 id="wrong-kind-inside-the-package",
             ),
             pytest.param(
-                lambda p: p.pop("theme"),
-                "theme: is required",
-                id="no-theme",
-            ),
-            pytest.param(
                 lambda p: p["theme"]["tokens"].update({"panel-bg": "red"}),
                 "is not a theme token",
                 id="token-is-not-a-custom-property",
@@ -808,13 +889,27 @@ class TestRejectInvalid:
                 id="css-fetches",
             ),
             pytest.param(
+                lambda p: p["theme"].update({"css": ".a{background:url( 'https://x/t.png')}"}),
+                "can be an inline data: URL instead",
+                id="css-url-with-an-address",
+            ),
+            pytest.param(
+                lambda p: p["theme"].update(
+                    {
+                        "css": '.a{background:url("data:image/png;base64,AA")} .b{background:url(t.png)}'
+                    }
+                ),
+                "can be an inline data: URL instead",
+                id="css-a-second-url-with-an-address",
+            ),
+            pytest.param(
                 lambda p: p["model"].update({"types": {}}),
                 "must declare at least one field",
                 id="empty-model",
             ),
             pytest.param(
-                lambda p: p["view"].update({"blocks": []}),
-                "must place at least one block",
+                lambda p: p.update({"view": {"blocks": []}}),
+                "view.html: is empty",
                 id="empty-view",
             ),
             pytest.param(
@@ -879,12 +974,18 @@ class TestRejectInvalid:
         with pytest.raises(ArtifactValidationError, match="must be an object"):
             store.create(name="Bad", kind="dashboard", content="[]")
 
-    def test_the_byte_cap_applies_to_the_stored_form_not_the_submitted_text(self, store) -> None:
+    def test_the_byte_cap_applies_to_the_stored_form_not_the_submitted_text(
+        self, store, monkeypatch
+    ) -> None:
         # Indentation is added by the store, so a layout can arrive under the
         # cap and be written over it. The caps that matter are the ones measured
         # on the bytes a write actually puts on disk, because an oversized
         # package is one this module's own reader refuses: the page would come
         # back blank with nothing refused at write time.
+        #
+        # The cap is SET between the two forms of one layout below. The real one
+        # is sized for a page that inlines a library, which this small page does not
+        # come near, and the property asked here is which form the cap is measured on.
         types = {
             f"f{i:05d}": {
                 "type": "enum",
@@ -895,14 +996,14 @@ class TestRejectInvalid:
             }
             for i in range(dp.MAX_MODEL_FIELDS)
         }
-        blocks = [
-            {"id": f"b{i:05d}", "type": "table", "fields": [f"f{i:05d}"]}
-            for i in range(dp.MAX_VIEW_BLOCKS)
-        ]
-        submitted = json.dumps(package(types=types, blocks=blocks), separators=(",", ":"))
-        # Every per-part cap is satisfied and the submitted text is under the
+        p = package(types=types)
+        p["view"] = {"html": "".join(f'<p data-dashboard-field="{name}"></p>' for name in types)}
+        submitted = json.dumps(p, separators=(",", ":"))
+        stored = dp.dump_package(dp.parse_package(submitted))
+        monkeypatch.setattr(dp, "MAX_PACKAGE_BYTES", len(submitted.encode("utf-8")))
+        # Every per-part cap is satisfied and the submitted text is at the
         # package cap, so nothing upstream of the serializer can refuse this.
-        assert len(submitted.encode("utf-8")) <= dp.MAX_PACKAGE_BYTES
+        assert len(stored.encode("utf-8")) > dp.MAX_PACKAGE_BYTES
         with pytest.raises(ArtifactValidationError, match="bytes once stored"):
             store.create(name="Indented over", kind="dashboard", content=submitted)
         # The revert path ends in the same serializer, so it refuses it too.
@@ -1221,3 +1322,63 @@ class TestTheBindingLookup:
         # match: the binding still has to be the one asked for.
         self._corrupt(store, tmp_path, bound_to="session:member-atlas")
         assert dp.resolve_bound_slug(BOUND, store=store) == saved.slug
+
+
+class TestAMissingThemeIsTheEmptyTheme:
+    """An MCP client can drop ``{"tokens": {}}`` (an empty object) before it reaches the
+    gateway, so a missing theme, or a theme with no tokens, is stored canonically as the
+    empty token set rather than refused."""
+
+    @pytest.mark.parametrize(
+        ("edit", "css"),
+        [
+            pytest.param(lambda p: p.pop("theme"), None, id="no-theme"),
+            pytest.param(lambda p: p.update({"theme": None}), None, id="theme-null"),
+            pytest.param(lambda p: p.update({"theme": {}}), None, id="theme-empty"),
+            pytest.param(
+                lambda p: p.update({"theme": {"css": ".x{color:var(--text)}"}}),
+                ".x{color:var(--text)}",
+                id="css-no-tokens",
+            ),
+        ],
+    )
+    def test_it_is_stored_as_empty_tokens(self, edit: Any, css: str | None) -> None:
+        p = package()
+        edit(p)
+        theme = dp.validate_package(p)["theme"]
+        assert theme["tokens"] == {}
+        assert theme.get("css") == css
+        # Canonical either way: the stored bytes carry the empty token set.
+        stored = json.loads(dp.canonical_package_content(json.dumps(p)))
+        assert stored["theme"]["tokens"] == {}
+
+    def test_a_bad_token_value_is_still_refused(self) -> None:
+        p = package(tokens={"--panel-bg": "red; z-index:9"})
+        with pytest.raises(ArtifactValidationError, match="theme.tokens.--panel-bg"):
+            dp.validate_package(p)
+
+    def test_a_theme_that_is_not_an_object_is_still_refused(self) -> None:
+        p = package()
+        p["theme"] = "dark"
+        with pytest.raises(ArtifactValidationError, match="theme"):
+            dp.validate_package(p)
+
+
+def test_an_svg_data_url_with_an_internal_url_reference_is_kept() -> None:
+    """``url(%23g)`` inside an inline SVG points at a gradient in the data itself, so the
+    scan skips the whole data URL; an address after it is still refused."""
+    svg = (
+        "data:image/svg+xml,%3Csvg xmlns=%27x%27%3E%3Cdefs%3E%3ClinearGradient id=%27g%27/%3E"
+        "%3C/defs%3E%3Crect fill=%27url(%23g)%27/%3E%3C/svg%3E"
+    )
+    for quoted in (f'"{svg}"', f"'{svg}'"):
+        assert not dp._theme_fetches(f".wall{{background:url({quoted})}}")
+    assert dp._theme_fetches(f'.w{{background:url("{svg}")}} .b{{background:url(t.png)}}')
+
+
+def test_a_theme_texture_written_as_an_inline_data_url_is_kept() -> None:
+    """A data: URL carries its bytes, so it reaches no network and the frame admits it."""
+    p = package()
+    css = '.wall{background:url( "data:image/svg+xml,%3Csvg%20xmlns=%27x%27/%3E" )} .b{color:red}'
+    p["theme"].update({"css": css})
+    assert dp.validate_package(p)["theme"]["css"] == css

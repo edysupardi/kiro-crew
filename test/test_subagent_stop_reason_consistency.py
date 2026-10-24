@@ -1776,9 +1776,9 @@ async def test_recovery_defers_to_shutdown_and_reap_markers():
 async def test_blocking_wait_expiry_does_not_fail_the_child():
     """SPEC-ADDENDUM §9: a blocking wait that expires ends the CALLER's wait; the
     child keeps running and is never marked failed / cancelled / collected."""
-    from kiro_crew.mcp_tools import spawn as spawn_mod
+    from kiro_crew.mcp_tools.spawn_parts import wave
 
-    src = Path(spawn_mod.__file__).read_text(encoding="utf-8")
+    src = Path(wave.__file__).read_text(encoding="utf-8")
     assert '"still_running"' in src
     assert "task_ids" in src
 
@@ -1895,6 +1895,9 @@ def test_chat_runner_has_no_private_stop_reason_mapping():
 def test_subagent_run_has_no_private_stop_reason_mapping():
     import kiro_crew.subagent_manager.run as run_mod
 
-    src = Path(run_mod.__file__).read_text(encoding="utf-8")
+    # run.py binds most of its members from sibling ``run_*`` owners: read the family.
+    facade = Path(run_mod.__file__)
+    family = [facade, *sorted(facade.parent.glob("run_*.py"))]
+    src = "\n".join(path.read_text(encoding="utf-8") for path in family)
     assert 'startswith("error:")' not in src
     assert "classify_stop_reason(" in src

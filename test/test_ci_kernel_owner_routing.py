@@ -47,8 +47,10 @@ def _junit_check(run_body):
 def test_the_lane_is_a_hosted_vm_running_exactly_the_two_strict_cases(jobs, run_body):
     job = jobs[JOB]
     assert job["runs-on"] == "ubuntu-latest"
-    assert job["needs"] == ["changes", "await-fast-gate"]
-    for forbidden in ("if", "container", "continue-on-error", "strategy"):
+    assert job["needs"] == ["changes", "await-fast-gate", "lint-gate"]
+    # Not diff-gated: its only condition is the lint gate's own success.
+    assert job["if"] == "${{ !cancelled() && needs.lint-gate.result == 'success' }}"
+    for forbidden in ("container", "continue-on-error", "strategy"):
         assert forbidden not in job
     assert job["defaults"]["run"]["shell"] == "bash"
     assert job["timeout-minutes"] <= 15

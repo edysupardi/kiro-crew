@@ -895,7 +895,7 @@ describe('ArtifactDetailPage — mutation paths', () => {
       .mockResolvedValue({ key: 'slot-new', title: 'Artifact: CR Queue' })
     vi.mocked(api).chatSlotContext = vi.fn().mockResolvedValue({ ok: true })
     await mount(mkArtifact())
-    fireEvent.click(await screen.findByText('Ask agent to address'))
+    fireEvent.click(await screen.findByText('Draft a prompt in chat'))
     await waitFor(() => expect(vi.mocked(api).createChatSlot).toHaveBeenCalledTimes(1))
     // The prompt is STAGED, never auto-sent — the embedded composer picks it up.
     await waitFor(() =>
@@ -1358,7 +1358,7 @@ describe('stale context notice body', () => {
   })
 
   it('selects the stale key in the component, not only the shared one', () => {
-    const src = readFileSync(resolve(__dirname, '../pages/ArtifactDetailPage.tsx'), 'utf8')
+    const src = readFileSync(resolve(__dirname, '../pages/useArtifactDetailPageDocument.ts'), 'utf8')
     expect(src).toContain('chat_context_stale_not_attached')
     // CONTROL: the fresh key must survive too, or the non-refresh case now names the wrong body.
     expect(src).toContain('chat_context_not_attached')

@@ -77,16 +77,16 @@ it is read from code and still needs a fault-injected run.
 | # | Where (symbol, line at `6f056722b`) | Confirmed behaviour on main | Status | Problem this RFC solves |
 |---|---|---|---|---|
 | E1 | `config/sections_agent.py` `AgentConfig.chat_turn_timeout_secs` default 14400; `AgentConfig.subagent_timeout_secs` default `SUBAGENT_TIMEOUT_SECS` (10800) | Long-run guards only | 已复现 | Overload control cannot wait hours for a timeout; needs its own signals (§5) |
-| E2 | `subagent_manager/admission.py` `check_memory_available` L193, `cached_admission_check` L228, `_should_stagger_queue_impl` L639, `_drain_queue_impl` L651, `_preassigned_id` L121 | In-memory FIFO `_queue` (`subagent.py` L1704), stable queued id, 2s stagger, single drain pump; memory posture check REFUSES before queueing; prevalidated app spawns refuse to queue (L337) | 已复现 (2000-task harness: 10 running / 1990 queued) | No persistent pending work; restart loses the queue; "can we store it" is conflated with "can we start a runtime" (§3, §4) |
-| E3 | `subagent_parts/host_memory.py` `compute_max_subagents` (floor 3 via `_LEGACY_DEFAULT_MAX`), `subagent.py` `apply_limits` L1863 (`max(1, ...)` L1888) | Cap shrinks and in-flight runs drain naturally | 已复现 (manual 10→6→4) | Reuse as the actuator; no controller drives it (§5) |
+| E2 | `subagent_manager/admission.py` `check_memory_available` L193, `cached_admission_check` L228, `_should_stagger_queue_impl` L639, `_drain_queue_impl` L651, `_preassigned_id` L121 | In-memory FIFO `SubagentManager._queue` (`subagent_parts/manager.py`), stable queued id, 2s stagger, single drain pump; memory posture check REFUSES before queueing; prevalidated app spawns refuse to queue (L337) | 已复现 (2000-task harness: 10 running / 1990 queued) | No persistent pending work; restart loses the queue; "can we store it" is conflated with "can we start a runtime" (§3, §4) |
+| E3 | `subagent_parts/host_memory.py` `compute_max_subagents` (floor 3 via `_LEGACY_DEFAULT_MAX`), `subagent_parts/config_surface.py` `apply_limits` (`max(1, ...)`) | Cap shrinks and in-flight runs drain naturally | 已复现 (manual 10→6→4) | Reuse as the actuator; no controller drives it (§5) |
 | E4 | `mcp_gateway/pool.py` `BackendPool.add` L565 `PoolAtCapacity`; `get_or_create` L580; `acquire_exclusive` L788 skips `_max_backends` (L798) | Capacity checked AFTER `spawn()`; exclusive backends unbounded | 已复现 (16 stubs × N sessions storm) | Reserve before allocating; one host budget over pooled + exclusive + fallback (§4) |
 | E5 | `mcp_gateway/gatewayd.py` `_acquire_backend` L3375 → `"rejected", "fallback": True` L3056/L3072/L3097; `mcp_gateway/stub.py` `fallback_exec` L1734 called at L1962 (25s `_ENSURE_BACKEND_TIMEOUT_SECS` L95) and L2011 | Scarcity spawns MORE processes per session | 已复现 | Suppress overload-triggered fallback; keep compat/isolation fallback under admission (§4.3) |
 | E6 | `mcp_gateway/manager.py` `_LIVENESS_PING_INTERVAL_SECS` 30 L56, `_PING_TIMEOUT_SECS` 2.0 L50 (10s on the branch), `_LIVENESS_MAX_CONSECUTIVE_FAILURES` 3 L64 | Ping failure ⇒ zombie ⇒ kill + respawn | 已复现 (incident: daemon killed while forking) | Separate overload from death using loop lag, pressure, progress (§7) |
 | E7 | `mcp_gateway/stub.py` `_RECONNECT_TOTAL_BUDGET_SECS` 60 L85 (600 on the branch); `_reconnect` L1334 replays `initialize`, refuses when live subscriptions cannot be restored | Transport recovery exists; nothing above it resumes the task | 已复现 | Close the loop transport → runtime → task (§7) |
 | E8 | `taskrunner_parts/run_lifecycle.py` `_MAX_CONCURRENT_TASKS` 3, refusal in `TaskRunner.start_background` and `TaskRunner.execute_plan`, crash → `paused` in `TaskRunner._load_runs`; `workflows/registry.py` L234–239 running → `interrupted` failed | Persistent stores exist; excess is refused, restart parks work | 待验证 (restart path read from code) | Cross-entry queue, resume and re-dispatch (§3, §12) |
-| E9 | `dashboard/session_health.py` `_PATTERNS` L38 regex over `gateway.log`; `acp/runtime.py` `_session_start_stalled` L3034 | Health is log-scraped; ACP has liveness but no task state | 已复现 | Structured health from task + runtime state (§10) |
-| E10 | `mcp_tools/spawn.py` `max_wait` clamp 60..7200 L1048–1051 vs subagent 10800 | Caller wait ends before child budget | 已复现 | Return `still_running` ids, never mark the child failed (§8) |
-| E11 | `acp/runtime.py` `_COLD_START_MAX_CONCURRENT` 2 L187, `_SESSION_NEW_TIMEOUT` 90 L255, `create_session` L3214 (`_session_inits_in_flight` diagnostic only L3292); `acp/worker_pool.py` `DEFAULT_MAX_STARTING` 2 L59; `workflows/context.py` `DEFAULT_MAX_AGENTS_PER_RUN` 1000 L33; `subagent_manager/run.py` L798–810 ANY start exception → dedicated process | Per-entry semaphores; a timed-out `session/new` still creates a session remotely and the late reply is dropped (`_pending_requests.pop` L3767) | 已复现 (dedicated-process amplifier in incident) | One host budget across entries; tracked session-start ownership (§4.4) |
+| E9 | `dashboard/session_health.py` `_PATTERNS` L38 regex over `gateway.log`; `acp/runtime_session_registry.py` `_session_start_stalled` | Health is log-scraped; ACP has liveness but no task state | 已复现 | Structured health from task + runtime state (§10) |
+| E10 | `mcp_tools/spawn_parts/wave.py` `spawn_sub_agents` `max_wait` clamp 60..7200 vs subagent 10800 | Caller wait ends before child budget | 已复现 | Return `still_running` ids, never mark the child failed (§8) |
+| E11 | `acp/runtime.py` `_COLD_START_MAX_CONCURRENT` 2 L187, `_SESSION_NEW_TIMEOUT` 90 L255, `acp/runtime_session_create.py` `create_session` (`_session_inits_in_flight` is diagnostic only); `acp/worker_pool.py` `DEFAULT_MAX_STARTING` 2 L59; `workflows/context.py` `DEFAULT_MAX_AGENTS_PER_RUN` 1000 L33; `subagent_manager/run_turn.py` `_run_inner_impl` ANY start exception → dedicated process | Per-entry semaphores; a timed-out `session/new` still creates a session remotely and the late reply is dropped (`_pending_requests.pop` L3767) | 已复现 (dedicated-process amplifier in incident) | One host budget across entries; tracked session-start ownership (§4.4) |
 
 `mcp_gateway.max_backends` (`config/sections.py` L4778) defaults to **64** on
 main. The 20 seen in incident machines was an explicit local pin and is not a
@@ -312,7 +312,7 @@ bounded by the 600s total budget; those control frames are consumed, never
 forwarded to kiro-cli. Bridge pings continue to be answered from the connection's
 read loop while a spawn waits, by moving the wait off the sequential reader into
 a per-connection task (GPT-6 hazard 8). The same negotiation applies to
-`_reconnect` (`stub.py`) and to `_respawn_backend_for_stub`, so all three stub
+`_reconnect` (`stub_link.py`) and to `_respawn_backend_for_stub`, so all three stub
 paths are queue-aware (GPT-6 must-fix 3). Daemon drain closes the gate first,
 cancels queued futures and watcher tasks, then proceeds with today's teardown.
 
@@ -1182,7 +1182,7 @@ compared `event.stop_reason`, so a completion carrying `STOP_REASON_TOOL_STALL`
 (`"error: tool stall"`) or `STOP_REASON_COMPACTION_FAILED` was recorded as a
 result and reached `_claim_finalize` as a success. `dashboard/chat_runner.py`
 branched on `STOP_REASON_TOOL_STALL` and ran its own continuation bounded by
-`slot._tool_stall_retries`. `subagent_manager/run.py` now imports and applies
+`slot._tool_stall_retries`. `subagent_manager/run_turn.py` and `run_yields.py` now import and apply
 `acp.types.classify_stop_reason`, the one classifier below:
 
 | `stop_reason` (`acp/types.py`) | Meaning | Task state | Slot | Retry |
@@ -1198,7 +1198,8 @@ branched on `STOP_REASON_TOOL_STALL` and ran its own continuation bounded by
 | any other `error:*` | generic infra error | `retry_wait` (W6) via ladder L1–L3 | released | ladder caps |
 
 `classify_stop_reason(event) -> (state, retryable, reason)` lives in
-`acp/types.py`; `run.py`, `chat_runner.py`, workflow agents and TaskRunner call
+`acp/types.py`; the sub-agent run (`subagent_manager/run_turn.py`, `run_yields.py`),
+the main chat (`_on_complete` in `dashboard/chat_turn/turn_stats.py`), workflow agents and TaskRunner call
 it instead of reading `stop_reason` ad hoc. Recovery continues from the stored
 result and checkpoint, never by re-submitting the original task text.
 
@@ -1206,7 +1207,7 @@ result and checkpoint, never by re-submitting the original task text.
 
 | Backend | Native subtask surface | Identity | Tool events | Cancel | Resume | Scheduler treatment |
 |---|---|---|---|---|---|---|
-| kiro-cli (`ACP_BACKEND_KIRO`) `use_subagent` | `_kiro.dev/subagent/list_update` (per-sub-agent `sessionId`, status); stream events carry `AcpEvent.sub_session_id` (`acp/types.py` L599) | yes (session id) | attributable only via `sub_session_id`; approvals surface on the parent (`run.py` L1296 counts them separately) | only the parent session (`session/cancel` on the parent) | none independent of the parent | **not** a task row; counted as residency under the parent task; recovery boundary = parent session; the parent's `WaitRecord` lists native child ids for display only |
+| kiro-cli (`ACP_BACKEND_KIRO`) `use_subagent` | `_kiro.dev/subagent/list_update` (per-sub-agent `sessionId`, status); stream events carry `AcpEvent.sub_session_id` (`acp/types.py` L599) | yes (session id) | attributable only via `sub_session_id`; approvals surface on the parent (`subagent_manager/run_turn.py` `_run_inner_impl` counts them separately) | only the parent session (`session/cancel` on the parent) | none independent of the parent | **not** a task row; counted as residency under the parent task; recovery boundary = parent session; the parent's `WaitRecord` lists native child ids for display only |
 | Claude backend (`ACP_BACKEND_CLAUDE`) | in-harness task tool; no per-child ACP identity today | no | no | parent only | none | same boundary as above; declared in `harness-parity.md` as a capability gap, not a defect |
 | `spawn_run` / `spawn_sub_agents` (all backends) | Kiro Crew task rows | yes | yes | per task | per task (continuable) | full scheduling (§3–§9) |
 

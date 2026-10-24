@@ -828,6 +828,18 @@ class LaunchTools:
     retrying_spawn_factory: Callable[..., Awaitable[asyncio.subprocess.Process]] | None = None
     #: ``agent.env`` (``acp.agent_env.agent_env_overlay``); blocking, run off-loop.
     agent_env_overlay: Callable[[], dict[str, str]] = field(default=dict)
+    #: ``sandbox.remember_namespace_launcher``; non-blocking ``/proc`` reads, never raises.
+    remember_namespace_launcher: Callable[[int, Sequence[str], str | None], None] = field(
+        default_factory=lambda: _remember_namespace_launcher
+    )
+
+
+def _remember_namespace_launcher(
+    pid: int, wrapped_argv: Sequence[str], launcher_script: str | None
+) -> None:
+    from kiro_crew.sandbox import remember_namespace_launcher
+
+    remember_namespace_launcher(pid, wrapped_argv, launcher_script)
 
 
 def _unscoped(argv: list[str]) -> tuple[list[str], str]:
@@ -928,6 +940,42 @@ def drop_foreign_inherited_port(env: dict[str, str]) -> None:
     env.pop("KIROCREW_PORT", None)
 
 
+def process_directory(host: LaunchHost) -> tuple[str, int | None]:
+    """The directory the host process is created in, and the descriptor that enters it.
+
+    An app agent's launch copy on kiro-cli must START in its empty, read-only launch
+    directory (``apps.agent_launch.launch_process_cwd``): kiro-cli takes project agents
+    from its process directory, so no checkout spec is read, while its sessions still
+    name ``host._work_dir``. Crew's Linux launcher enters that directory itself, after
+    its seals (:func:`exec_cwd_options`), so it is created in the workspace like any
+    other host: a process created inside the directory would keep the writable mount
+    under the seal, and the launcher's hardlinked-credential scan walks the directory it
+    was created in. Every other launch copy spawn (no Crew launcher) is created in the
+    directory directly. Every other host starts in its workspace.
+    """
+    process_cwd = getattr(host, "_launch_process_cwd", "")
+    if process_cwd and not _launcher_enters_exec_cwd(host):
+        return process_cwd, None
+    return host._spawn_work_dir, host._bound_workspace_fd
+
+
+def exec_cwd_options(host: LaunchHost) -> dict[str, str]:
+    """The sandbox wrap's ``exec_cwd`` for a launch copy, as keyword arguments."""
+    process_cwd = getattr(host, "_launch_process_cwd", "")
+    return {"exec_cwd": process_cwd} if process_cwd else {}
+
+
+def _launcher_enters_exec_cwd(host: LaunchHost) -> bool:
+    """Whether the wrap put the spawn behind Crew's Linux launcher, which takes ``exec_cwd``.
+
+    Read off the wrap's own record (``_sandbox_wrapped_by_crew``): on Linux Crew's only
+    wrapper is that launcher. Crew's macOS Seatbelt wrap takes no working directory.
+    """
+    return bool(getattr(host, "_sandbox_wrapped_by_crew", False)) and sys.platform.startswith(
+        "linux"
+    )
+
+
 async def launch(host: LaunchHost, request: LaunchRequest, tools: LaunchTools) -> LaunchedProcess:
     """Start *request*'s host process for *host*, suspended, through the shared tail.
 
@@ -1017,6 +1065,7 @@ async def launch(host: LaunchHost, request: LaunchRequest, tools: LaunchTools) -
         extra_hidden_dirs=request.extra_hidden_dirs,
         extra_private_dirs=scratch_window,
         extra_expose_files=request.extra_expose_files,
+        **exec_cwd_options(host),
         is_kiro_cli=delegate_internal_sandbox,
         _prepare=tools.wrap_argv,
     )
@@ -1027,6 +1076,7 @@ async def launch(host: LaunchHost, request: LaunchRequest, tools: LaunchTools) -
     # refusal has to name the layer to turn off; the cgroup scope below prepends
     # its own tokens, so the read happens before it.
     host._sandbox_wrapped_by_crew = tools.wrapped_by_crew_sandbox(argv)
+    sandbox_wrapped_argv = tuple(argv)
     host._sandbox_hidden_dirs = tuple(request.extra_hidden_dirs)
     # cgroup v2 scope (OUTERMOST): bound this agent + all its MCP-server / tool
     # descendants with pids.max (fork bomb) + memory.max (RSS balloon). No-op +
@@ -1127,7 +1177,7 @@ async def launch(host: LaunchHost, request: LaunchRequest, tools: LaunchTools) -
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=host._spawn_work_dir,
+        cwd=process_directory(host)[0],
         limit=_STDOUT_BUFFER_LIMIT,
         env=env,
         start_new_session=tools.platform_compat.IS_POSIX,
@@ -1140,7 +1190,7 @@ async def launch(host: LaunchHost, request: LaunchRequest, tools: LaunchTools) -
         # workspace through this verified descriptor instead of resolving
         # ``cwd``'s pathname, which a same-UID symlink retarget could aim elsewhere
         # in between; ``cwd`` stays the same directory by name.
-        chdir_fd=host._bound_workspace_fd,
+        chdir_fd=process_directory(host)[1],
         profile=RLIMIT_PROFILE_SESSION_HOST,
     )
     if tools.retrying_spawn_factory is not None:
@@ -1151,4 +1201,9 @@ async def launch(host: LaunchHost, request: LaunchRequest, tools: LaunchTools) -
         await host._discard_bound_workspace()
         host._discard_sandbox_cleanup()
         raise
+    # The live-agent confinement check trusts a namespace launcher only from this
+    # record: the launcher stays in the host namespaces by design, so its command
+    # line cannot be what proves Crew started it. The recorder checks the wrap's
+    # own argv against the launcher script the wrap generated.
+    tools.remember_namespace_launcher(process.pid, sandbox_wrapped_argv, host._sandbox_cleanup)
     return LaunchedProcess(process=process, scope_unit=scope_unit)

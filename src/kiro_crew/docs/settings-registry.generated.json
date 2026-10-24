@@ -538,7 +538,7 @@
       "label": "Default Model",
       "tab": "chat",
       "route": "/settings/chat/models?highlight=chat.default-model",
-      "description": "Which model new sessions start with when their agent pins none. Set a model per agent under Customize → Crewmates, or pick one inside a session to override it there.",
+      "description": "Which model new sessions start with when their agent pins none. Set a model per agent under Customize → Mates, or pick one inside a session to override it there.",
       "hint": "Agents with their own configured model ignore this setting. 'Default' uses the model from the agent configuration, or the system default when none is configured. Changing this does not affect sessions that are already open."
     },
     {
@@ -547,6 +547,15 @@
       "tab": "chat",
       "route": "/settings/chat/models?highlight=chat.default-reasoning-effort",
       "description": "Higher is slower and costs more. Only available on reasoning-capable models."
+    },
+    {
+      "id": "chat.default-sidebar-folder-for-new-chats",
+      "label": "Default Sidebar Folder for New Chats",
+      "tab": "chat",
+      "route": "/settings/chat/sessions?highlight=key%3Adashboard.default_session_folder",
+      "description": "The sidebar folder new chats are filed into when you start one without choosing a folder. It groups chats in the sidebar; it is not a folder on disk.",
+      "hint": "The chat uses the folder's linked project and agent, as New chat in folder does.",
+      "configKey": "dashboard.default_session_folder"
     },
     {
       "id": "chat.describe-your-role",
@@ -613,6 +622,14 @@
       "hint": "Expand history sidebar by default"
     },
     {
+      "id": "chat.keep-side-panel-open",
+      "label": "Keep Side Panel Open",
+      "tab": "chat",
+      "route": "/settings/chat/sidepanel?highlight=key%3Adashboard.side_panel_always_open",
+      "hint": "Opens the side panel in every chat, including new chats and after a reload. Closing it hides it until you switch chats. This setting does not apply on a phone.",
+      "configKey": "dashboard.side_panel_always_open"
+    },
+    {
       "id": "chat.link-previews",
       "label": "Link Previews",
       "tab": "chat",
@@ -655,6 +672,21 @@
       "description": "Enter the full path of a folder that already exists. Each new chat gets its own new folder inside it and works there. Leave empty to turn this off.",
       "hint": "Folders are named by date with a short random suffix, and only you can open them. ~ stands for your home folder. A chat started in a chat folder that has its own project keeps that project.",
       "configKey": "dashboard.session_folder_root"
+    },
+    {
+      "id": "chat.open-sidebar-sessions-in-a-session-tab",
+      "label": "Open Sidebar Sessions in a Session Tab",
+      "tab": "chat",
+      "route": "/settings/chat/sessions?highlight=chat.open-sidebar-sessions-in-a-session-tab",
+      "hint": "A click opens the session in its own session tab instead of replacing the active tab's session."
+    },
+    {
+      "id": "chat.pin-summary-in-side-panel",
+      "label": "Pin Summary in Side Panel",
+      "tab": "chat",
+      "route": "/settings/chat/sidepanel?highlight=key%3Adashboard.side_panel_pin_summary",
+      "hint": "Shows Summary as the first side panel tab. Whenever the panel opens, it shows Summary. Opening a file or another item still shows that item. Needs Session summaries on.",
+      "configKey": "dashboard.side_panel_pin_summary"
     },
     {
       "id": "chat.pin-the-latest-turn",
@@ -753,7 +785,7 @@
       "label": "Show Full Titles While Scrolling",
       "tab": "chat",
       "route": "/settings/chat/sessions?highlight=chat.show-full-titles-while-scrolling",
-      "hint": "While you scroll the session list, titles cut off by the sidebar show in full over it; they hide when the pointer leaves or shortly after scrolling stops"
+      "hint": "While you scroll the session list, titles the sidebar cuts off show in full"
     },
     {
       "id": "chat.show-pasted-text-in-full",
@@ -1020,13 +1052,6 @@
       "description": "Turns on an in-development, developer-only harness for a new layout mechanism. Nothing you can see changes yet: the mechanism has no page of its own, so this exists only so it can be built and tested behind a switch."
     },
     {
-      "id": "developer.crewmates",
-      "label": "Crewmates",
-      "tab": "developer",
-      "route": "/settings/developer?highlight=developer.crewmates",
-      "hint": "The Crewmates page: every agent you have, each with its own thread. Still being built, so it is not offered until you turn this on."
-    },
-    {
       "id": "developer.decisions-jev",
       "label": "Decisions (Jev)",
       "tab": "developer",
@@ -1062,6 +1087,13 @@
       "description": "Kept in this dashboard's secret store on the machine that runs Kiro Crew, never in config.json, and never shown again once you save it."
     },
     {
+      "id": "developer.mates",
+      "label": "Mates",
+      "tab": "developer",
+      "route": "/settings/developer?highlight=developer.mates",
+      "hint": "The Mates page: every agent you have, each with its own thread. Still being built, so it is not offered until you turn this on."
+    },
+    {
       "id": "developer.model-for-the-small-model-judge",
       "label": "Model for the small-model judge",
       "tab": "developer",
@@ -1069,11 +1101,11 @@
       "description": "Only used when the judge above is the small model. Leave it on the judge agent's own model unless you want a cheaper one."
     },
     {
-      "id": "developer.reply-threads-on-crewmate-chat-messages",
-      "label": "Reply threads on crewmate chat messages",
+      "id": "developer.reply-threads-on-mate-chat-messages",
+      "label": "Reply threads on mate chat messages",
       "tab": "developer",
-      "route": "/settings/developer?highlight=developer.reply-threads-on-crewmate-chat-messages",
-      "hint": "Let any message in a crewmate's chat carry its own reply thread, opened in the side panel while the chat stays visible. Off, the Reply in thread control is not offered and existing threads are hidden, not deleted."
+      "route": "/settings/developer?highlight=developer.reply-threads-on-mate-chat-messages",
+      "hint": "Let any message in a mate's chat carry its own reply thread, opened in the side panel while the chat stays visible. Off, the Reply in thread control is not offered and existing threads are hidden, not deleted."
     },
     {
       "id": "developer.run-a-local-gateway",
@@ -1081,6 +1113,13 @@
       "tab": "developer",
       "route": "/settings/developer?highlight=developer.run-a-local-gateway",
       "description": "Start a gateway on this machine. Leave it on unless this app's port already reaches a crew on another machine, or the app cannot connect the next time it opens, which is when this takes effect. That needs the crew saved for this port with “Set Remote Host…” in the Connection menu, plus a tunnel: tick “Keep an SSH tunnel to this crew open” there (macOS and Linux) or keep your own SSH tunnel running. Settings → Remote Crew connections stop when this is off, so they do not count."
+    },
+    {
+      "id": "developer.run-kas-on-kiro-crew-s-own-engine",
+      "label": "Run KAS on Kiro Crew's own engine",
+      "tab": "developer",
+      "route": "/settings/developer?highlight=developer.run-kas-on-kiro-crew-s-own-engine",
+      "description": "Uses the KAS engine version this Kiro Crew release was tested with, instead of the Kiro CLI. Applies to every new session on this Kiro Crew, not just this device. Signs in with your Kiro account from Settings → Agent Harness. Takes effect when Kiro Crew restarts."
     },
     {
       "id": "developer.webhooks",
@@ -1146,6 +1185,13 @@
       "tab": "display",
       "route": "/settings/display/zoom?highlight=display.enable-ligatures",
       "hint": "Render programming ligatures (=>, !=, ->) when the custom font has them. Code and diffs in messages are unaffected."
+    },
+    {
+      "id": "display.external-terminal-app",
+      "label": "External terminal app",
+      "tab": "display",
+      "route": "/settings/display/terminal?highlight=key%3Adashboard.terminal.external_app",
+      "configKey": "dashboard.terminal.external_app"
     },
     {
       "id": "display.font",
@@ -1478,6 +1524,14 @@
       "configKey": "skills.auto_create_from_sessions"
     },
     {
+      "id": "skills.extra-skill-paths",
+      "label": "Extra skill paths",
+      "tab": "skills",
+      "route": "/settings/skills?highlight=key%3Askills.extra_paths",
+      "description": "Folders to load extra skills from, one path per line. Spaces around a path and blank lines are ignored. Skills found there are read-only, and a skill in your own skills folder wins on a duplicate name. Changes apply without a restart.",
+      "configKey": "skills.extra_paths"
+    },
+    {
       "id": "skills.require-approval-before-generated-skills-go-live",
       "label": "Require approval before generated skills go live",
       "tab": "skills",
@@ -1545,6 +1599,14 @@
       "configKey": "stt.transcribe_vocabulary"
     },
     {
+      "id": "voice.decode-threads",
+      "label": "Decode threads",
+      "tab": "voice",
+      "route": "/settings/voice?highlight=key%3Astt.threads",
+      "hint": "CPU threads the local model uses to recognise speech. Auto uses half of this machine's cores, at most 16. On a large machine with cores to spare, more threads finish each dictation sooner. A change applies at the next dictation, which reloads the model once.",
+      "configKey": "stt.threads"
+    },
+    {
       "id": "voice.dictation-panel",
       "label": "Dictation panel",
       "tab": "voice",
@@ -1589,6 +1651,13 @@
       "configKey": "stt.language_code"
     },
     {
+      "id": "voice.language-2",
+      "label": "Language",
+      "tab": "voice",
+      "route": "/settings/voice?highlight=voice.language-2",
+      "hint": "Language for spoken replies"
+    },
+    {
       "id": "voice.microphone",
       "label": "Microphone",
       "tab": "voice",
@@ -1612,25 +1681,11 @@
       "configKey": "stt.model"
     },
     {
-      "id": "voice.piper-binary",
-      "label": "Piper Binary",
-      "tab": "voice",
-      "route": "/settings/voice?highlight=voice.piper-binary",
-      "description": "Path to the piper executable. Leave blank to auto-detect on PATH or in a ~/piper-venv install"
-    },
-    {
-      "id": "voice.piper-model",
-      "label": "Piper Model",
-      "tab": "voice",
-      "route": "/settings/voice?highlight=voice.piper-model",
-      "description": "Path to the Piper voice model (.onnx). Required — download from huggingface.co/rhasspy/piper-voices"
-    },
-    {
       "id": "voice.provider",
       "label": "Provider",
       "tab": "voice",
       "route": "/settings/voice?highlight=key%3Astt.provider",
-      "hint": "Local speech recognition runs on this machine and sends nothing anywhere. Transcribe uploads your audio to AWS.",
+      "hint": "Local speech recognition runs on this machine and sends nothing anywhere. Transcribe streams your audio to AWS.",
       "configKey": "stt.provider"
     },
     {
@@ -1638,7 +1693,15 @@
       "label": "Provider",
       "tab": "voice",
       "route": "/settings/voice?highlight=voice.provider-2",
-      "description": "The built-in engine needs no setup; Piper is offline with better quality; Amazon Polly uses AWS credentials + network"
+      "description": "The built-in engine needs no setup; Amazon Polly uses AWS credentials + network"
+    },
+    {
+      "id": "voice.send-when-i-stop-recording",
+      "label": "Send when I stop recording",
+      "tab": "voice",
+      "route": "/settings/voice?highlight=key%3Astt.submit_on_release",
+      "hint": "Stopping sends the message. Shift-click the mic, or slide sideways on the phone, to keep a draft.",
+      "configKey": "stt.submit_on_release"
     },
     {
       "id": "voice.shortcut-key",
@@ -1659,13 +1722,6 @@
       "tab": "voice",
       "route": "/settings/voice?highlight=voice.speed-2",
       "hint": "Speech rate for spoken replies (Amazon Polly)"
-    },
-    {
-      "id": "voice.speed-3",
-      "label": "Speed",
-      "tab": "voice",
-      "route": "/settings/voice?highlight=voice.speed-3",
-      "hint": "Piper speech speed (length scale)"
     },
     {
       "id": "voice.streaming",

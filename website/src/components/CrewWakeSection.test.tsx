@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { Provider } from 'react-redux'
 import type { ReactNode } from 'react'
 
 /**
@@ -38,10 +39,13 @@ vi.mock('../api/client', () => ({
 vi.mock('react-router-dom', () => ({ useNavigate: () => H.navigate }))
 
 import CrewWakeSection from './CrewWakeSection'
+import { createTestStore } from '../test/helpers'
 
+// `useCronActions` reads the store's dispatch (its open-in-chat lists the tab),
+// so the section renders inside a Provider as it does in the app.
 function wrap(node: ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(<QueryClientProvider client={qc}>{node}</QueryClientProvider>)
+  return render(<QueryClientProvider client={qc}><Provider store={createTestStore()}>{node}</Provider></QueryClientProvider>)
 }
 
 const JOB = {
@@ -265,11 +269,11 @@ describe('CrewWakeSection — inline schedule creation', () => {
     wrap(
       <CrewWakeSection
         crew="radar" memberId="radar" agentTemplate="shared-template" ownedOnly initialAdding
-        pinnedHint="Created from this crewmate's profile, so the job runs as this crewmate."
+        pinnedHint="Created from this mate's profile, so the job runs as this mate."
       />,
     )
     await screen.findByTestId('crew-wake-create')
-    expect(screen.getByText("Created from this crewmate's profile, so the job runs as this crewmate.")).toBeTruthy()
+    expect(screen.getByText("Created from this mate's profile, so the job runs as this mate.")).toBeTruthy()
     expect(screen.queryByText(/this crew's editor/)).toBeNull()
   })
 

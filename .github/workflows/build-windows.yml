@@ -269,7 +269,7 @@ jobs:
       # installer unsigned rather than failing the build.
       - name: Configure AWS credentials for Windows signing
         if: env.HAS_WINDOWS_SIGNING
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.AWS_WINDOWS_SIGNING_ROLE_ARN }}
           aws-region: us-west-2
@@ -277,14 +277,11 @@ jobs:
       - name: Build desktop app
         # bash (Git Bash): the build script is bash, and `make` is not on the
         # Windows runner image -- the Makefile target only adds a local-dev
-        # node-bin-dir PATH nicety that CI's setup-node already covers. Pass the
-        # pin explicitly so the log names the bundled release and the Windows MSI
-        # takes the same two-file version+sha contract as macOS/Linux.
+        # node-bin-dir PATH nicety that CI's setup-node already covers. No
+        # bundled kiro-cli (BUNDLE_KIRO_CLI defaults to 0 in the script): the
+        # app detects the user's own install.
         shell: bash
-        run: |
-          KIRO_CLI_VERSION="$(tr -d '[:space:]' < packaging/kiro-cli-version)"
-          echo "Bundling kiro-cli ${KIRO_CLI_VERSION} (packaging/kiro-cli-version)"
-          KIRO_CLI_VERSION="${KIRO_CLI_VERSION}" bash packaging/build-desktop.sh
+        run: bash packaging/build-desktop.sh
         env:
           # There is no certificate on the runner: the private key lives in the
           # signing service. Signing goes through the custom hook

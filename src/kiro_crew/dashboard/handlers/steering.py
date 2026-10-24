@@ -16,7 +16,7 @@ play, and they are loaded by two different mechanisms:
 These endpoints back the Steering tab under Agent Capabilities, surfacing which
 steering documents are in effect.
 
-Path handling mirrors the skills browser (``handlers/_shared.py``): traversal,
+Path handling mirrors the skills browser (``handlers/_shared_skill_roots.py``): traversal,
 absolute paths, ``~`` expansion, non-``.md`` suffixes, symlinked intermediate
 directories and sensitive locations are all rejected before any read or write.
 A LEAF symlink is listed and readable — read-only — when its resolved target
@@ -50,12 +50,7 @@ from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.executors import discovery_executor
 from kiro_crew.frontmatter import STEERING_LOADER, set_frontmatter_fields, split_frontmatter
 from kiro_crew.hooks import FileTooLargeError, safe_read_file_bytes_nolink
-from kiro_crew.security import (
-    is_sensitive_path,
-    is_sensitive_write_path,
-    redact_credentials,
-    redact_exfiltration_urls,
-)
+from kiro_crew.security import is_sensitive_path, is_sensitive_write_path
 
 from ._shared import (
     _is_restricted_session,
@@ -195,12 +190,12 @@ def _redact_meta(text: str) -> str:
 
     Metadata (the first-heading description, the display path) is never written
     back to disk, so redacting it is free — it mirrors ``_redact_prompt`` in
-    ``handlers/prompts.py``. Editor CONTENT is deliberately NOT redacted: the
+    ``handlers/prompts_reading.py``. Editor CONTENT is deliberately NOT redacted: the
     detail response is what the textarea saves back, so a redaction there would
     overwrite the user's own file with ``[REDACTED]`` markers.
     """
-    out, _ = redact_credentials(text)
-    out, _ = redact_exfiltration_urls(out)
+    from kiro_crew.security import redact
+    out = redact(text)
     return out
 
 

@@ -35,7 +35,8 @@ raises ``Cannot add a column to a view`` — loud, and before any write.
 The views are READ-ONLY, deliberately
 -------------------------------------
 ``semantic_memory`` and ``episodic_memories`` survive as views so the read statements in
-``vector_memory.py`` and ``vector_memory_runtime/`` run byte-identically, and so the four vector
+``vector_memory.py``, its ``vector_memory_*.py`` owners and ``vector_memory_runtime/`` run
+byte-identically, and so the four vector
 scorers stay partitioned by RELATION: episodic blobs are L2-normalized at write
 and semantic/lesson blobs are not, three scorers take a bare dot product, and one
 undivided ``embedding`` column would put un-normalized rows in front of them. The
@@ -280,6 +281,8 @@ CREATE VIEW IF NOT EXISTS episodic_memories AS
       FROM memory_items WHERE kind = '{KIND_EPISODE}';
 {MEMORY_EVENTS_SQL}{MEMORY_META_SQL}"""
 
+# Like ``vector_memory_lifecycle._MIGRATIONS``: every step runs inside the store's
+# one setup transaction and must not commit (no ``executescript`` either).
 MIGRATIONS_CREW: Final[list[tuple[int, str, "Callable[[sqlite3.Connection], None] | None"]]] = [
     (CREW_SCHEMA_VERSION, CREW_SCHEMA_SQL, None),
 ]
@@ -804,6 +807,26 @@ def facet_count_query(
         f"GROUP BY {column} ORDER BY total DESC, value ASC LIMIT ?"
     )
     return sql, (*params, groups)
+
+
+def execute_script(db: sqlite3.Connection, sql: str) -> None:
+    """Run every statement of *sql* inside the caller's open transaction.
+
+    ``Connection.executescript`` COMMITs a pending transaction before it runs,
+    so it cannot be one step of a larger one. Statements end where SQLite's own
+    tokenizer says they do (:func:`sqlite3.complete_statement`), so a ``;``
+    inside a literal, a comment or a trigger body does not split a statement.
+    """
+    pending = ""
+    for piece in sql.split(";"):
+        pending += piece + ";"
+        if sqlite3.complete_statement(pending):
+            if pending.strip(" \t\r\n;"):
+                db.execute(pending)
+            pending = ""
+    tail = pending[:-1]  # the ";" appended after the last piece
+    if tail.strip():
+        db.execute(tail)
 
 
 def detect_lineage(db: sqlite3.Connection) -> str | None:

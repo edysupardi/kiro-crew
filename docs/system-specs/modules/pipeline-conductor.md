@@ -34,14 +34,17 @@ Publishing never changes permissions. See [artifacts](artifacts.md).
 
 | File | Role |
 |---|---|
-| `src/kiro_crew/agent.py` | `_PIPELINE_CONDUCTOR_SYSTEM_PROMPT`, `_PIPELINE_CONDUCTOR_CORE_GRANTS`, `_PIPELINE_CONDUCTOR_DASHBOARD_GRANTS` |
+| `src/kiro_crew/agent_parts/spec_prompts.py` | `_PIPELINE_CONDUCTOR_SYSTEM_PROMPT` |
+| `src/kiro_crew/agent_parts/spec_grants.py` | `_PIPELINE_CONDUCTOR_CORE_GRANTS`, `_PIPELINE_CONDUCTOR_DASHBOARD_GRANTS` |
 | `src/kiro_crew/agent_materialization/conductor_agents.py` | `_install_pipeline_conductor_agent` |
 | `src/kiro_crew/agent_files.py` | `PIPELINE_CONDUCTOR_AGENT_FILENAME`, and its membership in `OWNED_KIRO_AGENT_FILES` |
 | `src/kiro_crew/subagent_parts/agent_policy.py` | `UNADVERTISED_AGENTS` — the conductor is never offered in a rendered agent roster (read through `kiro_crew.subagent`) |
 | `src/kiro_crew/builtin_skills/pipeline-conductor/SKILL.md` | The operating procedure: pipeline spec, claim preflight, work-order brief, probe cycle and action table, intervention ladder, adjudication and override protocol, admission table, credit rules, `conductor-status/v1`, cleanup |
 | `.../pipeline-conductor/scripts/claim_preflight.py` | One claim verdict per candidate item |
 | `.../pipeline-conductor/scripts/coverage_filter.py` | The batch open-PR exclusion for the queue build |
-| `.../pipeline-conductor/scripts/fleet_probe.py` | The batch patrol probe |
+| `.../pipeline-conductor/scripts/fleet_probe.py` | The batch patrol probe: its entry point, the patrol cycle and the session-store lookup it uses, config validation, the `/proc` walk that builds a `BANNED` line, and the `cmd=` redactor; it loads the two modules below by path and re-exports their names |
+| `.../pipeline-conductor/scripts/fleet_probe_sessions.py` | A module `fleet_probe.py` loads, never run on its own: the probe's session side, meaning protocol tags, reading and classifying a transcript tail, and the handled set's state file and suppression rules |
+| `.../pipeline-conductor/scripts/fleet_probe_processes.py` | A module `fleet_probe.py` loads, never run on its own: the probe's process side, meaning the banned command shapes, reading a runner's argv, the kernel's view of a pid's binary, and process ownership |
 | `.../pipeline-conductor/scripts/credit_spend.py` | Per-item credit rollup and budget verdict |
 | `.../pipeline-conductor/scripts/spec_check.py` | The spec's closed-value fields, checked once before the run arms |
 | `src/kiro_crew/dashboard/session_control.py` (facade over `src/kiro_crew/dashboard/session_control_parts/`) | Worker-session stand-up and control: `create_session` (`session_create.py`), `send_to_target` (`session_messaging.py`), `read_messages` (`session_status.py`), `stop_target` (`turn_control.py`), `authorize_target` (`target_authorization.py`) |
@@ -252,6 +255,17 @@ The banned-process scan's contract:
   with the rest withheld, because a command line can carry a credential or a
   presigned URL.
 
+The probe is three files. `fleet_probe.py` is the script an agent runs, and it
+loads `fleet_probe_sessions.py` and `fleet_probe_processes.py` from its own
+directory by path: nothing goes on `sys.path` or into `sys.modules`, no bytecode
+is written, and each of the two imports only the standard library, so a bare
+interpreter still runs the synced skill. New work on reading a session's tail, or
+on when a dispositioned signal stays quiet, goes to `fleet_probe_sessions.py`;
+new work on deciding whether a process is a banned run, or whose it is, goes to
+`fleet_probe_processes.py`. A name a test replaces on the probe
+(`_proc_starttime_ticks`, `_SAFE_LONG_FLAG_NAMES`) stays defined in
+`fleet_probe.py` together with every function that reads it.
+
 **`credit_spend.py`** sums the credits an item's sessions burned from the
 gateway's usage shards and answers `within`, `exhausted`, `truncated` or
 `unmetered`. `exhausted` is monotone (more shards can only add spend, so it
@@ -347,7 +361,7 @@ They are the durable record, and they exist because every alternative is a
 tail: `events_tail` is a bounded, newest-first mirror of the most recent
 `decisions.md` lines, and the session ledger keeps `_MAX_EVENTS` = 100 events on
 disk while `session_ledger_read` returns only the newest `_MAX_EVENT_TAIL` = 20
-(`session_ledger.py`), so neither can hold a whole run's rulings.
+(`session_ledger_layout.py`), so neither can hold a whole run's rulings.
 
 `open_rulings` is reviewed every cycle independently of what the probe fired.
 That is structural: the probe is right not to re-fire a signal already marked
@@ -429,5 +443,12 @@ derive `permissions` from the filtered list; all of them mount
 | `test/test_pipeline_conductor_claim_preflight.py` | The claim verdict lattice: merged-PR coverage and its near misses, fork PRs, prose self-claims, the `forge_claim` ownership check (foreign label or assignee skips, own claim exempt), closure requests outranking claims, and absent-symbol risk handling |
 | `test/test_pipeline_conductor_claim_preflight_check_detectors.py` | The detectors on their own: the guard every closure pattern ships with, item-scoped closure forms, the untrusted-fork annotation, closing-reference matching, symbol extraction and recency risk |
 | `test/test_pipeline_conductor_claim_preflight_end_to_end.py` | `main()` over a stubbed forge and a real git: a partial scan keeping what it confirmed, the read-only guard, every verdict's exit code and printed line, argument handling and the git flags |
-| `test/test_pipeline_conductor_fleet_probe.py` | The fleet probe's own failure directions: reports recognised only in protocol form, sticky reports outliving heartbeats, tool rows never classifying, the index counting only session-produced rows, ownership failing toward `unknown`, and derived paths a config cannot widen |
+| `test/test_pipeline_conductor_fleet_probe.py` | The fleet probe's own failure directions, transcript side: reports recognised only in protocol form, sticky reports outliving heartbeats, tool rows never classifying, the index counting only session-produced rows, and what the handled set remembers; it heads the suite below, whose shared fixtures are in `test/pipeline_conductor_fleet_probe_helpers.py` |
+| `test/test_pipeline_conductor_fleet_probe_ownership.py` | Path comparison and process ownership failing toward `unknown`, and a process age bound to one incarnation of its pid |
+| `test/test_pipeline_conductor_fleet_probe_host_lines.py` | Host posture: which runs count as the fleet's problem, and a BANNED line that withholds every argument |
+| `test/test_pipeline_conductor_fleet_probe_cycle.py` | One probe cycle and what it fires or suppresses, recording a disposition, derived paths a config cannot widen, typed misconfiguration and `main` |
+| `test/test_pipeline_conductor_fleet_probe_worker_count.py` | Reading a run's worker count from its argv, every runner form crossed with the budgeted and unbudgeted spellings |
+| `test/test_pipeline_conductor_fleet_probe_program_position.py` | Which argv token is the runner's program position: aliases, entry points, launchers, interpreters and a refuted `argv[0]` |
+| `test/test_pipeline_conductor_fleet_probe_argv_row.py` | The argv runner shape's opt-out switch and the `rule=`, `scope=` and `cmd=` its row prints |
+| `test/test_fleet_probe_owners.py` | The probe's split into a facade and two owners: every name a test replaces on the facade its own (never a re-export) and read by no owner, the corpus that finds those names reaching the suites that load the probe through a helper, every name the single file bound still bound, re-exports that are the owner's own objects, standard-library-only owners loaded by path under the facade's package and never registered, and a bare copy that runs under `-I -S` writing no bytecode |
 | `test/test_pipeline_conductor_coverage_filter.py` | The batch coverage exclusion: that a closing keyword aimed at the item in a pull request's own title or body is coverage while a bare reference is `MENTIONED` and leaves the item in the queue, that fork and draft PRs count while a neighbouring number does not, that an unreadable forge exits 3 with no `uncovered` list, that the filter writes nothing, and that its reference vocabulary agrees with `claim_preflight.py`'s |

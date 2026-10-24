@@ -151,7 +151,7 @@ jobs:
       # way it broke the other five. Carried now so the bump is a no-op instead
       # of a repo-wide fork outage. Rationale: fork-opus-review.yml.
       - name: Harden runner (egress allowlist)
-        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: block
           disable-telemetry: true
@@ -172,8 +172,16 @@ jobs:
             claude.ai:443
             downloads.claude.ai:443
 
+      # STEP TIMEOUTS, here and on the four steps after it. Each of these steps
+      # takes seconds (checkout about two minutes), yet a run can hang in one of
+      # them until the 30-minute JOB timeout kills it (the hang itself is tracked
+      # in issue 23063). A step timeout only makes that hang
+      # end sooner: the job still fails before `Resolve review scope` writes
+      # `in_scope`, and `publish` still fails closed on the empty value. No retry,
+      # so a timed-out step can never turn into a measured answer.
       - name: Resolve and validate PR (authoritative from GitHub)
         id: pr
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -282,6 +290,7 @@ jobs:
       # that second read and the check-run's POST.
       - name: Resolve human override
         id: human_override
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -338,6 +347,8 @@ jobs:
       # Trusted BASE tree for review CONTEXT only. NEVER the fork head.
       - name: Checkout base (trusted)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Full history takes 83-187 s on a healthy runner; 10 is ample headroom.
+        timeout-minutes: 10
         with:
           ref: ${{ steps.pr.outputs.base_sha }}
           fetch-depth: 0
@@ -349,6 +360,7 @@ jobs:
       # cannot mislead the review. It is read as a DATA file only: never applied
       # to or overlaid on the tree, and nothing runs it.
       - name: Fetch authentic diff (data only — never applied to the tree)
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -409,6 +421,7 @@ jobs:
       # what "the security surface" means, and only one of them gates a fork.
       - name: Resolve review scope
         id: scope
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -526,7 +539,7 @@ jobs:
       # One assume per model call: an AssumeRole session lasts an hour, and a
       # call that inherits a spent session dies on an expired token with no
       # verdict.
-      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         if: >-
           steps.human_override.outputs.active != 'true'
           && (steps.scope.outputs.in_scope == 'true')
@@ -562,7 +575,7 @@ jobs:
         if: >-
           steps.human_override.outputs.active != 'true'
           && (steps.scope.outputs.in_scope == 'true')
-        uses: anthropics/claude-code-action@97c53473391bff1901034d4b454b5bac7ab7a029 # v1.0.239
+        uses: anthropics/claude-code-action@2dca132ff0e0c4094ce6048b422c6915a071210b # v1.0.247
         with:
           # Inference via Amazon Bedrock (region from the AWS creds step above).
           # Opus 5.5's BARE, REGIONAL (`us.`) Bedrock inference-profile id, with an
@@ -656,6 +669,11 @@ jobs:
           # deny outranks every allow rule and CLI flag, so the bound holds even if
           # an allowlist entry is later widened. This matches the UX lane, which
           # denies the whole family.
+          #
+          # A COPY of the same-repo lane's arguments, pinned equal to them by
+          # `test_ai_review_workflows_scope_verdict.py`. Not read out of that file:
+          # here it would come from the base checkout, so the fence would follow
+          # the pull request's base rather than this default-branch workflow.
           claude_args: |
             --model us.anthropic.claude-opus-5-5
             --fallback-model us.anthropic.claude-sonnet-5-5
@@ -731,6 +749,10 @@ jobs:
             # from `END`, never taken from a partial read, and the class spells out
             # the five characters `[[:space:]]` matches inside a record so nothing
             # depends on the runners' mawk supporting a POSIX class.
+            # A COPY of the same-repo lane's capture, pinned equal to it by
+            # `test_ai_review_workflows_scope_verdict.py`. Not read out of that
+            # file: this job holds the Bedrock credential and runs no program
+            # read out of a checkout.
             v="$(awk '!found && tolower($0) ~ /^[ \t\v\f\r]*scope-verdict:/ { sub(/^[^:]*:[ \t\v\f\r]*/, ""); gsub(/\r/, ""); value = toupper($0); found = 1 } END { if (found) print value }' "$OUT")"
             [ -n "$v" ] && verdict="$v"
           fi
@@ -807,7 +829,7 @@ jobs:
       # Still hardened: this job reads a fork-influenced candidate file, so the
       # egress block is what stops anything here from calling out.
       - name: Harden runner (egress allowlist)
-        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: block
           disable-telemetry: true
@@ -1062,6 +1084,12 @@ jobs:
             # a COPY and refuse the run, the same refusal the publish path applies to
             # a redacted confirmed row before it reaches the comment. A candidate
             # carrying a credential shape is not a legitimate operation worth adjudicating.
+            #
+            # A COPY of the same-repo lane's probe under this lane's own output key,
+            # pinned equal to it by `test_ai_review_workflows_scope_verdict.py`. Not
+            # read out of that file: shell taken from a checkout would run as
+            # written, while the surface list, the one block this lane does read
+            # from it, is filtered down to quoted paths before any use.
             cp "$NORMALIZED" scrub-probe.json
             probe=0
             python3 "$REDACTOR" --mode json --fail-if-changed scrub-probe.json || probe=$?
@@ -1167,7 +1195,7 @@ jobs:
       # Still hardened. This job holds no secret, but it RUNS fork code, so the
       # egress block is what stops that code from calling out.
       - name: Harden runner (egress allowlist)
-        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: block
           disable-telemetry: true
@@ -1391,7 +1419,7 @@ jobs:
       && github.event.workflow_run.head_repository.full_name != github.repository
     steps:
       - name: Harden runner (egress allowlist)
-        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: block
           disable-telemetry: true
@@ -1527,7 +1555,7 @@ jobs:
           if [ "$rows_redacted" = "10" ] \
             || { [ -s "$ROWS" ] && grep -q '\[REDACTED-' "$ROWS"; }; then
             echo "rc=rows-redacted" >> "$GITHUB_OUTPUT"
-            echo "::error::a confirmed row carried a credential shape and was redacted, so it no longer names the operation that was refused. Every surface this lane writes is scrubbed, so reproduce the rows with scripts/deny_diff.py against this head. Narrow the rule at the tier the rows name and push -- this lane re-runs on the new head -- or record a human override for this head with /ai-review override scope <sha>: <reason>."
+            echo "::error::a confirmed row carried a credential shape and was redacted, so it no longer names the operation that was refused. Every surface this lane writes is scrubbed, so reproduce the rows with scripts/deny_diff.py against this head. Narrow the rule at the tier the rows name and push -- this lane re-runs on the new head -- or record a human override for this head with /ai-review override scope <sha> <class>: <reason>."
             exit 0
           fi
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
@@ -1694,15 +1722,23 @@ jobs:
             if [ "${ADJUDICATE:-}" != "true" ] && [ "${VALIDATE_RC:-}" = "3" ]; then
               nothing_new="true"
             fi
+            # An EMPTY in_scope: `generate` died (timed out, failed, cancelled)
+            # before `Resolve review scope` wrote it. Still unmeasured and still
+            # red -- this only lets the table name that cause instead of the
+            # generic "no leg reported" sentence, which points at the author's diff.
+            scope_unresolved="false"
+            if [ -z "${IN_SCOPE:-}" ]; then
+              scope_unresolved="true"
+            fi
             # THE CONCLUSION LADDER lives in scope_candidates.py so this lane and
             # the same-repo lane cannot drift. This publish job runs the
             # DEFAULT-branch harness (the trusted copy `adjudicate` judged with),
             # never a PR tree, so this call executes no fork code. This step only
             # reads its answer and maps it to a check-run conclusion.
-            conc="$(python3 scripts/scope_candidates.py conclude --lane fork \
+            conc="$(python3 scripts/scope_candidates.py conclude \
               --fold "$fold" --model "${MODEL_VERDICT:-UNKNOWN}" --marker "$marker" \
               --nothing-new "$nothing_new" --gap-script "$gap_script" --gap-model "$gap_model" \
-              --refusal "${VALIDATE_RC:-}")"
+              --refusal "${VALIDATE_RC:-}" --scope-unresolved "$scope_unresolved")"
             token="$(printf '%s\n' "$conc" | sed -n 's/^conclusion=//p')"
             title="$(printf '%s\n' "$conc" | sed -n 's/^why=//p')"
             # The actionable half of a NAMED validate refusal, which the check-run
@@ -1726,7 +1762,10 @@ jobs:
             case "$token" in
               pass)        conclusion="success" ;;
               nothing-new) conclusion="neutral" ;;
-              concerns)    conclusion="neutral" ;;
+              # Staged from the BASE commit, the table can still answer
+              # `concerns` until this contract is on the base. That is a PASS
+              # now: there is no soft tier.
+              concerns)    conclusion="success" ;;
               block)       conclusion="failure" ;;
               *)           conclusion="failure"; title="${title:-review incomplete — not a pass}"; settled="no" ;;
             esac
@@ -1792,6 +1831,11 @@ jobs:
           echo "remedy=$remedy" >> "$GITHUB_OUTPUT"
           echo "Scope lane conclusion: $conclusion — $title"
 
+      # The body is this lane's own: it names the fork lane and the check-run's
+      # conclusion words, so it is not one block with the same-repo lane's. What
+      # the two share is the `[SCOPE-REVIEWED] $HEAD` stamp, and that is a COPY,
+      # pinned equal to the same-repo lane's by
+      # `test_ai_review_workflows_scope_verdict.py`.
       - name: Assemble the comment body
         if: always() && needs.generate.outputs.in_scope != 'false'
         env:
@@ -1827,7 +1871,7 @@ jobs:
           fi
           case "$CONCLUSION" in
             success) badge="✅ PASS" ;;
-            neutral) badge="🟡 CONCERNS" ;;
+            neutral) badge="✅ nothing new to adjudicate" ;;
             *)       badge="🔴 BLOCK (blocking)" ;;
           esac
           {
@@ -1857,7 +1901,7 @@ jobs:
             {
               echo "---"
               echo
-              echo "_A confirmed row carried a credential shape, so it was redacted -- and a redacted row no longer names the operation that was refused. The rows are withheld rather than published as this head's finding. Reproduce them with \`scripts/deny_diff.py\` against \`$HEAD\`, then narrow the rule at the tier they name and push -- this lane re-runs on the new head. A scope a repository writer judged acceptable by hand clears with \`/ai-review override scope $HEAD: <reason>\` on this head._"
+              echo "_A confirmed row carried a credential shape, so it was redacted -- and a redacted row no longer names the operation that was refused. The rows are withheld rather than published as this head's finding. Reproduce them with \`scripts/deny_diff.py\` against \`$HEAD\`, then narrow the rule at the tier they name and push -- this lane re-runs on the new head. A scope a repository writer judged acceptable by hand clears with \`/ai-review override scope $HEAD <class>: <reason>\` on this head._"
             } >> "$OUT"
           # The deterministic body always follows the model's, so a reader who
           # distrusts the prose can read the script's verdict on its own.
@@ -2615,7 +2659,7 @@ jobs:
           && steps.post.outputs.retained_verdict_artifact != ''
           && needs.validate.outputs.scrub_ok == 'true'
         # NEVER fatal. A lane's conclusion is read by pr-readiness.yml, and for
-        # the three advisory labels ANY non-success conclusion is reported as
+        # the three whole-design labels ANY non-success conclusion is reported as
         # `<label> (BLOCK)` -- a judged-wrong verdict. So a transport flake here,
         # or an `if-no-files-found: error` on a directory that did not survive,
         # would invent a verdict nobody reached. Retention is evidence ABOUT a

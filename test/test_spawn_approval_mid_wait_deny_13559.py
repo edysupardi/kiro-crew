@@ -48,6 +48,7 @@ from test_telegram import _dispatcher  # noqa: E402
 from kiro_crew.constants import DENY_CAUSE_APPROVAL_TIMEOUT
 from kiro_crew.messaging import spawn_approval_delivery as seam
 from kiro_crew.telegram.renderer import TelegramApprovalDecider
+from kiro_crew.testing.wait import async_wait_until
 
 pytestmark = pytest.mark.usefixtures("healthy_host_memory")
 
@@ -125,11 +126,11 @@ def _ceiling(monkeypatch: pytest.MonkeyPatch):
 async def _await_armed(session_key: str) -> str:
     """Wait until the hook has armed its prompt, and return the live nonce."""
     key = TelegramApprovalDecider.key(session_key, _RID)
-    for _ in range(200):
-        if key in TelegramApprovalDecider._NONCES and key in TelegramApprovalDecider._REGISTRY:
-            return TelegramApprovalDecider._NONCES[key]
-        await asyncio.sleep(0.01)
-    raise AssertionError("the hook never armed its prompt")
+    await async_wait_until(
+        lambda: key in TelegramApprovalDecider._NONCES and key in TelegramApprovalDecider._REGISTRY,
+        describe=lambda: "the hook never armed its prompt",
+    )
+    return TelegramApprovalDecider._NONCES[key]
 
 
 async def _press(dispatcher, session_key: str, flag: str) -> None:
@@ -338,9 +339,9 @@ class TestTheSeamOwnsTheReading:
         # The hook's branch compares against this constant, and the decider sets
         # exactly it on an elapsed wait. Pin the pairing so a rename of either side
         # cannot silently turn the branch off and restore the bug.
-        from kiro_crew.telegram import renderer as renderer_mod
+        from kiro_crew.telegram import renderer_approval as renderer_mod
 
-        src = renderer_mod.__loader__.get_source("kiro_crew.telegram.renderer")
+        src = renderer_mod.__loader__.get_source("kiro_crew.telegram.renderer_approval")
         assert "self.last_deny_cause = DENY_CAUSE_APPROVAL_TIMEOUT" in src
         assert DENY_CAUSE_APPROVAL_TIMEOUT == "approval_timeout"
 

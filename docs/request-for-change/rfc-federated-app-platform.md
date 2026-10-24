@@ -552,7 +552,7 @@ The following modules are removed in Phase 1, replaced by the federated loading 
 | Module | Purpose | Replacement |
 |--------|---------|-------------|
 | `apps/backend.py` | Spawn local HTTP servers for apps | Removed — apps don't host backends |
-| `apps/manifest.py` `BackendConfig` | Backend config in manifest | Removed from schema |
+| `apps/manifest_sections.py` `BackendConfig` | Backend config in manifest | Removed from schema |
 | `frontend/src/components/AppLoader.tsx` | iframe embedding | `AppHost.tsx` with dynamic import |
 | `frontend/src/pages/AppPage.tsx` | iframe + backend status UI | `AppHost.tsx` handles all app rendering |
 
@@ -560,9 +560,9 @@ The following modules are **kept** and enhanced:
 
 | Module | Current Purpose | Enhancement |
 |--------|----------------|-------------|
-| `apps/manager.py` | Install/uninstall/enable/disable | Add bundle download + hash verification |
+| `apps/manager_install.py`, `manager_uninstall.py`, `manager_activation.py` | Install/uninstall/enable/disable | Add bundle download + hash verification |
 | `apps/registry_pipeline/indexes.py`, `caches.py` | Registry fetch + cache | Add `bundleUrl`, `bundleHash` fields |
-| `apps/bridges.py` | Register agents/skills/crons | No change needed |
+| `apps/bridges_agents.py`, `bridges_skills.py`, `bridges_crons.py` | Register agents/skills/crons | No change needed |
 | `apps/scaffold.py` | `kirocrew app init` | Add `--with-ui` flag, Vite config generation |
 | `apps/routes.py` | REST API for app management | Add bundle serving endpoint |
 | `frontend/src/pages/AppsPage.tsx` | App Store UI | Add Browse tab with registry integration |

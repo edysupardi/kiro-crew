@@ -83,7 +83,7 @@ that push.
 | Gap | Evidence |
 |---|---|
 | A subscription ends with the chat's kiro-cli connection | `Backend.detach_stub` releases the upstream subscription when the last subscriber leaves. A reaped kiro-cli detaches its stub, and the backend is evicted `mcp_gateway.idle_timeout_secs` later (default 300, `src/kiro_crew/config/integration_sections.py`). |
-| A subscription does not survive a daemon restart | The subscription tables live in the daemon process. A kiro-cli stub that ever subscribed refuses to reconnect (`has_live_subscriptions` in `src/kiro_crew/mcp_gateway/stub.py`). The daemon exits when the Kiro Crew server that spawned it exits (`_owner_liveness_sweeper` in `src/kiro_crew/mcp_gateway/daemon/sweepers.py`), so every server restart is also a daemon restart. |
+| A subscription does not survive a daemon restart | The subscription tables live in the daemon process. A kiro-cli stub that ever subscribed refuses to reconnect (`has_live_subscriptions` in `src/kiro_crew/mcp_gateway/stub_bridge.py`). The daemon exits when the Kiro Crew server that spawned it exits (`_owner_liveness_sweeper` in `src/kiro_crew/mcp_gateway/daemon/sweepers.py`), so every server restart is also a daemon restart. |
 | An update cannot start a turn | On the kiro-cli backend a turn starts only when Kiro Crew sends a prompt. Nothing turns an update into one. |
 
 ## 3. Goals and non-goals
@@ -106,7 +106,7 @@ Not a goal:
 - MCP servers the gateway does not front. Without a pooled backend there is
   nothing for a holder to attach to.
 - Sessions without a dashboard slot, in the first version. `dashboard_slot_key`
-  returns an empty string for them (`src/kiro_crew/dashboard/chat_utils.py`).
+  returns an empty string for them (`src/kiro_crew/dashboard/chat_utils_slots.py`).
 - Changing how kiro-cli's own subscriptions behave.
 
 ## 4. Design
@@ -119,7 +119,7 @@ the session's own stub's Register payload for that server, so it attaches to the
 same pooled backend, but under a `stub_uuid` of its own. The daemon keys attach,
 refcount and routing on that id, and `Backend.attach_stub` refuses one that is
 already attached, so the holder mints a fresh `stub_uuid` for every registration,
-as the stub's own `_reconnect` does (`src/kiro_crew/mcp_gateway/stub.py`). It then
+as the stub's own `_reconnect` does (`src/kiro_crew/mcp_gateway/stub_link.py`). It then
 sends `initialize`, sends `resources/subscribe` for each URI, and reads updates on
 its own socket.
 
@@ -152,7 +152,7 @@ carries the session key, the session type derived from it, the gateway process's
 sets the holder connection's caller from it (`src/kiro_crew/mcp_gateway/daemon/control.py`,
 `_caller_from_register` in `daemon/identity.py`). The session token does not need
 to survive a restart. It is minted per client in `AcpClient.__init__`
-(`mint_stub_session_token` in `claim.py`, called from `src/kiro_crew/acp/client.py`),
+(`mint_stub_session_token` in `claim.py`, called from `src/kiro_crew/acp/client_class.py`),
 so a session's kiro-cli started after a restart is a fresh client with a fresh
 token, and the daemon's token-to-caller bindings live only in the daemon process
 (`_TOKEN_BINDINGS` in `daemon/identity.py`) and are gone after a restart. What

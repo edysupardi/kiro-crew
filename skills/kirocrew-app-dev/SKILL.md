@@ -344,6 +344,11 @@ _jsx('button', {
 | Show a loading/error state when config is unavailable | Show cryptic error messages |
 | Read app state through an app-owned API or `/api/apps/MY-APP/config` | Derive arbitrary absolute data-home paths in UI code |
 
+When app UI moves, or draws a live figure such as a gauge or a diagram, the
+`living-ui` skill's rules apply to it too. An app may bundle that skill's
+toolkit, `toolkit/living-ui.js`, instead of inlining its helper blocks. The file
+exports nothing, so end the app's copy with `export { LivingUI };` and import it.
+
 ### Available Gateway APIs
 
 | Endpoint | Method | Returns |
@@ -431,7 +436,7 @@ they can: throttling. That breaks your app, not just its polling.
 
 Put install-wide schedules in the `crons` array of `app.json`. The gateway
 reconciles that array through `register_app_crons_with_service`
-(`src/kiro_crew/apps/bridges.py`) at enable and gateway startup. Registration is
+(`src/kiro_crew/apps/bridges_crons.py`) at enable and gateway startup. Registration is
 add-if-absent under one store lock, keyed by cron name.
 
 A schedule derived from user configuration may instead use `ctx.cron` / CronSDK;
@@ -542,7 +547,7 @@ in its result instead of raising, so read the result rather than assuming.
 - `scripts/uninstall.sh` must always stop background work and remove anything
   the app registered outside its own directory. **User state is a separate
   decision and is not yours to make.** Uninstall preserves app data by default
-  (`keep_data = True` in `src/kiro_crew/apps/routes.py`, flipped only by an
+  (`keep_data = True` in `src/kiro_crew/apps/routes_uninstall.py`, flipped only by an
   explicit `purge_data` request), and that choice reaches your script as
   `PURGE_DATA` / `KEEP_DATA` in its environment. So delete state files only
   under `PURGE_DATA=1`, and leave them untouched under `KEEP_DATA=1`. A script

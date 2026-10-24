@@ -70,6 +70,24 @@ class TestCollectorRecordsMatchRedaction:
         assert _placeholder_count(cleaned) == 2
         assert len(records) == 1
 
+    @pytest.mark.parametrize("longer_first", [False, True])
+    def test_a_blocked_link_that_prefixes_a_longer_one_cannot_shelter_its_tail(
+        self, longer_first: bool
+    ) -> None:
+        """A blocked link, and the same link with a token appended: rewriting the
+        shorter one first must not leave the longer one's tail in the text."""
+        short = f"https://{_DOMAIN}/x?d={_LONG_QUERY_TAIL}"
+        longer = short + "&X-Amz-Security-Token=" + "T" * 120
+        first, second = (longer, short) if longer_first else (short, longer)
+
+        cleaned, _, records = redact_exfiltration_urls_with_records(f"see {first} and {second} .")
+
+        assert cleaned == (
+            f"see [REDACTED: suspicious URL to {_DOMAIN}] and "
+            f"[REDACTED: suspicious URL to {_DOMAIN}] ."
+        )
+        assert len(records) == 2
+
     def test_records_carry_no_positional_field(self) -> None:
         url = f"https://{_DOMAIN}/x?token={_LONG_QUERY_TAIL}"
 
@@ -139,7 +157,7 @@ class TestTheFullAddressIsKeptSoItCanBeOpened:
 
     def test_a_cjk_title_link_keeps_its_whole_address(self) -> None:
         title = "%E6%B5%8B%E8%AF%95%E9%A1%B5%E9%9D%A2%E6%A0%87%E9%A2%98%E6%96%87"
-        url = f"https://wiki.example.com/view/{title}"
+        url = f"https://wiki.example.com/view?title={title}"
 
         _, warnings, records = redact_exfiltration_urls_with_records(f"see {url}")
 
@@ -538,9 +556,9 @@ class TestRecordsReachTheDisplayPath:
                 break
             body.append(ln)
         src = "\n".join(body)
-        assert "_redact_segment(slot, body)" in src
+        assert "_redact_segment(slot, turn.assistant_text)" in src
         assert "_segment_row_meta(slot, _blocked, _redactions)" in src
-        assert "redact_exfiltration_urls(body)" not in src
+        assert "redact_exfiltration_urls(" not in src
 
 
 class TestRecordsSurviveAReopenedSession:
@@ -1164,11 +1182,19 @@ class TestEveryRetentionPointIsBounded:
     def test_each_retention_site_uses_the_bounded_helper(self) -> None:
         # Source guard over the sites that retain transcript data in the slot:
         # the two rehydrate appends, the variant attach, and the regenerate stash.
+        import importlib
         import inspect
+        import pkgutil
 
-        from kiro_crew.dashboard import chat_runner
+        from kiro_crew.dashboard import chat_persistence_parts, chat_runner
 
-        persistence = inspect.getsource(chat_persistence)
+        # The two rehydrate appends run on the facade from its composed parts.
+        parts = [
+            importlib.import_module(f"{chat_persistence_parts.__name__}.{info.name}")
+            for info in pkgutil.iter_modules(chat_persistence_parts.__path__)
+        ]
+        assert parts, "the part scan found no module, so it is measuring nothing"
+        persistence = "".join(inspect.getsource(module) for module in (chat_persistence, *parts))
         assert 'meta=(m["meta"] if' not in persistence
         assert persistence.count('with_bounded_redaction_records(m["meta"])') == 2
         assert "with_bounded_redaction_records(" in inspect.getsource(

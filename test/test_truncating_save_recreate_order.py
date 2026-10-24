@@ -44,6 +44,7 @@ from kiro_crew.dashboard import chat_handlers as handlers
 from kiro_crew.dashboard import chat_persistence, chat_regenerate, chat_rewind
 from kiro_crew.dashboard.chat_utils import slot_history_key
 from kiro_crew.dashboard.dashboard_persistence import DashboardPersistenceCoordinator
+from kiro_crew.testing.wait import async_wait_until, await_until
 
 NAME = "chat-1-9905"
 
@@ -53,6 +54,22 @@ def _owner_paths() -> list[Path]:
     owners = sorted((Path(handlers.__file__).resolve().parent / "chat_api").glob("[!_]*.py"))
     assert owners, "no chat_api owner found beside chat_handlers.py"
     return owners
+
+
+def _part_paths() -> list[Path]:
+    """The parts composed onto chat_persistence, which hold its save and restore code."""
+    parts = sorted(
+        Path(chat_persistence.__file__).with_name("chat_persistence_parts").glob("[!_]*.py")
+    )
+    assert parts, "no chat_persistence_parts module found beside chat_persistence.py"
+    return parts
+
+
+def _save_transaction_path() -> Path:
+    """The part holding ``save_slot_off_loop`` and ``_save_slot_to_history``."""
+    return Path(chat_persistence.__file__).with_name("chat_persistence_parts") / (
+        "save_transaction.py"
+    )
 
 
 def _handler_source() -> str:
@@ -103,17 +120,13 @@ async def _settle(turns: int = 6) -> None:
         await asyncio.sleep(0)
 
 
-async def _await_flag(flag, timeout: float = 10.0) -> bool:
+async def _await_flag(flag) -> bool:
     """Wait for a threading flag from the loop without occupying an executor slot.
 
-    ``asyncio.to_thread`` would take a worker from the same default executor the
-    save under test is holding, so it is deliberately not used here.
+    Predicate runs on the loop (not via asyncio.to_thread) to avoid consuming an
+    executor worker from the same default pool the save under test is holding.
     """
-    deadline = asyncio.get_running_loop().time() + timeout
-    while not flag.is_set():
-        if asyncio.get_running_loop().time() >= deadline:
-            return False
-        await asyncio.sleep(0.01)
+    await async_wait_until(flag.is_set)
     return True
 
 
@@ -139,7 +152,7 @@ async def test_close_waits_for_a_guarded_history_write(tmp_path) -> None:
         ), "the close retracted the key while a guarded write was still running"
 
         pending.set_result(True)
-        await asyncio.wait_for(closing, timeout=10)
+        await await_until(closing)
     finally:
         if not closing.done():
             closing.cancel()
@@ -193,10 +206,10 @@ async def test_a_cancelled_saver_leaves_its_write_visible_to_the_close(
         release.set()
 
     # And the write becomes invisible again only once the worker has returned.
-    for _ in range(1000):
-        if not slot._guarded_history_writes:
-            break
-        await asyncio.sleep(0.01)
+    await async_wait_until(
+        lambda: not slot._guarded_history_writes,
+        describe=lambda: f"guarded history writes still running: {len(slot._guarded_history_writes)}",
+    )
     assert not slot._guarded_history_writes
 
 
@@ -215,7 +228,7 @@ async def test_close_is_refused_when_a_write_will_not_finish(tmp_path, monkeypat
     pending = _register_pending_write(slot)
 
     with pytest.raises(handlers.SlotCloseError) as raised:
-        await asyncio.wait_for(handlers.close_slot(state, slot, NAME), timeout=10)
+        await await_until(asyncio.ensure_future(handlers.close_slot(state, slot, NAME)))
 
     assert raised.value.code == "history_write_running"
     assert raised.value.status == 500
@@ -423,7 +436,7 @@ def test_the_fence_read_and_the_registration_share_one_synchronous_block() -> No
     fence goes up after the read and before the write becomes visible, which is
     the window this whole ordering exists to remove.
     """
-    source = Path(chat_persistence.__file__).read_text(encoding="utf-8")
+    source = _save_transaction_path().read_text(encoding="utf-8")
     lines = source.splitlines()
     start = next(i for i, line in enumerate(lines) if 'getattr(slot, "is_closing", False)' in line)
     end = next(i for i in range(start, len(lines)) if "_register_guarded_write(save)" in lines[i])
@@ -565,7 +578,7 @@ def test_only_the_handover_drain_opts_out_of_the_fence() -> None:
     flag = "issued_by_the_retraction=True"
     hits = []
     modules = (handlers, chat_persistence, chat_regenerate, chat_rewind)
-    for path in [*(Path(module.__file__) for module in modules), *_owner_paths()]:
+    for path in [*(Path(module.__file__) for module in modules), *_owner_paths(), *_part_paths()]:
         source = path.read_text(encoding="utf-8")
         hits.extend([path.name] * source.count(flag))
 
@@ -971,7 +984,7 @@ def test_a_recreate_won_refusal_keeps_the_write_owed() -> None:
     The other retryable refusals in this function already call the helper whose
     docstring states exactly this; the recreate-won guard must join them.
     """
-    source = Path(chat_persistence.__file__).read_text(encoding="utf-8")
+    source = _save_transaction_path().read_text(encoding="utf-8")
     lines = source.splitlines()
 
     guard_at = next(

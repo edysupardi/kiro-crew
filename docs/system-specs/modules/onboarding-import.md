@@ -26,15 +26,19 @@ Three phases, always in this order:
 | Dry run (preview) | `preview_import()` | **no — never touches disk** |
 | Apply | `apply_import()` | yes, merge-only |
 
-**Sources:** `codex`, `claude_code`, `gemini`, `openclaw`, `hermes`, plus any an
-edition registers through the `ImportSourceProvider` CPP seam (see
-[Registering a source](#registering-a-source)).
+**Sources:** `codex`, `claude_code`, `gemini`, `openclaw`, `hermes`,
+`amazon_quick`, plus any an edition registers through the `ImportSourceProvider`
+CPP seam (see [Registering a source](#registering-a-source)).
 
 `gemini` covers Google's whole terminal-agent lineage under one id, because
 Antigravity CLI reuses `~/.gemini` rather than claiming a directory of its own.
 Gemini CLI stopped serving Pro/Ultra/free individual accounts on 2026-06-18 and
 Antigravity replaced it, so that one root holds both a displaced Gemini CLI
 user's config and a current Antigravity install.
+
+`amazon_quick` is the Amazon Quick desktop app. Its id is not `quick` because
+`quick` is reserved for the first-run setup mode, which never appears as an
+import option.
 
 ## Structure and ownership
 
@@ -46,7 +50,7 @@ the first one a process imports.
 |--------|------|
 | `onboarding_scan.py` | The scan accumulator (`_Scan`), the candidate item (`_Item`, whose `fingerprint` is the identity the ledger and outcomes key on) and `CATEGORY_IDS`. Also: the never-raising probes (`_exists_safe`, `_is_link_like`, `_stat_kind`); bounded, symlink-safe reads (`_safe_regular_file`, `_walk_files`, `_read_bytes`); the parsers (JSON, JSON5, TOML through the `_toml` tomllib/tomli ladder, and YAML through `_load_no_alias_yaml`); the SQLite snapshot helpers, including the hardlink refusal in `_sqlite_database_is_safe`; and the shared content screens: `_sanitize_text`, `_count_secret_fields`, `_decoded_value_is_unsafe`, and the skill activation screen (`_frontmatter`, `_column0_activation_declared`, `_skill_package`, which refuses `triggers`). It is the only module that calls the credential redactor, so it is the "Onboarding import" row of `security_posture._REDACTION_SINKS`. Category-specific refusals (the MCP field allowlist and URL/argument secret checks, the persona identity guard, schedule semantics) sit with their projection in `onboarding_plan.py`. |
 | `onboarding_plan.py` | The normalized plan. It holds the category projections that turn parsed foreign data into `_Item` payloads through those screens (instructions and the identity guard, memories, database directives, MCP specs, skills, schedules, workspaces, settings). It also holds in-scan dedup (`_deduplicate_items`), the per-source summary, the plan document (`_plan_from_scans`), and the readers `apply_import` uses (`_selected_pairs`, `_plan_roots`, …). |
-| `onboarding_sources/` | The package's `__init__.py` is the registry: the builtin descriptors, `_normalize_source`, the per-context cache behind `_sources()`, root and context resolution (`_source_roots`, `_source_context`), failure-isolated dispatch (`_scan_source`), and the managed / superseded MCP name sets. Each adapter module (`codex`, `claude_code`, `gemini`, `openclaw`, `hermes`, `lineage`) knows one layout. It reads file and database content only through the bounded readers in `onboarding_scan.py` and projects it through `onboarding_plan.py`; path probes (`exists`, `is_file`, `is_dir`, `iterdir`, `glob`) and the `is_sensitive_path` / `contains_injection` screens are called directly. OpenClaw's bespoke root and context rules and the Hermes `%LOCALAPPDATA%` root live in their adapters. |
+| `onboarding_sources/` | The package's `__init__.py` is the registry: the builtin descriptors, `_normalize_source`, the per-context cache behind `_sources()`, root and context resolution (`_source_roots`, `_source_context`), failure-isolated dispatch (`_scan_source`), and the managed / superseded MCP name sets. Each adapter module (`codex`, `claude_code`, `gemini`, `openclaw`, `hermes`, `amazon_quick`, `lineage`) knows one layout. It reads file and database content only through the bounded readers in `onboarding_scan.py` and projects it through `onboarding_plan.py`; path probes (`exists`, `is_file`, `is_dir`, `iterdir`, `glob`) and the `is_sensitive_path` / `contains_injection` screens are called directly. OpenClaw's bespoke root and context rules and the Hermes `%LOCALAPPDATA%` root live in their adapters. |
 | `onboarding_apply.py` | The file-backed half of apply: the ledger (`_load_ledger`, `_record_ledger`, `_write_json`), the conflict strategies and restore copies, and the writers whose destination is a Kiro Crew file (`_write_workspace`, `_write_settings`, `_write_mcp`, `_write_skill`). |
 | `onboarding_import.py` | The facade and the run-level orchestration: `detect_sources`, `preview_import` / `_preview`, `apply_import` (the rescan, the per-item dispatch loop and the ledger flush discipline), `_source_exists`, and the writers into Kiro Crew's own stores: `_write_instruction`, `_write_memory`, `_write_schedule`. |
 
@@ -103,7 +107,7 @@ Placement rules that are load-bearing:
   reaches it too. `mock.patch` with a truthy `create` through the facade is the
   one spelling this cannot serve: its exit deletes the name, which reaches the
   owner, and then skips the restore. An AST guard in
-  `test_onboarding_import_refactor_contract.py` reads every file under `test/`
+  `test_onboarding_import_refactor_contract_patch_guards.py` reads every file under `test/`
   and every `tests/` package under `src/` whose text contains
   `onboarding_import`. It fails on a `patch`, `patch.object`, `patch.dict` or
   `patch.multiple` call or decorator whose target resolves to a mirrored name on
@@ -123,7 +127,7 @@ Placement rules that are load-bearing:
   facade, a name only computed at runtime is a hit too. The one exemption is an
   explicit allowlist keyed on (path, test); the scan must equal it exactly, and
   it is empty. Each rule is pinned on a synthetic source it must flag and one it
-  must ignore. The same file pins that the owner is the only engine module
+  must ignore. `test_onboarding_import_refactor_contract.py` pins that the owner is the only engine module
   binding each seam, that the facade's own code reads no mirrored name as a bare
   global, that the facade's `TYPE_CHECKING` block imports every mirrored name
   from its owner, that `__getattr__` stays hidden from type checkers while every
@@ -142,7 +146,7 @@ Placement rules that are load-bearing:
   owner's `_frontmatter`, `_column0_activation_declared` and
   `_load_no_alias_yaml`, and the pre-split public names. No owner reads the
   facade's copy, so a facade patch of one reaches the facade's own code at most.
-  A second guard in `test_onboarding_import_refactor_contract.py` reads the same
+  A second guard in `test_onboarding_import_refactor_contract_patch_guards.py` reads the same
   test files and collects every name a test rebinds on the facade (`setattr` or
   `delattr` on any receiver, `patch`, `patch.object`, `patch.multiple`; not
   `patch.dict`, which mutates the shared object in place). It fails when an engine
@@ -175,7 +179,7 @@ recreate by hand is in scope.
 | `instructions` | User-authored rules — the single least replaceable asset | memory hierarchy (below) |
 | `memories` | Plain-Markdown knowledge; semantically stable across agents | memory hierarchy (below) |
 | `skills` | Self-contained dir + `SKILL.md`; near-identical format everywhere | `skills/imported/<source>/<name>/` |
-| `mcp_servers` | De-facto standard shape (`mcpServers` / `[mcp_servers.*]`) | `mcp.json` → `mcpServers` |
+| `mcp_servers` | De-facto standard shape (`mcpServers` / `[mcp_servers.*]`) | `mcp.json` → `mcpServers`, written `disabled: true` so the user reviews a server before it runs; `amazon_quick` keeps each server's on/off state instead (see its row below) |
 | `denied_commands` | Hand-tuned deny rules; recreating them is tedious and error-prone | `config.json` → `hooks.denied_commands.user_added` |
 | `settings` | Only unambiguous scalars: timezone, theme mode, theme color | `config.json` |
 | `workspaces` | Project dirs, but **only** from explicit config — see below | `config.json` → `workspaces` |
@@ -245,7 +249,10 @@ Durable tiers only:
    a false `accepted`. Because the store prunes **oldest-first at 200** — and the
    user's own corrections are the oldest rows — import is bounded **twice**: a
    per-import ceiling of `_MAX_IMPORTED_LESSONS` (50) at scan time (overflow emits
-   `instruction_count_limit`), AND a hard refusal at write time once the store
+   `instruction_count_limit`; a directive whose item key is already in the plan
+   is skipped before the ceiling is checked, so a duplicate that
+   `_deduplicate_items` would drop never takes a new directive's place), AND a
+   hard refusal at write time once the store
    already holds `_MAX_LESSONS_TOTAL` entries. The per-import cap alone is
    insufficient — 151 existing + 50 imported still evicts one — so the write-time
    check is the load-bearing one.
@@ -343,8 +350,8 @@ Why deferral and not batching: embedding cost grows steeply with text length
 inline embed held the apply request for minutes. **`embed_batch()` is not the
 fix** — measured on real import text it is ~25% *slower* than looping `embed()`.
 That measured workload result, rather than the physical micro-batch size, is the
-reason imports defer the work: llama.cpp now decodes each input in bounded
-512-token physical batches while retaining the full 2,048-token logical batch
+reason imports defer the work: llama.cpp decodes each input in bounded
+256-token physical batches while retaining the full 2,048-token logical batch
 and context.
 
 `backfill_missing_embeddings()` requires numpy but **not faiss**. Faiss is an
@@ -529,11 +536,12 @@ MUST be covered by a fixture-based regression test.
 | `gemini` | `GEMINI_HOME`/`ANTIGRAVITY_HOME` → `~/.gemini` | Four probed config layouts, because Antigravity is closed-source and its subpath has moved between releases: `config/mcp_config.json` (**the live Antigravity path**, confirmed against a real install), `settings.json` (legacy Gemini CLI), `antigravity/mcp_config.json` and `antigravity-cli/settings.json` (older/absent layouts — kept as cheap hedges; `antigravity/` is runtime state, not config). `GEMINI.md` (instructions, hierarchical: root + per workspace); `skills/` only if it is a `SKILL.md` package; per-workspace `.gemini/settings.json` and `.agents/mcp_config.json`. Workspaces come from `config/projects/*.json` — one file per project, folder held as a percent-encoded `file://` URI under `projectResources.resources[].folderUri` — NOT from a `projects` map. That URI is decoded with `urllib.request.url2pathname`, not a bare `unquote`: on Windows the URI is `file:///C:/Users/...` and stripping the scheme alone leaves `/C:/Users/...`, which carries no drive and so is not absolute, which would refuse every workspace as `workspace_not_absolute`; `url2pathname` is the platform-correct inverse (plain unquoting on POSIX, drive reconstruction on Windows). **MCP shape normalization (all three verified against a real install, and required: without them a real Antigravity install imports ZERO of its servers):** `httpUrl`/`serverUrl` → canonical `url`; drop the inert `$typeName` protobuf discriminator (`exa.cascade_plugins_pb.CascadePluginCommandTemplate`) that Antigravity stamps on every stdio entry; drop `env` **only when empty** (the key name matches `_SECRET_KEY_RE`, so an empty map would otherwise score as a credential and refuse the server). A populated `env` is deliberately left untouched and still refused — stripping it would both change how the server runs and hide that secrets were present. `userSettings.themeMode` is not mapped |
 | `openclaw` | `OPENCLAW_STATE_DIR` → `OPENCLAW_HOME`/`<state>` → `~/.openclaw-<profile>` → `~/.openclaw` → `~/.clawdbot` | `openclaw.json` (+ legacy `clawdbot.json`); `SOUL.md`, `MEMORY.md`, `USER.md`, `memory/*.md` under `workspace/` \| `workspace-main/` \| `workspace-<agentId>/`; `skills/`, `.agents/skills/`; `exec-approvals.json` |
 | `hermes` | `HERMES_HOME`/`HERMES_AGENT_HOME`/`HERMES_CONFIG_DIR` → `%LOCALAPPDATA%/hermes` (Windows) → `~/.hermes` | `config.yaml`/`.yml`; `memories/MEMORY.md`, `memories/USER.md`; `SOUL.md`; `skills/` (excl. managed + re-import dirs); `cron/jobs.json`; `memory_store.db` reported unsupported |
+| `amazon_quick` | no override → `~/.quickwork` (`%USERPROFILE%\.quickwork` on Windows) | Profile directories, read in order: the one `profiles.json` names in `last_active` (its `data_path`, relative to the root and refused if it could leave it), the 50 other safe directories under `profiles/` sorting first by casefolded name (ties by name), then the root itself for the older single-profile layout; a directory reached through a link is skipped, and the remaining safe directories, excluding the active profile already read, are counted into one `profiles` / `profile_count_limit` diagnostic. Only `last_active`, `id` and `data_path` are read from `profiles.json`, which also holds sign-in metadata. Per profile: `mcp_config.json` — the `mcpServers` map, or the older `servers` list keyed by each entry's `id`, whose optional `transport` must normalize (casefold, ignoring `_`, spaces and `-`) to `stdio` without a URL or `http` / `streamable-http` with a URL, else the entry is refused as `unsupported_mcp_schema`. Only the app's bookkeeping is dropped (`_quick` and `description` in the map; in the list, `id`, `name`, `description`, `transport` and the fields the map keeps under `_quick`, inline; on/off is read only from `disabled` / `enabled`) and every other field reaches `_sanitize_mcp_spec`, so a constraint field is `unsupported_mcp_constraints` and an unknown field `unsupported_mcp_schema`, as for any source. An entry with a `url` (`serverUrl` accepted) drops `command`/`args`, one without drops an empty `url`, and an empty `env`/`headers` map is dropped, so only a populated one refuses the server. It is the only source whose servers keep their on/off state (`_add_mcp_configs(..., keep_enabled_state=True)`), so a server that ran in Quick runs in Kiro Crew: it is written with no `disabled` key only when `disabled` is absent or `false` and `enabled` (the older list's switch) is absent or `true`, and with `disabled: true` for any other value. The preview's MCP servers row says how many servers will run (the plan's `enabled_count`). An entry carrying `managed_by` is `managed_server_excluded`; each server imports under its own Quick id. `skills/<name>/SKILL.md`. `user_preferences.json` — `custom_prompt` → instructions (lesson tier, same screens as an instruction file; preferences repeated in another profile are offered once and take no second place under `_MAX_IMPORTED_LESSONS`), `user_timezone` → `settings.timezone`. `agents.json` → `agents[]` scheduled tasks: the first `_MAX_SCHEDULES` (500) records per profile are read, and the records past it are counted (unread, so hidden tasks and cross-profile copies count too) into one `schedules` / `item_count_limit` diagnostic for the whole scan; `visible: false` tasks are the app's own and skipped silently; a task is imported only when its `type` is `monitor`, its prompt is inline (`prompt_override`), and `triggers`, `conversation_id`, `chat_agent_id`, `connector_preferences` and `pre_resolved_skills` are all empty, else `unsupported_schedule_semantics`; any other field has no destination and is ignored, since the job lands disabled. `schedule.type` `interval` (`minutes`) → interval; `time_of_day` / `cron_like` (`time` `HH:MM`, `days` `mon`…`sun`) → cron; `run_once` (`at`, naive) → at. A wall-clock schedule's zone is `schedule.timezone`, else the profile's `user_timezone`, else `timezone_required`. A non-empty `acp_agents.json` `agents` list is reported as `agents` / `unsupported_category`. Conversations, memory and the knowledge graph are kept in the user's Quick account, so nothing local is read for them; `sessions/` is never read |
 | a registered lineage source | whatever the descriptor declares | Kiro Crew's OWN layout, read by `_scan_lineage_install`: `config.json`, `mcp.json`, `recent_projects.json`, `workspace_dir`/`project_dir` pointers, `workspace/skills`, `workspace/memory`, `crons.json`, and `memory.db` (`semantic_memory` + `episodic_memories`; `workspace_id` holds the sentinel `default`, and `kind='directive'` marks a rule — see the two sections above). Only the canonical `workspace/AGENTS.md` + `workspace/CLAUDE.md` filenames are read, and the same two per configured workspace — that tree holds arbitrary user documents, so a blind `*.md` sweep there is wrong |
 
 ## Registering a source
 
-The five builtins above are the foreign agents any user may plausibly have
+The six builtins above are the foreign agents any user may plausibly have
 installed. An edition that supersedes a predecessor of its own registers it
 instead of the core naming it, which is what keeps an edition-specific product
 name out of this tree.
@@ -553,7 +561,7 @@ genuinely novel foreign format needs a reader added to the core, because only th
 core can read it through the gates; when a second layout exists, naming one
 becomes an additive default-valued field on this same seam.
 
-`_sources()` unions contributions over the builtins for every scan and apply registry snapshot, read fail-closed through `safe_context_call` — a broken adapter costs the edition's sources, not the page. `_source_summary()` carries the resolved id and display name in that snapshot into the plan, so consumers do not perform a second registry lookup.
+`_sources()` unions contributions over the builtins for every scan and apply registry snapshot, read fail-closed through `safe_context_call` — a broken adapter costs the edition's sources, not the page. `_source_summary()` carries the resolved id and display name in that snapshot into the plan, so consumers do not perform a second registry lookup. On the `mcp_servers` category it also adds `enabled_count`, the number of planned servers whose spec carries no `disabled: true`, and only when that number is above zero; it is a count, never names, so a source that imports every server disabled keeps the plan shape it always had.
 
 **Everything questionable about a descriptor is settled at one boundary.**
 `_normalize_source` is the only place that validates and canonicalizes, and BOTH
@@ -668,13 +676,20 @@ Two layers, both required:
 
 ### Source identity has one authority
 
-The engine owns source identity. `_sources()` resolves and normalizes the registry once per preview or apply operation, and `_source_summary()` carries its id and display name into the plan. The handler's `_parse_selection()` accepts bounded request shapes and known categories without maintaining a second source-id table; `_select_fresh_plan()` intersects client choices with the freshly generated plan before calling `apply_import()`. `AgentImportFlow.tsx` keeps a denylist only for the reserved `quick` setup mode, so registered sources remain visible. This prevents a registered source from being hidden or a transient registry read from turning an accepted plan into an HTTP error; `test_handler_category_tables_match_the_backend` and `test_selection_survives_a_registry_that_no_longer_lists_the_source` pin the seams.
+The engine owns source identity. `_sources()` resolves and normalizes the registry once per preview or apply operation, and `_source_summary()` carries its id and display name into the plan. The handler's `_parse_selection()` accepts bounded request shapes and known categories without maintaining a second source-id table; `_select_fresh_plan()` intersects client choices with the freshly generated plan before calling `apply_import()`. `AgentImportFlow.tsx` keeps a denylist only for the reserved `quick` setup mode (the Amazon Quick source is `amazon_quick`), so registered sources remain visible. This prevents a registered source from being hidden or a transient registry read from turning an accepted plan into an HTTP error; `test_handler_category_tables_match_the_backend` and `test_selection_survives_a_registry_that_no_longer_lists_the_source` pin the seams.
 
 | Endpoint | Phase | Body |
 |----------|-------|------|
 | `GET /api/onboarding/import/scan` | detect + dry run | — |
 | `POST /api/onboarding/import/apply` | apply | `{sources: [{id, categories: [...]}], conflict_strategy?}` — `conflict_strategy` is one of `skip`/`rename`/`overwrite`; absent = `skip`, unrecognized = 400 |
 | `PUT /api/onboarding/import/state` | onboarding bookkeeping | `{completed: bool}`. Failures: `invalid_request` (400), `config_unreadable` (500 — `config.json` cannot be parsed, so no retry clears it), `state_failed` (500). On a completion error the first-run Import step offers a local "leave without saving" exit |
+
+The scan response gives each category a fixed description, except the
+`mcp_servers` row: `_scan_response` reads the plan's `enabled_count` (missing,
+zero or malformed reads as 0; a value above the category count is clamped to
+it), and above zero the row names the source by the plan's display name and
+says how many of its servers were on there and will run, and that the rest
+arrive disabled.
 
 Each endpoint is owner-only: the handlers call `require_owner_dashboard_request`
 after authentication. With no `owner_id` configured the gate accepts the signed
@@ -763,3 +778,13 @@ These are load-bearing. Changing any of them requires a security review.
    size and row count all carry explicit ceilings.
 9. **Imported schedules are always disabled** (`enabled=False`), so no imported
    job can execute without an explicit user action.
+10. **Imported MCP servers are written `disabled: true`.** The one exception is
+   a source that passes `keep_enabled_state` to `_add_mcp_configs`, and only
+   `amazon_quick` does. Even then a server arrives on only when its source
+   switches it on clearly (`_enabled_in_source`) and it passes every shared
+   screen in `_sanitize_mcp_spec`. Giving another source that exception is a
+   reviewed change to this list, enforced by
+   `test_only_amazon_quick_passes_keep_enabled_state` in
+   `test/test_onboarding_import_safety_floors.py`. A change that widens the fields
+   `_sanitize_mcp_spec` accepts also widens what an `amazon_quick` import can
+   start, so it is reviewed against this invariant.

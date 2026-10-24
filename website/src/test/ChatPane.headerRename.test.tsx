@@ -46,6 +46,7 @@ Object.defineProperty(window, 'matchMedia', {
 
 import ChatPane from '../components/ChatPane'
 import { api } from '../api/client'
+import { sseSlotTitle, sseSlots } from '../store/dashboardSlice'
 
 const SLOT = 'pane-1'
 const TITLE = 'Alpha session'
@@ -97,6 +98,21 @@ describe('ChatPane header — rename and regenerate controls (#9727)', () => {
     expect(screen.getByRole('button', { name: REGEN })).toBeTruthy()
     // The bar itself is the hover target that reveals the Pen and Sparkles.
     expect(screen.getByRole('button', { name: RENAME }).closest('.group\\/header')).not.toBeNull()
+  })
+
+  it('names an untitled pane "Untitled session", never its key, and opens the editor empty (#20871)', async () => {
+    const { store } = renderPane()
+    // The slot has no title of its own: its title is its key.
+    act(() => { store.dispatch(sseSlotTitle({ key: SLOT, title: SLOT })) })
+    const trigger = await screen.findByRole('button', { name: 'Untitled session (rename session)' })
+    expect(trigger.textContent).toContain('Untitled session')
+    expect(trigger.textContent).not.toContain(SLOT)
+    // Rename still targets the key, and starts from an empty draft, so neither
+    // the key nor the label is saved as a name.
+    fireEvent.click(trigger)
+    const input = document.querySelector('[data-pane-title-row] input') as HTMLInputElement | null
+    expect(input).not.toBeNull()
+    expect(input!.value).toBe('')
   })
 
   it('click -> inline editor; Enter renames the pane slot through renameSlot and the store', async () => {
@@ -192,5 +208,37 @@ describe('ChatPane header — rename and regenerate controls (#9727)', () => {
     await act(async () => { release({ title: 'Generated title' }) })
     expect(await screen.findByText('Generated title')).toBeTruthy()
     expect(screen.queryByTestId('chat-pane-title-error')).toBeNull()
+  })
+})
+
+describe('ChatPane header — fork-of tag (#23084)', () => {
+  const PARENT = 'chat-parent-1'
+  it.each([
+    ['an untitled parent (title equals the key)', PARENT, 'Untitled session', `Forked from Untitled session · ${PARENT}`],
+    ['a titled parent', 'Parent notes', 'Parent notes', 'Forked from Parent notes'],
+  ])('names %s by its label; the hover keeps an untitled key', async (_case, parentTitle, shown, hover) => {
+    const { store } = renderPane()
+    act(() => {
+      store.dispatch(sseSlots([
+        { key: SLOT, title: TITLE, messages: 0, running: false, forked_from: `dashboard:${PARENT}` },
+        { key: PARENT, title: parentTitle, messages: 2, running: false },
+      ] as never))
+    })
+    const tag = await screen.findByText((_t, el) => el?.tagName === 'SPAN' && (el.textContent ?? '').startsWith('↳'))
+    expect(tag.textContent).toBe(`↳ ${shown}`)
+    expect(tag.getAttribute('title')).toBe(hover)
+  })
+
+  it('keeps the key of a parent missing from the slot list', async () => {
+    // A closed parent's title is unknown, so the tag must not call it untitled.
+    const { store } = renderPane()
+    act(() => {
+      store.dispatch(sseSlots([
+        { key: SLOT, title: TITLE, messages: 0, running: false, forked_from: `dashboard:${PARENT}` },
+      ] as never))
+    })
+    const tag = await screen.findByText((_t, el) => el?.tagName === 'SPAN' && (el.textContent ?? '').startsWith('↳'))
+    expect(tag.textContent).toBe(`↳ ${PARENT}`)
+    expect(tag.getAttribute('title')).toBe(`Forked from ${PARENT}`)
   })
 })

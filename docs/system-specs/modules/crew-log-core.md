@@ -1,6 +1,6 @@
 # Crew log Core
 
-Owners: `kiro_crew.crew_log` (`schema.py`, `store.py`, `errors.py`, `lease.py`, `entry_types.py` with the field leaf `entry_types_fields.py` and the family owners `entry_types_lifecycle.py`, `entry_types_exchange.py`, `entry_types_delegated.py`, `entry_types_ledgers.py`, `entry_types_surfaces.py`)
+Owners: `kiro_crew.crew_log` (`schema.py`, `store.py` with its owners `store_paths.py`, `store_segment_reads.py`, `store_cuts.py`, `store_segment_writes.py`, `store_tail_repair.py`, `store_results.py`, `store_units.py`, `store_removal.py`, `store_retention.py` and `store_handle.py`, `errors.py`, `lease.py`, `entry_types.py` with the field leaf `entry_types_fields.py` and the family owners `entry_types_lifecycle.py`, `entry_types_exchange.py`, `entry_types_delegated.py`, `entry_types_ledgers.py`, `entry_types_surfaces.py`)
 
 ## 1. Purpose
 
@@ -35,6 +35,25 @@ Every kind lives under ONE `crew-log` leaf, and that leaf is what carries the pr
 Session crew logs do **not** live under the flat `sessions/<key>.jsonl` transcript root, which they could otherwise share without shadowing. That root carries neither fence -- it is not in `_CREW_HIDDEN_LEAVES` (the `sessions` deny that exists is the private-member view's, which covers one narrow population) -- so a session's log there was write-protected by the tool gate alone. Naming the shared root instead of one leaf per kind also means a third unit kind inherits both fences rather than needing a reviewer to notice it was left out.
 
 The `crew-log` root is established EAGERLY, and that is what makes the mask non-vacuous. Both fences are stated per PATH, and the Linux bind-mask loop skips a leaf that does not exist -- so a root created lazily on the first write is unmasked in every sandbox spawned before it, one of which can then create the directory itself and fill it with entries a reader would take as the gateway's. Two mechanisms close that: `ensure_data_home()` creates it `0700` at startup, and `chmod`s it too, since `mkdir`'s mode is umask-masked on creation and a no-op on a directory that already exists; and `sandbox._CREW_PRECREATE_HIDDEN_DIR_LEAVES` materialises it empty before every namespace spawn so the bind always has a name to cover. macOS needs neither: a Seatbelt deny is a path rule that holds for a name that does not exist yet.
+
+### 3a. Where the store's code lives
+
+`crew_log/store.py` is the module every caller imports, and every name it bound before its owners moved out is still reached there. It is a mirror facade (`kiro_crew._facade_mirror`): it binds each name an owner defines, so its namespace holds the definitions the unsplit module held, and it serves the names the owners import from the owner holding them. A patch through the facade reaches every owner holding the name, so the moved code reads its names as plain module globals. Owners never import the facade, each imports only the owners listed before it below, and new work goes to the owner of its responsibility rather than back into the facade. The store logs under the facade's name, `kiro_crew.crew_log.store`, whichever owner writes the record. `_slot_index` is the one owner name the facade serves instead of binding: `session_units_by_slot` rebinds it, so it lives in `crew_log/store_units.py` alone, where a copy on the facade would go stale.
+
+| Owner | Holds |
+|---|---|
+| `crew_log/store_paths.py` | the data-home root of each kind and its checked form, a unit's directory and file, segment naming and ordering (`segment_paths`, `oldest_segment`, `newest_segment`), the lock beside the log, `_mkdir_private`, `now_ms`, and the store's one logger with `log_exception_text` |
+| `crew_log/store_segment_reads.py` | reading one segment: the bounded tail window (`_scan_tail`, `_TAIL_WINDOW`), entry iteration, the header line, `read_head`, and `_anchor_exists` |
+| `crew_log/store_cuts.py` | the `.cuts` seqlock (`read_cuts`, `_open_cut`, `_close_cut`) and its durable writes |
+| `crew_log/store_segment_writes.py` | one durable append (`_append_line`, `_append_lines`), its rollback, and the one allowed truncation (`_truncate`) |
+| `crew_log/store_tail_repair.py` | the closers `open(repair=True)` appends to an interrupted tail (`_close_interrupted_tail`, `_open_tail`, `_closer_entries`) and the orphan chunk group it drops |
+| `crew_log/store_results.py` | what a read returns: `Page`, `Resolution` and its `STATUS_*` outcomes, `ReadCursor`, `ResumePoint`, and the page limits |
+| `crew_log/store_units.py` | proving a unit's header, the unit listings (`unit_ids`, `unit_dirs`, `unit_dir_for`), the header reads, and the slot index (`session_units_by_slot`, `session_units_for_slot`) |
+| `crew_log/store_removal.py` | `remove_unit` and its `REMOVE_*` outcomes, trash holds, and staging a unit out of and back into the live tree |
+| `crew_log/store_retention.py` | `sweep_expired`, and the session tree's reads of a unit's log: `read_last_tree_edge` (the tail window the sweep reads), `find_last_tree_edge` (every segment), `tree_edge_scan_identity` (when an earlier complete answer still holds) and `find_spawned_entries` (the whole log) |
+| `crew_log/store_handle.py` | `CrewLog`, the handle on one unit's log |
+
+`test/test_store_crew_log_facade.py` pins the owner set and its layer order, the names the facade binds and serves, the patch reach of every name the test trees patch through the facade, and the names served from outside the family.
 
 ## 4. Envelope
 
@@ -495,7 +514,7 @@ A failing write ROLLS ITSELF BACK. Bytes reach the file before the fsync runs, s
 
 That truncation is not a second exception to the never-rewrite rule. The bytes removed are the caller's own failed append, so the file is restored to a state a reader could already have seen rather than edited; it is the torn-tail rule applied at the moment the tear happens instead of at the next open. It is safe against a concurrent writer because the append lock is held across the write and its rollback, so no other handle's entries can lie inside the range.
 
-Readers get the matching guarantee: an append still inside its fsync is never yielded. A read bounds the newest segment at its durable end, its size measured under the append lock (`CrewLog._durable_end`), so a line another handle is still writing, or may still roll back, lies past where the read stops; `open` re-reads the tail under the same lock (`_settle_tail`). `test_crew_log_core.py::test_an_open_does_not_see_an_append_whose_fsync_has_not_returned` pins it.
+Readers get the matching guarantee: an append still inside its fsync is never yielded. A read bounds the newest segment at its durable end, its size measured under the append lock (`CrewLog._durable_end`), so a line another handle is still writing, or may still roll back, lies past where the read stops; `open` re-reads the tail under the same lock (`_settle_tail`). `test_crew_log_core_damage.py::test_an_open_does_not_see_an_append_whose_fsync_has_not_returned` pins it.
 
 If the rollback ALSO fails -- likely, since whatever broke the write is often still broken -- the file may hold bytes no entry claims, and `IndeterminateAppend` reports exactly that. The residue is an unterminated or unparseable tail, which is the shape the next `open` truncates, so the recovery already exists; the distinct type is so a caller can tell "nothing happened" from "something may have".
 
@@ -749,7 +768,7 @@ toward keeping the file. The LAST close in the file is the one read, because a r
 appends to the crew log it already had and only the newest close describes the life that ended.
 
 **Permanently deleting a session removes its crew log; closing a tab does not.** The dashboard's
-history-delete funnel (`dashboard/handlers/sessions.py` `_remove_session_crew_logs`) runs only once
+history-delete funnel (`dashboard/handlers/sessions_parts/slot_teardown.py` `_remove_session_crew_logs`) runs only once
 the teardown SUCCEEDED, because `destroy_if` refuses when the session was replaced by a successor
 generation, is busy, or still has a live slot owner, and in each of those cases the session may be
 writing right now. It flushes the emitter first, so the teardown entry lands and releases the cached
@@ -812,7 +831,7 @@ owner is gone -- and it is asked through `eventlog.service`, not from the handle
 cached log for that slug is dropped in the same step as the files.
 
 **Exactly one member-delete path reclaims, and the others are named rather than implied.** The
-dashboard delete route is that path. `kirocrew agent delete`, the package-sync prune and the crewmate
+dashboard delete route is that path. `kirocrew agent delete`, the package-sync prune and the mate
 prune migration each remove a member record without collecting its unit, and a unit orphaned before
 this exists has no collector at all -- the first two already hold `memory_store_namespace_lock`, so
 reaching them is a call apiece, while the migration holds no such lock and reads a member's own
@@ -830,4 +849,4 @@ Those two entries are BEST EFFORT, and the asymmetry with the session emitter is
 
 Which unit a crew entry belongs to is the DISPATCHING crew, and it is resolved from the conductor slot's member slug. A board driven from an ordinary chat slot therefore records nothing here, which is a refusal rather than a gap: a slot key is not a crew name, and a unit whose header named one would attribute the work to a crew no reader can resolve.
 
-Read and write paths ship together deliberately: the guarantees this format makes -- contiguous seq under a lock, torn-tail repair, refusal before any byte is written -- are each a claim about what a reader sees after a writer acted, so neither half demonstrates them alone. `test/test_crew_log_core.py` exercises them against real files rather than against a mock.
+Read and write paths ship together deliberately: the guarantees this format makes -- contiguous seq under a lock, torn-tail repair, refusal before any byte is written -- are each a claim about what a reader sees after a writer acted, so neither half demonstrates them alone. `test/test_crew_log_core.py` and its parts `test/test_crew_log_core_damage.py`, `test/test_crew_log_core_segments.py` and `test/test_crew_log_core_groups.py` exercise them against real files rather than against a mock.

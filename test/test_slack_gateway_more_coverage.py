@@ -63,7 +63,7 @@ from kiro_crew.monitoring.models import (
     MonitorState,
 )
 from kiro_crew.slack import gateway as gw
-from kiro_crew.testing.wait import await_until
+from kiro_crew.testing.wait import await_until, finished
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -526,6 +526,41 @@ class TestShutdownExtras:
         ds.file_indexes.stop_all.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_a_pending_eager_spawn_ends_inside_the_shutdown(self):
+        """A slot's speculative start is cancelled and awaited by the shutdown.
+
+        Left running, a start still debouncing wakes mid-teardown and spawns an
+        agent no session teardown can reach, and the task outlives the gateway.
+        """
+        orch = _make_orchestrator()
+        orch.cron_svc = None
+        orch.heartbeat_svc = None
+        orch.subagent_mgr = None
+        orch.sessions = None
+        orch._dashboard_runner = None
+        orch._stop_mcp_broker = AsyncMock()
+        ds = _mock_dashboard_state()
+        ds._loop_watchdog = None
+        ds._loop_heartbeat = None
+        orch.dashboard_state = ds
+        debouncing = asyncio.Event()
+
+        async def _debouncing_start() -> None:
+            debouncing.set()
+            await asyncio.Event().wait()
+
+        start = asyncio.create_task(_debouncing_start())
+        ds._slots = {"s1": SimpleNamespace(_eager_spawn_task=start)}
+        try:
+            await await_until(debouncing, what="the eager start's debounce")
+            with patch("kiro_crew.dashboard.chat.save_all_slots_to_history"):
+                await await_until(asyncio.ensure_future(orch._shutdown()), what="the shutdown")
+            assert start.cancelled()
+        finally:
+            start.cancel()
+            await asyncio.gather(start, return_exceptions=True)
+
+    @pytest.mark.asyncio
     async def test_cancels_background_tasks_and_closes_socket(self):
         orch = _make_orchestrator()
         orch.cron_svc = None
@@ -582,7 +617,7 @@ class TestShutdownExtras:
         orch._update_check_task = asyncio.create_task(_installer_running())
         await asyncio.sleep(0)
         with patch.object(gw.registry, "shutdown_tasks", return_value=[]):
-            await asyncio.wait_for(orch._shutdown(), timeout=10)
+            await finished(orch._shutdown(), "orchestrator shutdown")
 
         assert stopped == ["update", "teardown"]
 
@@ -661,7 +696,7 @@ class TestShutdownExtras:
                 patch.object(gw.registry, "shutdown_tasks", return_value=[]),
                 patch.object(gw.logger, "warning") as warning,
             ):
-                await asyncio.wait_for(orch._shutdown(), timeout=10)
+                await finished(orch._shutdown(), "orchestrator shutdown")
             assert not update.done()
             # The warning names the task that would not stop, so a reader chasing
             # an orphaned install knows which installer it was.
@@ -672,7 +707,7 @@ class TestShutdownExtras:
             )
         finally:
             release.set()
-            await asyncio.wait_for(update, timeout=5)
+            await await_until(update, timeout=5, what="the released installer")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -908,7 +943,8 @@ class TestChannelLoopStallWiring:
     """
 
     def test_the_nudge_fire_path_passes_its_binding_key(self) -> None:
-        src = inspect.getsource(gw.GatewayOrchestrator._fire_slack_nudge)
+        # The turn body; ``_fire_slack_nudge`` only holds its drain section.
+        src = inspect.getsource(gw.GatewayOrchestrator._fire_slack_inner_nudge)
         assert '_interactive_approval("autonudge", nudge_key=key)' in src, (
             "the Slack nudge turn does not identify its loop to the approval "
             "callback, so a stalled channel cycle records no evidence"
@@ -1318,21 +1354,33 @@ class TestNotifyNudgeExpired:
         assert title == "Monitoring loop finished — it reported done"
 
     @pytest.mark.parametrize(
-        ("pending", "expected_title", "expected_body"),
+        ("pending", "delivered", "expected_title", "expected_body"),
         [
-            ("success", "Monitoring loop finished — what it was watching is done", "merged"),
-            ("blocked", "Monitoring loop stopped — its subject was closed unmerged", "WITHOUT"),
+            ("success", "", "Monitoring loop finished — what it was watching is done", "merged"),
+            ("", "success", "Monitoring loop finished — what it was watching is done", "merged"),
+            (
+                "blocked",
+                "",
+                "Monitoring loop stopped — its subject was closed unmerged",
+                "WITHOUT",
+            ),
+            (
+                "",
+                "blocked",
+                "Monitoring loop stopped — its subject was closed unmerged",
+                "WITHOUT",
+            ),
         ],
     )
     def test_an_owed_legacy_terminal_turn_outranks_the_cycle_cap(
-        self, pending, expected_title, expected_body
+        self, pending, delivered, expected_title, expected_body
     ):
         """A gated legacy loop keeps terminal truth even when its cap wins the race."""
         orch = _make_orchestrator()
         ds = _mock_dashboard_state()
         orch.dashboard_state = ds
         loop = NudgeLoop(
-            id=f"loop-owed-{pending}",
+            id=f"loop-owed-{pending or delivered}",
             slot_key="slack:C123:456.789",
             message="watch https://github.com/acme/widgets/pull/42 until green",
             max_cycles=4,
@@ -1345,6 +1393,7 @@ class TestNotifyNudgeExpired:
                 objective="watch until green",
                 created_ts=0.0,
                 terminal_pending=pending,
+                terminal_delivered=delivered,
             ),
         )
 

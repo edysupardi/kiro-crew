@@ -29,12 +29,14 @@ one call that reads the operator file sits under that flag's guard.
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
 from collections import deque
 
 import pytest
 
 import kiro_crew.dashboard.chat_utils as chat_utils
+from kiro_crew import _facade_mirror
 from kiro_crew.security import exfil, redaction
 
 # The two battery entry points, as the display cache composes them.
@@ -123,7 +125,10 @@ MUTATOR_METHODS = frozenset(
 
 
 def _module_tree(module: object) -> ast.Module:
-    return ast.parse(inspect.getsource(module))
+    # A mirror facade and the owners it serves from are read as one module.
+    index = vars(module)[_facade_mirror.INDEX_ATTRIBUTE]
+    family = (module, *(importlib.import_module(owner) for owner in index.owners))
+    return ast.parse("\n".join(inspect.getsource(member) for member in family))
 
 
 def _function_defs(tree: ast.Module) -> dict[str, ast.FunctionDef]:
@@ -425,6 +430,7 @@ def test_display_battery_never_touches_the_operator_file(monkeypatch: pytest.Mon
         return real()
 
     monkeypatch.setattr(exfil, ALLOWED_MUTABLE_READER, counted)
+    monkeypatch.setattr(chat_utils, ALLOWED_MUTABLE_READER, counted)
     chat_utils._clear_display_redaction_cache()
     consent = (
         "https://accounts.google.com/o/oauth2/v2/auth?client_id=x&state="
@@ -434,4 +440,4 @@ def test_display_battery_never_touches_the_operator_file(monkeypatch: pytest.Mon
     )
     for text in (consent, "key AKIAIOSFODNN7EXAMPLE here", "plain prose with no url"):
         chat_utils._redact_for_display(text)
-    assert seen["n"] >= 3, "the cache key and the battery both read the exempt set"
+    assert seen["n"] == 3, "one snapshot read per call feeds both the cache key and the battery"

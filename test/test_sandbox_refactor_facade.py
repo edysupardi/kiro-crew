@@ -155,6 +155,7 @@ _MOVED: dict[str, tuple[str, ...]] = {
         _POLICY_CACHE_LEAF _VOICE_RUNTIME_LEAF _CREW_HOME_DEFAULT _CREW_HOME_PREFIXES
         _LIVE_TARGET_LEAF _LIVE_TARGET_STAGING_LEAF _AUTH_STORE_STAGING_LEAF MD_NOTEBOOK_APP_NAME
         _MD_NOTEBOOK_STATE_LEAVES _MD_NOTEBOOK_STAGING_LEAF _CREW_HIDDEN_LEAVES
+        _MD_NOTEBOOK_STATE_FILES _MD_NOTEBOOK_RETIRED_STATE_LEAVES
         _CREW_UNREADABLE_MASK_LEAVES _RELOCATED_CREW_HIDDEN_LEAVES _CREW_READONLY_LEAVES
         _CREW_SANDBOX_VISIBLE_LEAVES _crew_home_entries _CREW_HIDDEN_DIRS _CREW_READONLY_TARGETS
         _CREW_CHILD_WITHHELD_LEAVES _CREW_CHILD_READABLE_LEAVES crew_host_runtime_leaves
@@ -162,6 +163,7 @@ _MOVED: dict[str, tuple[str, ...]] = {
     "kiro_crew.sandbox_tiers": tuple("""
         _resolved_kiro_agents_targets _PACKAGED_INSTALL_DIR_NAMES install_root_targets_for
         _install_root_targets_with _install_root_targets_cached _resolved_install_root_targets
+        _bundled_kas_targets_cached
         _gateway_package_dir _APP_BACKEND_OWNED_LEAVES app_backend_visible_targets
         crew_home_visible_spellings carveout_chain_has_planted_link
         carveout_shadowed_by_foreign_mask _STRICT_DIRS _STANDARD_DIRS _CC_DIRS _resolves_to
@@ -170,6 +172,7 @@ _MOVED: dict[str, tuple[str, ...]] = {
         _CC_EXPOSE_FILES _CC_FILES _SENSITIVE_ENV_PREFIXES _PYTHON_ENV_PREFIXES
         _AGENT_DENIED_ENV_KEYS _sandbox_policy _SANDBOX_MODE_FALLBACK configured_sandbox_mode
         _IN_SANDBOX_MARKER _IN_SANDBOX_LEVEL_VAR _TIER_ORDINALS _mode_to_level _SANDBOX_MODE_ALIASES
+        _CGROUP_AGENTS_SLICE
         effective_sandbox_mode _governance_sandbox_floor _clamp_sandbox_mode _floor_mandates_sandbox
         _clamp_sandbox_mode_to_floor
         """.split()),
@@ -204,6 +207,7 @@ _MOVED: dict[str, tuple[str, ...]] = {
         _live_target_multilink_detail _live_target_symlink_detail _refuse_unless_sole_regular_link
         live_target_pointer_unfitness _md_notebook_degraded_mask_dirs
         _sweep_legacy_md_notebook_temps _MD_NOTEBOOK_STATE_COMPONENTS _open_dir_anchored
+        _migrate_md_notebook_legacy_state
         _AUTH_STORE_PUBLISHED_KEY_LEAF _AUTH_STORE_LEGACY_TEMP_PREFIX
         _reconcile_auth_store_staging_links _sweep_legacy_auth_store_temps
         _sweep_one_md_notebook_state_dir _materialize_md_notebook_mask_targets
@@ -268,11 +272,11 @@ _MOVED: dict[str, tuple[str, ...]] = {
         _SSH_VISIBLE_TIERS _ssh_dir_masked _tier_lists_ssh _forward_ssh_auth_sock
         _forward_for_effective_tier unsandboxed_exec_permitted_by _bundled_cli_invocation
         _apparmor_userns_restricted _no_backend_guidance _classify_unavailable
-        agent_confinement_evidence _warn_mode_off_unconfined
+        agent_confinement_evidence agent_confinement_is_kirocrew_own _warn_mode_off_unconfined
         _warn_first_party_unconfined_once _first_party_no_backend_passthrough
         CRON_SCRIPT_CHILD_ENV UnauditedSpawnRefused refuse_unaudited_on_dead_fs
         SandboxUnavailableError LAUNCHER_EXIT_PREFIXES _LAUNCHER_REFUSAL_RE launcher_refusal
-        _TRUSTED_LAUNCHER_TIMEOUT_SECS
+        _TRUSTED_LAUNCHER_TIMEOUT_SECS LAUNCHER_EXEC_FAILURE_RE
         """.split()),
     "kiro_crew.sandbox_wrap": tuple("""
         _last_unshare_failure unavailable_remedy unavailable_reason remedy_guidance
@@ -282,7 +286,7 @@ _MOVED: dict[str, tuple[str, ...]] = {
         """.split()),
     "kiro_crew.sandbox_cgroup": tuple("""
         _CGROUP_DEFAULT_MAX_PROCESSES _CGROUP_DEFAULT_CPU_WEIGHT _CGROUP_MEMORY_FRACTION
-        _CGROUP_FALLBACK_MAX_MEMORY_MB _CGROUP_AGENTS_SLICE _instance_slice_token
+        _CGROUP_FALLBACK_MAX_MEMORY_MB _instance_slice_token
         _agents_slice_name _default_max_memory_mb _CGROUP_SCOPE_PROBE
         _CGROUP_SCOPE_PROBE_SESSION _CGROUP_SCOPE_PROBE_AT _CGROUP_SCOPE_PROBE_TTL_SECONDS
         _CGROUP_SCOPE_PROBE_LOCK _CGROUP_WARNED _CGROUP_LINGER_REMEDY
@@ -328,7 +332,9 @@ _MOVED: dict[str, tuple[str, ...]] = {
         unconfined_live_agent_pid wrap_argv_async _SPAWN_SCRUB_ENV_PREFIXES scrub_env
         agent_env_scrub_prefixes scrub_agent_denied_env scrub_agent_subprocess_env
         sandboxed_spawn_argv shielded_prepare_off_loop sandboxed_spawn_argv_async
-        _CGROUP_SCOPE_BUS_ENV_KEYS cgroup_scope_bus_env
+        _CGROUP_SCOPE_BUS_ENV_KEYS cgroup_scope_bus_env without_python_env
+        _namespace_launcher_child_is_confined _NAMESPACE_LAUNCHERS
+        _NAMESPACE_LAUNCHERS_LOCK remember_namespace_launcher
         """.split()),
 }
 
@@ -344,9 +350,7 @@ _CARVED_IMPORTS: dict[str, frozenset[str]] = {
     "kiro_crew.sandbox_tiers": frozenset({"kiro_crew.sandbox_leaves"}),
     "kiro_crew.sandbox_precreate": frozenset({"kiro_crew.sandbox_leaves"}),
     "kiro_crew.sandbox_seals": frozenset({"kiro_crew.sandbox_precreate"}),
-    "kiro_crew.sandbox_aliases": frozenset(
-        {"kiro_crew.sandbox_leaves", "kiro_crew.sandbox_precreate", "kiro_crew.sandbox_seals"}
-    ),
+    "kiro_crew.sandbox_aliases": frozenset({"kiro_crew.sandbox_leaves", "kiro_crew.sandbox_seals"}),
     "kiro_crew.sandbox_staging": frozenset(
         {
             "kiro_crew.sandbox_aliases",
@@ -397,6 +401,7 @@ _CARVED_IMPORTS: dict[str, frozenset[str]] = {
         }
     ),
     "kiro_crew.sandbox_slice": frozenset({"kiro_crew.sandbox_cgroup"}),
+    "kiro_crew.sandbox_cgroup": frozenset({"kiro_crew.sandbox_tiers"}),
     "kiro_crew.sandbox_rlimit": frozenset({"kiro_crew.sandbox_workspace"}),
     "kiro_crew.sandbox_spawn": frozenset(
         {
@@ -1374,13 +1379,29 @@ def _imported_modules(module: ModuleType) -> set[str]:
     return found
 
 
-#: The layers under the facade: the plan and the launcher program import the standard
-#: library and nothing else, and the two renderers import the plan and nothing else of
-#: the package. So the plan stays pure, the program stays runnable as a stdlib script,
-#: and neither renderer can reach back into ``kiro_crew.sandbox`` for a rule.
+#: The layers under the facade: the plan imports the standard library and nothing else,
+#: the launcher program's module imports only its parts and the compose helper below the
+#: program text it renders, each part imports at most that module (for the type checker),
+#: and the two renderers import the plan and nothing else of the package. So the plan
+#: stays pure, the program stays runnable as a stdlib script, and neither renderer can
+#: reach back into ``kiro_crew.sandbox`` for a rule.
 _LAYERED: dict[str, frozenset[str]] = {
     "kiro_crew.sandbox_plan": frozenset(),
-    "kiro_crew.sandbox_launcher_program": frozenset(),
+    "kiro_crew.sandbox_launcher_program": frozenset(
+        {
+            "kiro_crew._facade_compose",
+            "kiro_crew.sandbox_launcher_parts.exec_lockdown",
+            "kiro_crew.sandbox_launcher_parts.mask_stages",
+            "kiro_crew.sandbox_launcher_parts.pinned_mounts",
+        }
+    ),
+    "kiro_crew.sandbox_launcher_parts.pinned_mounts": frozenset(
+        {"kiro_crew.sandbox_launcher_program"}
+    ),
+    "kiro_crew.sandbox_launcher_parts.mask_stages": frozenset(
+        {"kiro_crew.sandbox_launcher_program"}
+    ),
+    "kiro_crew.sandbox_launcher_parts.exec_lockdown": frozenset(),
     "kiro_crew.sandbox_launcher": frozenset({"kiro_crew.sandbox_plan"}),
     "kiro_crew.sandbox_seatbelt": frozenset({"kiro_crew.sandbox_plan"}),
 }

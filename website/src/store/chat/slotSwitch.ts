@@ -16,7 +16,7 @@ import { recentErrors, recordError, redactSecrets, type ErrorReport } from '../.
 import { chatSlotDetailPath } from '../../api/chatSlotPaths'
 import type { ChatState } from './state'
 import { fetchSlotDetail, isUnsafeKey, safeKey } from './wire'
-import { deduplicateByMid, finalizePageStreaming, floorForGen, olderHeadAbovePage, preserveSettledMcpOauth, preserveSettledStopState, raiseChunkSeq, sameTranscript, serverRowCount, snapshotChunkGen, snapshotChunkSeq, tailNotInPage } from './transcript'
+import { deduplicateByMid, finalizePageStreaming, floorForGen, olderHeadAbovePage, preserveSettledMcpOauth, preserveSettledStopState, preserveSettledUpsertRows, raiseChunkSeq, sameTranscript, serverRowCount, snapshotChunkGen, snapshotChunkSeq, tailNotInPage } from './transcript'
 import { abortActiveOlderFetch, pagingCursorAfterKeptHead, slotCoverageShortfall, slotSwitchFetchLimit } from './paging'
 import { mergePreservedThinking, reinsertThinkingOrphans, type ThinkingAnchor } from './thinking'
 import {
@@ -56,8 +56,11 @@ import { walkWindowBackTo } from './windowWalk'
  *    recovery paths (auto-improvement, issue-radar, cold-boot restore, the
  *    Slack-token reconnect) silently fall back to a fresh session — so
  *    announcing there would double-report or contradict a successful
- *    recovery. */
-export type SwitchSlotArg = string | { key: string; keepTargetOnMissing?: boolean; announceOnMissing?: boolean }
+ *    recovery.
+ *  - `automatic`: the chat page's own auto-select after it lost the active
+ *    chat. The move counts in `activeSlotAutoMoves`, so a pending fork still
+ *    opens its child (see `forkMayOpen`). */
+export type SwitchSlotArg = string | { key: string; keepTargetOnMissing?: boolean; announceOnMissing?: boolean; automatic?: boolean }
 
 /** The slot key of a `switchSlot` argument, in either spelling. Non-object
  *  values pass through untouched: a hand-rolled test dispatch can omit
@@ -422,6 +425,7 @@ export function addSlotSwitchCases(builder: ActionReducerMapBuilder<ChatState>):
             ? { hasMore: state.slotHasMore, nextBefore: state.slotOldestIndex, olderError: state.slotOlderError }
             : null,
           run: { state: state.slotState, running: state.slotRunning, stopping: state.slotStopping },
+          sidePanelReopenSlot: state.sidePanelReopenSlot,
         }
       }
       // Cache the outgoing slot's messages before the switch fields below are
@@ -466,7 +470,7 @@ export function addSlotSwitchCases(builder: ActionReducerMapBuilder<ChatState>):
       // the target -- so the hand-back inside reads the mirror while it still
       // describes the outgoing slot. WS events for the new slot are accepted
       // from here on.
-      enterActiveSlot(state, target)
+      enterActiveSlot(state, target, typeof action.meta.arg === 'object' && action.meta.arg !== null && action.meta.arg.automatic === true)
       if (target !== outgoingSlot) {
         state.lastChunkSeq = runs[safeKey(target)]?.lastChunkSeq
         state.lastChunkGen = runs[safeKey(target)]?.lastChunkGen
@@ -726,6 +730,7 @@ export function addSlotSwitchCases(builder: ActionReducerMapBuilder<ChatState>):
       parked[safeKey(key)] = [...reseated.remaining, ...orphaned]
       next = hydrateQueuedBubbles(next, queue)
       next = preserveSettledMcpOauth(existing, next)
+      next = preserveSettledUpsertRows(existing, next)
       next = deduplicateByMid(next)
       next = preserveSettledStopState(existing, next)
       // Switching back to an already-loaded slot re-fetches a history that is
@@ -786,6 +791,17 @@ export function addSlotSwitchCases(builder: ActionReducerMapBuilder<ChatState>):
         state.slotHistory = state.slotHistory.filter(k => k !== origin.key)
         // Swap the origin's cached activity back in (pending loaded the target's).
         loadSlotActivity(state, origin.key)
+        // The held-off side panel's reopen: `enterActiveSlot` moved it to the
+        // gone target. If the field still names the target, the origin's value
+        // from before the switch comes back. If the hold lifted during the
+        // read, the lift used that reopen on the gone target, so the origin's
+        // saved reopen opens the origin's panel now. A toggle or the setting
+        // turning off during the read cleared the saved value (see
+        // `toggleActivity` and `setSidePanelAlwaysOpen`). Not covered: a hold
+        // that starts, or lifts and comes back, during the read can leave the
+        // origin's panel closed when the hold lifts. It never opens a panel.
+        if (state.sidePanelReopenSlot === target) state.sidePanelReopenSlot = origin.sidePanelReopenSlot
+        else if (state.sidePanelAlwaysOpen && origin.sidePanelReopenSlot === origin.key) state.activityOpen = true
         // Run mirror: the snapshot applies verbatim. It was captured at
         // pending and kept CURRENT by `syncOriginRun` at every non-active
         // run write, so a transition mid-flight is already in it -- and a

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { OverlayPortal } from './overlayRoot'
 import { motion, useReducedMotion } from 'framer-motion'
 import { Minus, Plus, Search, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { useDialogFocusTrap } from '../hooks/useDialogFocusTrap'
+import { useLocalCrewHidden } from './overlayRoot'
 import { DOUBLE_TAP_MS, DOUBLE_TAP_SLOP, DOUBLE_TAP_ZOOM, usePinchZoom } from '../hooks/usePinchZoom'
 import { Btn, IconButton } from './ui'
 import { isEditableTarget } from '../utils/editableTarget'
@@ -59,6 +60,10 @@ export default function DiagramLightbox({ svg, onClose }: { svg: string; onClose
   const hostRef = useRef<HTMLDivElement>(null)
   const reduceMotion = useReducedMotion()
   const captionTop = overlayCaptionClearancePx()
+  // A ⌘/Ctrl+digit chord or a notification click can switch Crews while the
+  // viewer is open. Its overlay root hides it (zoom and pan survive the trip),
+  // and its keys stand down until the Crew is back.
+  const crewHidden = useLocalCrewHidden()
   useDialogFocusTrap(dialogRef, onClose)
 
   // A finished pinch or double-tap is not a click-out. Without this the click
@@ -203,12 +208,23 @@ export default function DiagramLightbox({ svg, onClose }: { svg: string; onClose
     setPan({ x: 0, y: 0 })
   }, [setZoom, setPan])
 
-  // While the viewer is open, claim Escape so an enclosing <Modal> does not also
-  // dismiss itself on the same keypress. Also handle zoom keyboard shortcuts (+, -, 0).
+  // While the viewer is open, claim Escape so an enclosing dismiss handler does
+  // not also close itself on the same keypress. `useDialogFocusTrap` closes the
+  // viewer from its own capture-phase listener (registered before this one, so
+  // it has already run); this listener then CONSUMES the event so it reaches no
+  // other handler. `preventDefault()` alone is not enough: a bubble-phase host
+  // listener that checks `defaultPrevented` (the Modal family) is spared by it,
+  // but the artifact panel's Escape handler (ArtifactPanel/MarkdownPanel) does
+  // not — so without `stopPropagation()` the same Escape that closes this viewer
+  // also closes the underlying artifact (#20630). Stopping propagation in the
+  // capture phase keeps the event off every bubble-phase document/window
+  // listener. Also handle zoom keyboard shortcuts (+, -, 0).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (crewHidden) return
       if (e.key === 'Escape') {
         e.preventDefault()
+        e.stopPropagation()
       } else if (!fitted || isEditableTarget(e) || e.metaKey || e.ctrlKey || e.altKey) {
         return
       } else if (e.key === '+' || e.key === '=') {
@@ -224,9 +240,9 @@ export default function DiagramLightbox({ svg, onClose }: { svg: string; onClose
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [fitted, zoomIn, zoomOut, resetZoom])
+  }, [fitted, zoomIn, zoomOut, resetZoom, crewHidden])
 
-  return createPortal(
+  return <OverlayPortal>
     <motion.div
       ref={dialogRef}
       role="dialog"
@@ -326,7 +342,6 @@ export default function DiagramLightbox({ svg, onClose }: { svg: string; onClose
           onPointerCancel={fitted ? onPointerUp : undefined}
         />
       </div>
-    </motion.div>,
-    document.body
-  )
+    </motion.div>
+  </OverlayPortal>
 }

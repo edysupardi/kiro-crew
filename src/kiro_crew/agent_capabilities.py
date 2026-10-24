@@ -18,7 +18,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Callable
 
-from kiro_crew import agent_state, kiro_cli
+from kiro_crew import agent_state, kiro_cli, mate_capabilities
 from kiro_crew.agent import (
     OWNED_KIRO_AGENT_FILES,
     _is_confirmed_managed_dashboard_author,
@@ -41,7 +41,7 @@ from kiro_crew.config.loader import (
     default_project_dir,
     update_config_locked,
 )
-from kiro_crew.config.paths import project_agents_dir
+from kiro_crew.config.paths import mate_agents_dir, project_agents_dir
 from kiro_crew.mcp_cleanup import mcp_entry_is_muted
 from kiro_crew.platform import redact_via_context
 from kiro_crew.platform.governance import sanitize_agent_config_governance
@@ -90,13 +90,17 @@ class CapabilityError(ValueError):
         self.status = status
         #: Crew member whose spec failed, set by the session start seam.
         self.member = ""
-        #: Basename of the member's own agent file a refusal is about. Crew names
-        #: it (``target + ".json"``), so a hand edit cannot change it. Never a
+        #: Basename of the agent file a refusal is about, as resolved on disk
+        #: (``<name>.md`` or a file declaring the name both count). Never a
         #: directory: the agents folder is fixed per scope and a path is not.
         self.file = ""
         #: The draft's own approval reference a shape refusal is about, echoed
         #: back so the pane names it without re-implementing the shape rule.
         self.ref = ""
+        #: The project a start refusal names: the saved one for
+        #: ``project_identity_changed``, the one holding the shadowing file for
+        #: ``private_template_shadowed``.
+        self.project = ""
 
 
 def _digest(value: Any) -> str:
@@ -125,7 +129,7 @@ def _source(name: str, project: str, *, allow_private: bool = False) -> tuple[Pa
     if not is_registered_agent_name(name):
         raise CapabilityError("invalid_template_name")
     roots = [(project_agents_dir(project), "project")] if project else []
-    roots.append((kiro_agents_dir_path(), "global"))
+    roots += [(kiro_agents_dir_path(), "global"), (mate_agents_dir(), "mate")]
     for root, scope in roots:
         try:
             path = agent_spec_path(name, agents_dir=root)
@@ -944,7 +948,10 @@ class CapabilityService:
         if lineage:
             path, spec, own_descriptor = _source(target, project, allow_private=True)
             if own_descriptor["scope"] != "global":
-                raise CapabilityError("private_template_shadowed")
+                shadowed = CapabilityError("private_template_shadowed")
+                shadowed.file = path.name
+                shadowed.project = project
+                raise shadowed
             if spec.get("name") != target:
                 raise CapabilityError("source_changed")
             parent_name = lineage["forked_from"]
@@ -997,7 +1004,12 @@ class CapabilityService:
         snapshot["revision"] = self._token([snapshot["revision"], snapshot["generation"]])
         return snapshot
 
+    def _mate_catalog(self, member: str) -> dict[str, str]:
+        return mate_capabilities.skill_catalog(member, self._catalog)
+
     def get(self, member: str) -> dict:
+        if mate_capabilities.binding_is_mate(member):
+            return mate_capabilities.get(member, self._mate_catalog(member))
         return self._view(self._snapshot(member))
 
     def _project(
@@ -1356,6 +1368,8 @@ class CapabilityService:
         )
 
     def preview(self, member: str, body: Any, *, reset_parent: bool = False) -> dict:
+        if mate_capabilities.binding_is_mate(member):
+            return mate_capabilities.preview(member, body, self._mate_catalog(member))
         request = validate_request(body)
         plans = self._plans(member, request, reset_parent=reset_parent)
         snap, spec, intent, changes = plans[0]
@@ -1718,6 +1732,8 @@ class CapabilityService:
         return self._finish_publish(member, expected_template, name)
 
     def put(self, member: str, body: Any, *, reset_parent: bool = False) -> dict:
+        if mate_capabilities.binding_is_mate(member):
+            return mate_capabilities.put(member, body, self._mate_catalog(member))
         request = validate_request(body, commit=True)
         prepared = {
             plan[0]["member"]: plan[0]
@@ -1849,7 +1865,9 @@ def prepare_member_capabilities(member: str, project_dir: str | Path | None = No
     saved_parent = intent["parent"]
     other_project = project != saved_parent["project"]
     if other_project and saved_parent["scope"] != "global":
-        raise CapabilityError("project_identity_changed")
+        moved = CapabilityError("project_identity_changed")
+        moved.project = saved_parent["project"]
+        raise moved
     if intent.get("status") != "saved":
         raise CapabilityError("materialization_pending")
     if intent.get("governance_generation") != governance_answer_generation():
@@ -1859,12 +1877,17 @@ def prepare_member_capabilities(member: str, project_dir: str | Path | None = No
         raise CapabilityError("foreign_private_copy")
     _, _, descriptor = _source(saved_parent["name"], project)
     if _parent_identity(descriptor) != _parent_identity(saved_parent):
-        raise CapabilityError(
+        changed = CapabilityError(
             "project_identity_changed" if other_project else "parent_identity_changed"
         )
-    _, spec, own = _source(binding.kiro_agent, project, allow_private=True)
+        changed.project = saved_parent["project"] if other_project else ""
+        raise changed
+    own_path, spec, own = _source(binding.kiro_agent, project, allow_private=True)
     if own["scope"] != "global":
-        raise CapabilityError("private_template_shadowed")
+        shadowed = CapabilityError("private_template_shadowed")
+        shadowed.file = own_path.name
+        shadowed.project = project
+        raise shadowed
     if _digest(spec) != intent.get("materialized"):
         raise CapabilityError("materialization_changed")
     if intent.get("governance_generation") != governance_answer_generation():

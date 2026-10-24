@@ -27,7 +27,6 @@ from kiro_crew.sandbox_leaves import (
     _CREW_HOME_DEFAULT,
     _CREW_HOME_PREFIXES,
     _MD_NOTEBOOK_STAGING_LEAF,
-    _MD_NOTEBOOK_STATE_LEAVES,
     _POLICY_CACHE_LEAF,
     _RELOCATED_CREW_HIDDEN_LEAVES,
     MD_NOTEBOOK_APP_NAME,
@@ -115,9 +114,23 @@ def _install_root_targets_cached(package_dir: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(spellings))
 
 
+@functools.lru_cache(maxsize=1)
+def _bundled_kas_targets_cached(bundled_kas_dir: str) -> tuple[str, ...]:
+    """Both spellings of the desktop app's staged KAS engine root, or empty."""
+    if not bundled_kas_dir:
+        return ()
+    lexical = os.path.normpath(os.path.abspath(bundled_kas_dir))
+    spellings = [lexical]
+    try:
+        spellings.append(os.path.realpath(lexical))
+    except (OSError, ValueError):
+        pass
+    return tuple(dict.fromkeys(spellings))
+
+
 def _resolved_install_root_targets() -> list[str]:
     """The running gateway's packaged install tree, sealed read-only for every
-    sandboxed child.
+    sandboxed child -- plus the desktop app's staged KAS engine root, when there is one.
 
     Every write that changes the install tree changes what the gateway executes on its
     next start, with the gateway's identity. The legitimate writer is the updater, which
@@ -125,13 +138,33 @@ def _resolved_install_root_targets() -> list[str]:
     nothing. Empty for an editable or from-source checkout (see
     :func:`install_root_targets_for`).
 
-    Computed once per process: the install location does not move under a running
-    gateway, and caching keeps the one ``realpath`` off every later spawn. Never raises.
+    The staged engine root (:data:`constants.BUNDLED_KAS_DIR_ENV`, a sibling of the
+    package directory inside the app's resources) is the same class of target: its
+    ``install.json`` names the Node binary the gateway spawns, outside any sandbox,
+    for every ``agent.kas_bundle`` session, and the binary itself sits beside it. The shell
+    sets the variable only when the build staged the tree, so an unbundled build adds
+    nothing here. The tree is read-only by construction (the build wrote it; the data
+    home's own ``engines/kas`` is where ``kirocrew kas install`` writes), so no
+    legitimate writer is fenced.
+
+    Computed once per process: neither location moves under a running gateway, and
+    caching keeps the ``realpath`` calls off every later spawn. Never raises.
     """
+    # Read here rather than imported at module scope: every module-level name of this
+    # module is served through the ``sandbox`` facade, and the env name is the
+    # ``constants`` module's to export, not this one's.
+    from kiro_crew.constants import BUNDLED_KAS_DIR_ENV
+
+    targets: list[str] = []
     try:
-        return list(_install_root_targets_cached(_gateway_package_dir()))
+        targets.extend(_install_root_targets_cached(_gateway_package_dir()))
     except Exception:
-        return []
+        pass
+    try:
+        targets.extend(_bundled_kas_targets_cached(os.environ.get(BUNDLED_KAS_DIR_ENV, "").strip()))
+    except Exception:
+        pass
+    return list(dict.fromkeys(targets))
 
 
 def _gateway_package_dir() -> str:
@@ -159,10 +192,9 @@ _APP_BACKEND_OWNED_LEAVES: dict[str, tuple[str, ...]] = {
     # the gateway execs next. The pointer stays masked; Dev Fleet moves the cutover to a
     # gateway-process route instead (``dev_fleet/gateway_routes.py``).
     MD_NOTEBOOK_APP_NAME: (
-        *_MD_NOTEBOOK_STATE_LEAVES,
-        # The writers stage here and rename onto the leaves above, so the backend needs
-        # this directory back too — carving out only the three targets would leave every
-        # state write failing on the masked staging dir instead of the masked leaf.
+        # The whole state directory, handed back as one unit: the state files, their staged
+        # temps and the migration marker all live inside it, so the publish rename stays on
+        # one mount. The retired bare spellings are NOT here; the backend never reads them.
         _MD_NOTEBOOK_STAGING_LEAF,
     ),
 }
@@ -450,7 +482,7 @@ _STRICT_DIRS: list[str] = [
     ".kiro/crew/.vault",
     ".kirocrew/.vault",
     # The centrally-distributed governance ceiling's cache
-    # (``platform/policy_distribution.py``). Bind-mount-hidden in every mode for the
+    # (``platform/policy_distribution_cache.py``). Bind-mount-hidden in every mode for the
     # reason the vault above is: ``is_sensitive_path`` is the shared read+write gate for
     # the agent's in-process tool calls, but a spawned ``python -c`` does an OS
     # ``open()`` that never routes through it. That matters more here than for the
@@ -477,7 +509,7 @@ _STANDARD_DIRS: list[str] = [
     ".kiro/crew/.vault",
     ".kirocrew/.vault",
     # The centrally-distributed governance ceiling's cache
-    # (``platform/policy_distribution.py``). Bind-mount-hidden in every mode for the
+    # (``platform/policy_distribution_cache.py``). Bind-mount-hidden in every mode for the
     # reason the vault above is: ``is_sensitive_path`` is the shared read+write gate for
     # the agent's in-process tool calls, but a spawned ``python -c`` does an OS
     # ``open()`` that never routes through it. That matters more here than for the
@@ -508,7 +540,7 @@ _CC_DIRS: list[str] = [
     ".kiro/crew/.vault",
     ".kirocrew/.vault",
     # The centrally-distributed governance ceiling's cache
-    # (``platform/policy_distribution.py``). Bind-mount-hidden in every mode for the
+    # (``platform/policy_distribution_cache.py``). Bind-mount-hidden in every mode for the
     # reason the vault above is: ``is_sensitive_path`` is the shared read+write gate for
     # the agent's in-process tool calls, but a spawned ``python -c`` does an OS
     # ``open()`` that never routes through it. That matters more here than for the
@@ -927,7 +959,7 @@ _AGENT_DENIED_ENV_KEYS: list[str] = [
     "BITBUCKET_API_TOKEN",
     "KIROCREW_OWNER_ID",
     # The central-governance fetch configuration — see
-    # ``platform/policy_distribution.py``. The URL is listed as well as the header,
+    # ``platform/policy_distribution_source.py``. The URL is listed as well as the header,
     # deliberately:
     #
     # * ``KIROCREW_POLICY_HEADERS`` is a live bearer credential for the fleet's own
@@ -1023,7 +1055,7 @@ def configured_sandbox_mode() -> str:
 # Kiro Crew namespace sandbox. Deny-by-default: the gate keys ONLY on the
 # explicit, single-purpose ``KIROCREW_SANDBOX_ACTIVE``, which is exported at
 # exactly one site — the namespace launcher's ``scrub_env`` stage
-# (``sandbox_launcher_program``, which ``_build_launcher_script`` renders). We
+# (``sandbox_launcher_parts/exec_lockdown.py``, which ``_build_launcher_script`` renders). We
 # deliberately do NOT key on ``KIROCREW_HOST_PID``:
 # it is dual-purpose session-identity plumbing, and gating a security-relevant
 # passthrough on a variable set for other reasons is a latent bypass. Since the
@@ -1039,6 +1071,14 @@ def configured_sandbox_mode() -> str:
 # below safe for callers that use ``wrap_argv`` directly rather than
 # ``sandboxed_spawn_argv``.
 _IN_SANDBOX_MARKER = "KIROCREW_SANDBOX_ACTIVE"
+
+# Companion to ``_IN_SANDBOX_MARKER``: the single name for the systemd slice every
+# agent scope nests under (``kirocrew.slice/kirocrew-agents.slice`` inside the user
+# manager), and the aggregate enforcement boundary (``ensure_agents_slice_limits``).
+# It lives here, in the lowest sandbox layer, so BOTH the confinement-evidence probe
+# in ``sandbox_unavailable`` and the scope machinery in ``sandbox_cgroup`` read one
+# constant rather than repeating the literal — a renamed slice moves in one place.
+_CGROUP_AGENTS_SLICE = "kirocrew-agents.slice"
 
 # Companion to ``_IN_SANDBOX_MARKER``: records WHICH tier the outer sandbox was
 # built at (``standard``/``cc``/``strict``), exported at the same two launcher

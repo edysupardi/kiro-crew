@@ -1,5 +1,6 @@
-"""The session MCP report, the session-init OAuth drain, the MCP OAuth banner lifecycle and
-the scrub of the ACP strings it shows."""
+"""The session MCP report, the session-init OAuth drain, the MCP OAuth banner lifecycle, the
+scrub of the ACP strings it shows, and the stream's MCP arms (``_on_mcp_oauth_request``,
+``_on_mcp_server_initialized``, ``_on_mcp_server_init_failure``)."""
 
 from __future__ import annotations
 
@@ -7,24 +8,23 @@ import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
+from kiro_crew.config.loader import oauth_endpoints_path
+from kiro_crew.dashboard.chat_utils import _redact_meta_for_role
+from kiro_crew.dashboard.urls import is_loopback
+from kiro_crew.security import sanitized_oauth_endpoint, sanitized_oauth_endpoint_display
+
 if TYPE_CHECKING:
     from kiro_crew.dashboard.chat_runner import (
         DashboardState,
         SessionMcpReport,
         _ChatSlot,
         _is_safe_oauth_url,
-        _redact_meta_for_role,
         get_visible_providers,
-        is_loopback,
         kirocrew_managed_names,
         logger,
-        oauth_endpoints_path,
         oauth_url_contains_credential,
-        redact_credentials,
-        redact_exfiltration_urls,
-        sanitized_oauth_endpoint,
-        sanitized_oauth_endpoint_display,
     )
+    from kiro_crew.dashboard.chat_turn.turn_locals import _ChatTurn
 
 
 def _mcp_server_name_is_ambiguous(server_name: str, safe_name: str) -> bool:
@@ -213,8 +213,9 @@ def _redact_acp_string(s: str) -> str:
     """
     if not s:
         return s
-    s, _ = redact_credentials(s)
-    s, _ = redact_exfiltration_urls(s)
+    from kiro_crew.security import redact
+
+    s = redact(s)
     return s
 
 
@@ -644,4 +645,67 @@ def _mark_mcp_oauth_completed(
             "meta": new_meta,
             "content": new_content,
         },
+    )
+
+
+async def _on_mcp_oauth_request(turn: _ChatTurn, event) -> None:
+    """An MCP server's OAuth request."""
+    client = turn.client
+    slot = turn.slot
+    state = turn.state
+    # kiro-cli emits this notification when an MCP server's token
+    # has expired or never existed. Surface as an inline banner —
+    # kiro-cli's local callback handles the rest of the OAuth flow.
+    await _approve_discovered_mcp_oauth_endpoint(event.server_name, event.oauth_url)
+    _emit_mcp_oauth_request(
+        state,
+        slot,
+        event.server_name,
+        event.oauth_url,
+        minted_by=str(getattr(client, "process_instance", "") or ""),
+    )
+    _record_session_mcp_event(
+        state,
+        slot,
+        client,
+        event.kind,
+        event.server_name,
+        fanout_no_owner=event.runtime_global,
+    )
+
+
+async def _on_mcp_server_initialized(turn: _ChatTurn, event) -> None:
+    """An MCP server that finished initializing."""
+    client = turn.client
+    slot = turn.slot
+    state = turn.state
+    # kiro-cli emits this once an MCP server has finished init
+    # (typically right after a successful OAuth callback completes).
+    # Patch the matching mcp_oauth banner so the user sees a
+    # confirmation instead of a stale "Authorize" prompt.
+    _mark_mcp_oauth_completed(state, slot, event.server_name, success=True)
+    _record_session_mcp_event(
+        state,
+        slot,
+        client,
+        event.kind,
+        event.server_name,
+        fanout_no_owner=event.runtime_global,
+    )
+
+
+async def _on_mcp_server_init_failure(turn: _ChatTurn, event) -> None:
+    """An MCP server that failed to initialize."""
+    client = turn.client
+    slot = turn.slot
+    state = turn.state
+    _mark_mcp_oauth_completed(state, slot, event.server_name, success=False, error=event.text or "")
+    _record_session_mcp_event(
+        state,
+        slot,
+        client,
+        event.kind,
+        event.server_name,
+        event.text or "",
+        fanout_no_owner=event.runtime_global,
     )

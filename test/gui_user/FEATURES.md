@@ -26,7 +26,7 @@ under `scenarios/` says how the lane checks it.
 
 | | Total | smoke | nightly | native-only | needs-secret | excluded |
 |---|---|---|---|---|---|---|
-| **All features** | 270 | 42 | 166 | 12 | 27 | 23 |
+| **All features** | 271 | 42 | 167 | 12 | 27 | 23 |
 | Chat sessions (`chat`) | 26 | 3 | 19 | 0 | 2 | 2 |
 | Side panel tabs (`side-panel`) | 4 | 1 | 3 | 0 | 0 | 0 |
 | Terminal panel (`terminal`) | 3 | 0 | 3 | 0 | 0 | 0 |
@@ -58,12 +58,12 @@ under `scenarios/` says how the lane checks it.
 | Popouts & embeds (`popout`) | 6 | 0 | 4 | 2 | 0 | 0 |
 | Authentication & sign-in (`auth`) | 3 | 2 | 0 | 0 | 0 | 1 |
 | Onboarding (`onboarding`) | 4 | 0 | 4 | 0 | 0 | 0 |
-| Settings (`settings`) | 47 | 12 | 28 | 3 | 0 | 4 |
+| Settings (`settings`) | 48 | 12 | 29 | 3 | 0 | 4 |
 | Themes (`themes`) | 3 | 0 | 2 | 0 | 1 | 0 |
 | Security & governance (`security`) | 10 | 1 | 9 | 0 | 0 | 0 |
 | Developer tools (`developer`) | 12 | 0 | 12 | 0 | 0 | 0 |
 
-Priorities: P0 10 · P1 37 · P2 161 · P3 62. Deduped from 387 raw records.
+Priorities: P0 10 · P1 37 · P2 162 · P3 62. Deduped from 387 raw records.
 
 ## Chat sessions (`chat`)
 
@@ -162,9 +162,9 @@ Priorities: P0 10 · P1 37 · P2 161 · P3 62. Deduped from 387 raw records.
 | Priority | Id | User story | Start URL | Seed | Runnable | Steps |
 |---|---|---|---|---|---|---|
 | P0 | `members-crew-members` | As a crew operator, I want a durable DM thread per member with a docked side panel led by the crew's Dashboard tab, an auto-patrol badge on each roster row, and a filterable roster, so that I can supervise each crew in one place. | `/members` | rich | nightly | 6 |
-| P1 | `crewmate-reply-thread` | As a user talking to a crewmate, I want to ask about one thing it said in a reply thread on that message, so that the follow-up stays beside the message it is about instead of pushing the crewmate's findings up the main chat. | `/settings` | rich | nightly | 8 |
+| P1 | `crewmate-reply-thread` | As a user talking to a mate, I want to ask about one thing it said in a reply thread on that message, so that the follow-up stays beside the message it is about instead of pushing the mate's findings up the main chat. | `/settings` | rich | nightly | 8 |
 | P1 | `members-private-memory-keeps-thread` | As a crew operator, I want a member's direct-message thread to survive leaving and returning to the member, so that our earlier conversation and the member's ability to answer are not lost. | `/settings` | rich | nightly | 8 |
-| P2 | `sidebar-crew-members-create-menu-entry` | As a user, I want the Crewmates menu entry to open the page or the setting that enables it, so that I can find the feature either way. | `/chat` | minimal | nightly | 3 |
+| P2 | `sidebar-crew-members-create-menu-entry` | As a user, I want the Mates menu entry to open the page or the setting that enables it, so that I can find the feature either way. | `/chat` | minimal | nightly | 3 |
 
 ## Customize (crews, templates, skills, prompts, steering, hooks, workflows) (`capabilities`)
 
@@ -401,6 +401,7 @@ Priorities: P0 10 · P1 37 · P2 161 · P3 62. Deduped from 387 raw records.
 | P2 | `settings-voice-auto-speak-toggle` | As a dashboard user, I want to enable Auto-speak Responses, so that every assistant reply is read aloud. | `/settings/voice` | minimal | nightly | 3 |
 | P2 | `settings-voice-panel` | As a dashboard user, I want to open Settings > Voice, so that I can configure spoken replies and dictation. | `/settings/voice` | minimal | nightly | 2 |
 | P2 | `settings-voice-ptt-shortcut` | As a dashboard user, I want to set the dictation Shortcut key and how it works (hold/tap/both), so that I can start recording from the keyboard. | `/settings/voice` | minimal | nightly | 4 |
+| P2 | `settings-voice-stt-decode-threads` | As a dashboard user on a machine with many cores, I want to pick how many CPU threads the local speech model uses, so that dictation finishes sooner. | `/settings/voice` | minimal | nightly | 3 |
 | P2 | `settings-voice-stt-enable-and-provider` | As a dashboard user, I want to enable dictation and choose Local or Transcribe in Settings > Voice, so that I can speak into the message box. | `/settings/voice` | minimal | nightly | 4 |
 | P2 | `settings-voice-tts-provider-select` | As a dashboard user, I want to switch the TTS Provider in Settings > Voice, so that spoken replies use the engine I choose. | `/settings/voice` | minimal | nightly | 4 |
 
@@ -490,7 +491,7 @@ Features the lane cannot drive on its target. Listed so the gap is a decision, n
 | needs-secret | `themes-install-pack-from-github` | themes | Install a theme pack from a github.com URL | Needs outbound network to github.com (and a sandbox backend), unavailable on the target. |
 | excluded | `chat-mcp-app-inline-render` | chat | An MCP App renders inline in chat as a sandboxed iframe with a live bridge | Not reachable on the fake backend/no-network target. |
 | excluded | `chat-workflow-launch-and-completion-cards` | chat | workflow_run shows a launch card and later a completion card in chat | Depends on real MCP tool execution by a model, absent on the fake ACP target. |
-| excluded | `sidebar-workspace-switcher-three-workspaces` | sidebar | Switch between default, review and research workspaces and see distinct memory and pinned sessions | Excluded: no workspace switcher exists on main. Named workspaces are edited in Developer > Config and picked per crewmate; the sidebar has no control that changes the active workspace. |
+| excluded | `sidebar-workspace-switcher-three-workspaces` | sidebar | Switch between default, review and research workspaces and see distinct memory and pinned sessions | Excluded: no workspace switcher exists on main. Named workspaces are edited in Developer > Config and picked per mate; the sidebar has no control that changes the active workspace. |
 | excluded | `knowledge-fetch-url-source` | knowledge | Add a URL source that is fetched and ingested | No external account is involved, the blocker is outbound network, which the target does not have, so the fetch fails by construction and the flow is unobservable here. |
 | excluded | `artifacts-widget-auto-registration-from-chat` | artifacts | A chat-rendered mcwidget is auto-registered as an artifact | Not reachable on the fake backend; requires a model that emits widget markup. |
 | excluded | `browser-panel-load-dev-server-preview` | browser-panel | Load a locally served dev-server URL into the Browser tab iframe | The target's managed browser policy (URLBlocklist * with only the gateway origin allowed) makes any dev-server iframe fail by construction, so the behaviour cannot be observed on this harness; it is web-capable elsewher… |

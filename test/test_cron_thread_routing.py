@@ -13,6 +13,7 @@ import pytest
 
 from kiro_crew.cron import CronJob, CronSchedule
 from kiro_crew.subagent import SubagentInfo
+from kiro_crew.testing.wait import async_wait_until
 
 # ── Helpers (same pattern as test_cron_slack_delivery.py) ──
 
@@ -306,7 +307,7 @@ class TestSubagentDoneCronRouting:
 
         assert call_count == 2
         mock_sleep.assert_awaited_once_with(1)  # 2 ** 0
-        gateway.sessions.cancel_current.assert_any_await("cron:j1")
+        gateway.sessions.cancel_current.assert_any_await("cron:j1", owner_task=ANY)
 
 
 # ── Tests: a threaded cron's follow-ups must thread, not post top-level ──
@@ -377,7 +378,9 @@ class TestSubagentDoneCancelsBeforeRelease:
     async def test_cron_injection_cancels_before_release(self) -> None:
         gateway = _make_gateway()
         call_order: list[str] = []
-        gateway.sessions.cancel_current = AsyncMock(side_effect=lambda k: call_order.append("cancel"))
+        gateway.sessions.cancel_current = AsyncMock(
+            side_effect=lambda k, **_kw: call_order.append("cancel")
+        )
         gateway.sessions.release = MagicMock(side_effect=lambda k: call_order.append("release"))
         subagent_done = _capture_subagent_done(gateway)
         info = SubagentInfo(id="s1", task="work", parent_session_key="cron:j1")
@@ -397,7 +400,9 @@ class TestSubagentDoneCancelsBeforeRelease:
         gateway.slack.open_dm = AsyncMock(return_value="D123")
         gateway.slack.post_message = AsyncMock()
         call_order: list[str] = []
-        gateway.sessions.cancel_current = AsyncMock(side_effect=lambda k: call_order.append("cancel"))
+        gateway.sessions.cancel_current = AsyncMock(
+            side_effect=lambda k, **_kw: call_order.append("cancel")
+        )
         gateway.sessions.release = MagicMock(side_effect=lambda k: call_order.append("release"))
         subagent_done = _capture_subagent_done(gateway)
         info = SubagentInfo(id="s3", task="work", parent_session_key="slack:U000")
@@ -562,11 +567,8 @@ class TestDashboardInjectionRoutesRunChat:
             p1, p2,
         ):
             await subagent_done(info)
-            # Wait for the task's done callbacks to fire (may need multiple event-loop ticks under load)
-            for _ in range(20):
-                await asyncio.sleep(0.05)
-                if gateway.subagent_mgr.notify_injection_failed.call_count:
-                    break
+            # The task's done callbacks fire on later event-loop ticks.
+            await async_wait_until(lambda: gateway.subagent_mgr.notify_injection_failed.call_count)
 
         gateway.subagent_mgr.notify_injection_failed.assert_called_once()
         call_kwargs = gateway.subagent_mgr.notify_injection_failed.call_args

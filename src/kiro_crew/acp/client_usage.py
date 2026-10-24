@@ -7,8 +7,9 @@ Each function here whose first parameter is ``self`` is an ``AcpClient`` method:
 class binds it by name, so it reads and writes the session's own state on the instance,
 and a patch of the method on the class or on an instance reaches every caller.
 
-Instance fields written: ``_claude_compaction_pending``, ``_codex_compaction_pending``,
-``_compaction_failed_at``, ``_mcp_notifications``, ``last_compaction_transient``.
+Instance fields written: ``_between_turn_credits``, ``_claude_compaction_pending``,
+``_codex_compaction_pending``, ``_compaction_failed_at``, ``_mcp_notifications``,
+``last_compaction_transient``.
 
 Instance fields read: ``_model``, ``_resolved_model_id``, ``last_prompt_stats``,
 ``memory_mode``.
@@ -38,6 +39,7 @@ from kiro_crew.acp.transport_errors import (
 from kiro_crew.acp.types import (
     ACP_BACKENDS_INLINE_COMPACTION,
     ACP_BACKENDS_STRUCTURED_REFUSAL,
+    ACP_BACKENDS_UNMARKED_COMPACTION_PAIR,
     EVENT_COMPACTION_STATUS,
     KNOWN_SESSION_UPDATES,
     METHOD_COMPACTION_STATUS,
@@ -117,7 +119,16 @@ def _backfill_context_window(self: AcpClient, pct: float) -> None:
     self.last_prompt_stats.backfill_context_window(pct, self._resolved_model_id or self._model)
 
 
-def _track_metadata(self: AcpClient, msg: JsonRpcMessage) -> None:
+def _track_metadata(self: AcpClient, msg: JsonRpcMessage, *, between_turns: bool = False) -> None:
+    """Fold one ``_kiro.dev/metadata`` (or compaction-status) frame into the stats.
+
+    *between_turns* is for the readers that run after a turn has billed its
+    ``EVENT_COMPLETE`` (``wait_for_compaction`` and its grace drain). Their
+    credits are held in ``_between_turn_credits`` instead of the stats window,
+    which the next turn's ``carry_over()`` replaces before anything bills it;
+    that next turn adds the held amount once. The caller says which window it
+    reads for, because ``_turn_done`` cannot: ``stream_command`` never clears it.
+    """
     params = msg.params or {}
     # Content-filter refusal envelope. Opt-in by membership (H6): a harness
     # that has not demonstrated the payload does not have its metadata
@@ -140,14 +151,19 @@ def _track_metadata(self: AcpClient, msg: JsonRpcMessage) -> None:
     # kiro streams per-turn billing as meteringUsage entries (unit="credit").
     # Accumulate across the turn's metadata notifications; reset per turn by
     # the AcpPromptStats re-init in _dispatch_events/send_message_stream.
+    credits = 0.0
     metering = params.get("meteringUsage")
     if isinstance(metering, list):
         for entry in metering:
             if isinstance(entry, dict) and entry.get("unit") == "credit":
                 try:
-                    self.last_prompt_stats.credits += float(entry.get("value", 0) or 0)
+                    credits += float(entry.get("value", 0) or 0)
                 except (TypeError, ValueError):
                     pass
+    if between_turns:
+        self._between_turn_credits = getattr(self, "_between_turn_credits", 0.0) + credits
+    else:
+        self.last_prompt_stats.credits += credits
 
 
 def _handle_compaction_status(self: AcpClient, msg: JsonRpcMessage) -> None:
@@ -159,7 +175,7 @@ def _handle_compaction_status(self: AcpClient, msg: JsonRpcMessage) -> None:
     reset cannot be missed by one path. Without it the pre-compaction
     counts survive — and their ``context_tokens_from_usage=True`` flag
     blocks ``_track_metadata`` from applying any fresh percentage — so the
-    dashboard's context meter kept showing the old usage after a compact.
+    dashboard's context meter would keep showing the old usage after a compact.
     """
     params = msg.params or {}
     status = params.get("status", "")
@@ -169,7 +185,7 @@ def _handle_compaction_status(self: AcpClient, msg: JsonRpcMessage) -> None:
     # populated on success but typically empty on failure). Log the full
     # raw params at WARNING so a future occurrence is actually debuggable
     # instead of surfacing only "unknown error" to the user with nothing
-    # to grep for server-side. See Mesh compaction-spam investigation.
+    # to grep for server-side.
     s_type = status.get("type", "") if isinstance(status, dict) else str(status)
     if s_type == "failed":
         if self.memory_mode == "persistent":
@@ -253,9 +269,10 @@ def _codex_compaction_event(self: AcpClient, msg: JsonRpcMessage) -> AcpEvent | 
 
     Gated on ``ACP_BACKENDS_INLINE_COMPACTION``, the set of harnesses whose
     compaction lands INSIDE the prompt turn -- so a harness that earns that
-    membership inherits the translation by joining the set. The MARKER is what
-    actually decides: ``_meta.contextCompaction`` is codex-acp's own, and
-    claude (a member) stamps nothing, so the parser declines its frames.
+    membership inherits the translation by joining the set. The FRAME decides:
+    ``_meta.contextCompaction`` is codex-acp's own marker, and the unmarked 2.2.2
+    shape is read only for ``ACP_BACKENDS_UNMARKED_COMPACTION_PAIR``. claude (a
+    member) sends neither, so the parser declines its frames.
 
     Reached on this class through the dormant codex seam -- a live codex
     session is served by ``AcpRuntime``, whose ``AcpSessionHandle`` carries the
@@ -279,13 +296,24 @@ def _codex_compaction_event(self: AcpClient, msg: JsonRpcMessage) -> AcpEvent | 
     update = params.get("update")
     if not isinstance(update, dict):
         return None
-    status_type = parse_codex_compaction_update(update)
+    status_type = parse_codex_compaction_update(
+        update,
+        self._codex_compaction_pending,
+        allow_unmarked=self.backend in ACP_BACKENDS_UNMARKED_COMPACTION_PAIR,
+    )
     if status_type is None:
         return None
     if status_type != "started" and not self._codex_compaction_pending:
         return None
     logger.info("Compaction status (codex): %s", status_type)
-    self._codex_compaction_pending = status_type == "started"
+    # The start's call id, so an unmarked (2.2.2) terminal can be matched to it.
+    call_id = update.get("toolCallId")
+    if status_type != "started":
+        self._codex_compaction_pending = False
+    elif isinstance(call_id, str) and call_id:
+        self._codex_compaction_pending = call_id
+    else:
+        self._codex_compaction_pending = True
     if status_type == "completed":
         self._compaction_failed_at = None
         self.last_prompt_stats.reset_after_compaction()
@@ -415,7 +443,7 @@ async def wait_for_compaction(self: AcpClient, timeout: float = COMPACT_WAIT_TIM
             status = params.get("status", {})
             s_type = status.get("type", "") if isinstance(status, dict) else str(status)
             if s_type in ("completed", "failed"):
-                self._track_metadata(msg)
+                self._track_metadata(msg, between_turns=True)
                 if s_type == "completed":
                     await self._drain_post_compaction_metadata()
                 # Redact the backend-echoed summary before it reaches callers
@@ -430,7 +458,7 @@ async def wait_for_compaction(self: AcpClient, timeout: float = COMPACT_WAIT_TIM
                     summary = compaction_failure_detail(params)
                 return {"type": s_type, "summary": summary}
         elif msg.is_method(METHOD_METADATA):
-            self._track_metadata(msg)
+            self._track_metadata(msg, between_turns=True)
         else:
             # Don't drop — buffer for later processing
             if msg.method and not msg.id:
@@ -466,7 +494,7 @@ async def _drain_post_compaction_metadata(
         if msg is None:
             continue
         if msg.is_method(METHOD_METADATA):
-            self._track_metadata(msg)
+            self._track_metadata(msg, between_turns=True)
             if (msg.params or {}).get("contextUsagePercentage") is not None:
                 return
             continue

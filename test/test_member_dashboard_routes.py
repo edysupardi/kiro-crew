@@ -109,7 +109,7 @@ async def _client(state=None):
     """A started client that always closes.
 
     An ``async with`` helper rather than an ``@pytest.fixture``, by this repo's
-    convention (see ``test_agent_panel_routes._client``): the pinned pytest-asyncio
+    convention (see ``agent_panel_routes_helpers._client``): the pinned pytest-asyncio
     does not collect async-generator fixtures declared with plain ``@pytest.fixture``.
 
     Closing is not tidiness. A ``TestClient`` owns an aiohttp session AND a listening
@@ -245,6 +245,69 @@ async def test_a_preview_read_with_nothing_staged_is_a_404_the_tab_can_name():
         resp = await client.get(_q("", preview="1"))
         assert resp.status == 404
         assert (await resp.json())["code"] == "no_preview"
+
+
+def _template_at_the_ceiling() -> str:
+    """A second template whose page is exactly the frame's ceiling. Returns the page."""
+    from kiro_crew import dashboard_frame
+
+    head, tail = PAGE + "<script>", "</script>"
+    page = head + "x" * (dashboard_frame.MAX_PAGE_BYTES - len(head) - len(tail)) + tail
+    directory = catalog.builtin_dir() / "big-board"
+    directory.mkdir()
+    manifest = _manifest(id="big-board", title="Big board")
+    (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (directory / "template.html").write_text(page, encoding="utf-8")
+    return page
+
+
+async def test_a_template_page_at_the_frames_ceiling_previews_applies_and_draws(monkeypatch):
+    """The template-folder path at the ceiling, end to end, with the scrub off the loop.
+
+    The read scrubs the stored page before it answers, and near the ceiling that takes
+    hundreds of milliseconds -- so it runs off the event loop, where the pause would
+    otherwise land on every other session's chat.
+    """
+    import threading
+
+    page = _template_at_the_ceiling()
+    loop_thread = threading.current_thread()
+    on_loop: list[bool] = []
+    scrub = routes._safe_body
+
+    def _scrub(body):
+        on_loop.append(threading.current_thread() is loop_thread)
+        return scrub(body)
+
+    monkeypatch.setattr(routes, "_safe_body", _scrub)
+    async with _client() as client:
+        instance.stage_preview(SLUG, template_id="big-board")
+        resp = await client.get(_q("", preview="1"))
+        assert resp.status == 200, await resp.text()
+        preview = await resp.json()
+        instance.apply_preview(SLUG)
+        resp = await client.get(_q(""))
+        assert resp.status == 200, await resp.text()
+        live = await resp.json()
+    assert preview["preview"] is True and page in preview["rendered_html"]
+    assert live["state"] == "live" and page in live["rendered_html"]
+    assert live["template"] == {"id": "big-board", "version": 1}
+    assert on_loop == [False, False]
+
+
+async def test_a_preview_read_the_store_refuses_answers_in_the_stores_words(monkeypatch):
+    """A store refusal on the staged read (a linked session directory raises
+    `InstanceError`) is the route's structured answer, not aiohttp's bare 500."""
+    from kiro_crew.dashboard.handlers import member_dashboard as md
+
+    def _refuse(_slug):
+        raise instance.InstanceError("the session dashboard directory is a link")
+
+    monkeypatch.setattr(md, "_preview_record", _refuse)
+    async with _client() as client:
+        resp = await client.get(_q("", preview="1"))
+        assert resp.status == 500
+        assert (await resp.json())["code"] == "dashboard_failed"
 
 
 # --------------------------------------------------------------------------
@@ -541,7 +604,7 @@ async def test_a_non_owner_cannot_read_a_crewmates_values():
 async def test_the_gateway_registers_exactly_these_paths_without_importing_us():
     """The boot path binds these routes DEFERRED, so the paths are written twice.
 
-    The same property ``test_agent_panel_routes`` pins, for the same reason: the boot
+    The same property ``test_agent_panel_routes_allocation`` pins, for the same reason: the boot
     path may not import an optional subsystem before the socket binds, so it restates
     each path against ``server._deferred`` -- and a restated path can drift. A route
     renamed here and not there would 404 in the gateway while every test above passed.
@@ -1456,7 +1519,7 @@ class TestAStagedPageReachesOnlyItsOwnersPreview:
 
         body = self._source(member_dashboard._serve)
         decided = 'staged_only = request.query.get("preview") == "1" and not package_slug'
-        guarded = "if not package_slug and not staged_only:"
+        guarded = "if not staged_only:"
         assert decided in body, "the preview decision is no longer taken from the query alone"
         assert guarded in body, "the binding resolution is no longer guarded by that decision"
         assert body.index(decided) < body.index(guarded), (
@@ -1507,10 +1570,10 @@ def _package(**over) -> dict:
             }
         },
         "view": {
-            "blocks": [
-                {"id": "lead", "type": "stat", "fields": ["open_prs"], "title": "Open"},
-                {"id": "note", "type": "list", "fields": ["headline"]},
-            ]
+            "html": (
+                '<h2>Open</h2><p data-dashboard-field="open_prs"></p>'
+                '<p data-dashboard-field="headline"></p>'
+            )
         },
         "theme": {"tokens": {"--accent": "oklch(0.7 0.15 150)"}},
     }
@@ -1518,77 +1581,36 @@ def _package(**over) -> dict:
     return package
 
 
-def _stage_package(package: dict | None = None) -> None:
-    """Stage a composed package for this crewmate, the way a save does."""
-    from kiro_crew.artifact_store.dashboard_package import canonical_package_content
-
-    instance.stage_package_preview(
-        SLUG, content=canonical_package_content(json.dumps(package or _package()))
-    )
-
-
 class TestTheStagedComposedPage:
-    """``dashboard_save`` stages, and on THIS base the staged page cannot be read.
+    """A composed package is never staged: ``dashboard_save`` puts it in force.
 
-    Nothing here renders a package into a document, so the ``?preview=1`` read
-    REFUSES one with ``package_display_pending`` rather than handing back a body the
-    tab cannot draw. These cases pin that refusal, pin that a staged template still
-    reads back through the same route, and pin that nothing was installed -- so the
-    display change that adds the drawing has a contract to replace.
+    So the ``?preview=1`` read only ever serves a staged TEMPLATE. A staging file an
+    older gateway left holding a package payload reads as nothing staged.
     """
 
-    async def test_staging_installs_nothing_the_ordinary_read_can_see(self) -> None:
-        """The gate's whole point: the page in force does not move on a save."""
-        _stage_package()
-        async with _client() as client:
-            body = await (await client.get(_q(""))).json()
-        assert "preview" not in body
-        assert body["state"] == instance.STATE_EMPTY
-        assert body["instance_version"] == 0
-
-    async def test_the_preview_read_of_a_staged_package_is_refused(self) -> None:
-        """409 ``package_display_pending``, and the staged page is left alone.
-
-        THE REASON THERE IS NO LINK IN THE SAVE REPLY. A body with declarations and
-        no ``rendered_html`` fell through the tab's promote check to its "could not
-        be loaded" card, so the person was asked to approve a page they were shown
-        an error instead of. Refusing here is what makes the save's "describe it in
-        words" instruction true rather than a workaround.
-
-        Remove the ``staged_package_preview`` branch in ``api_member_dashboard`` and
-        this reddens: the read falls through to ``_preview_record``, whose
-        ``staged_preview`` answers ``None`` for a package payload, and the route
-        answers 404 ``no_preview`` instead.
-        """
-        _stage_package()
-        async with _client() as client:
-            resp = await client.get(_q("", preview=1))
-            body = await resp.json()
-        assert resp.status == 409, body
-        assert body["code"] == "package_display_pending", body
-        # A READ, so the page a person may still be asked about survives it.
-        assert instance.staged_package_preview(SLUG) is not None
-
-    async def test_a_store_fault_in_the_package_read_answers_like_every_other(
-        self, monkeypatch
+    async def test_a_package_left_staged_by_an_older_gateway_is_nothing_to_preview(
+        self,
     ) -> None:
-        """The sibling of the apply's precheck fix, at this route's own new call.
+        from kiro_crew.artifact_store.dashboard_package import canonical_package_content
 
-        ``staged_package_preview`` reaches ``instance_dir``, whose link guard raises
-        ``InstanceError`` -- not an ``OSError``, so the store call does not catch it.
-        Unguarded, this route answered an unhandled 500 instead of the body it gives
-        every other store fault. Drop the ``try`` around that call and this reddens.
-        """
-
-        def _boom(_slug: str) -> None:
-            raise instance.InstanceError("a linked dashboard directory is refused")
-
-        monkeypatch.setattr(instance, "staged_package_preview", _boom)
+        directory = instance.instance_dir(SLUG)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "preview.json").write_text(
+            json.dumps(
+                {
+                    "schema": instance.SCHEMA_VERSION,
+                    "slug": SLUG,
+                    "package_content": canonical_package_content(json.dumps(_package())),
+                    "staged_ms": instance._now_ms(),
+                }
+            ),
+            encoding="utf-8",
+        )
         async with _client() as client:
             resp = await client.get(_q("", preview=1))
             body = await resp.json()
-        assert resp.status == 500, body
-        assert body["code"] == "dashboard_failed", body
+        assert resp.status == 404, body
+        assert body["code"] == "no_preview", body
 
     async def test_a_staged_template_still_answers_its_own_preview(self) -> None:
         """Both readers answer None for the other's payload, so one page comes back."""

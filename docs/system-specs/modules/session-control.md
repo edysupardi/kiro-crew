@@ -18,7 +18,7 @@ unreachable in production because the caller's `X-Internal-Secret` is ignored.
 
 | Tool | Route | What it does |
 |------|-------|--------------|
-| `session_create` | `POST /api/session-control/create` | Open a new, empty session in the caller's workspace, optionally filed into a sidebar folder at creation and pinned to a `model` / `reasoning_effort`; either omitted inherits the dispatching crewmate's worker pair, else its own pair, else the default. Before any gate, a title is refused with `invalid_title` (400) under `session_rename`'s character rules (control, text-direction and non-allowed format characters, U+2800 anywhere, no visible character), then scrubbed with `_scrub_text` and cut to 200 characters; a cut result that shows nothing is refused the same way, and a blank title is no title |
+| `session_create` | `POST /api/session-control/create` | Open a new, empty session in the caller's workspace, optionally filed into a sidebar folder at creation and pinned to a `model` / `reasoning_effort`; either omitted is filled from the dispatching mate's worker pair, else its own pair (a copy made at creation), else the default. Before any gate, a title is refused with `invalid_title` (400) under `session_rename`'s character rules (control, text-direction and non-allowed format characters, U+2800 anywhere, no visible character), then scrubbed with `_scrub_text` and cut to 200 characters; a cut result that shows nothing is refused the same way, and a blank title is no title |
 | `session_fork` | `POST /api/session-control/fork` | Open a new session that CARRIES a copy of a source session's transcript — the caller's own by default — the way the dashboard's Fork button does; optionally titled, filed, and cut at a fork point. The title meets `session_create`'s title rules before any gate (`invalid_title`, 400; scrubbed, cut to 200 characters, a cut result that shows nothing refused, a blank title is no title) |
 | `session_stop` | `POST /api/session-control/stop` | Stop another session's in-flight turn |
 | `session_end_wait` | `POST /api/session-control/end-wait` | Wake a session the caller CREATED from the `wait` tool early, keeping its turn; any other target is refused `not_creator`, for every caller class |
@@ -71,7 +71,8 @@ slot and folder routes that file the new session when `folder` is given.
 internal allowlists. `SESSION_CONTROL_TOOLS` is read off the rows
 (`TABLE.names("strict")`), which is what keeps the gate, the channel containment
 list and the registration tests' pinned set naming one set. A new session verb is
-a new row in `_session_tools()`, its body, and its schema in
+a new row in `_session_tools()` (`kiro_crew.mcp_dashboard_session_tools`), its body
+(`kiro_crew.mcp_dashboard_session_runs`), and its schema in
 `MCP_DASHBOARD_SCHEMAS`.
 
 **Two verbs here write into another session's conversation: `session_send` and
@@ -83,6 +84,18 @@ sharpest verb and is bounded accordingly: the body is redacted through
 session <caller> via <verb>]` envelope so the target's transcript can never
 render it as something the person typed, and channel agents are blocked from it
 outright.
+
+A send from a work-ledger conductor to the worker it bound also hands that
+worker's waiting item back (`work_ledger.read_send_handback` before delivery,
+`stamp_send_handback` after). It writes only when the target's binding resolves
+to the caller, the item is `blocked` or `question` with no `reason` (a report
+with `approval` / `needs_human` waits on a person), and no `decide` has
+answered its last report yet. Under the board lock it re-reads the item and writes only
+if that report is unchanged, so a report filed while the message was in flight
+stays the conductor's move. The decision is the message redacted through
+`safe_work_fields`, clipped to `MAX_DECISION_CHARS` with a marker, and recorded
+through the same `decide` pipeline as `work_ledger_record`. The stamp is
+best-effort: a skip or failure never fails a delivered send.
 
 `session_broadcast` is not a second delivery path. It resolves an audience and
 then calls `send_to_target` once per target, so every bound above holds per
@@ -277,6 +290,13 @@ wider blast radius — it names a conversation on a network surface — and its 
 re-runs the outbound recipient check with the principal the channel authorized on
 inbound before anything is sent (see [messaging](messaging.md#a-busy-resumed-dashboard-session-takes-the-slots-own-machinery-discord)).
 
+A send whose caller is the target's own creator (`_created_by` equals the
+caller's slot key) also sets the target's in-memory `_reports_to_creator`. With
+`_lineage_minted` it is the live witness the crewmate worker report reads
+([crew-mode](crew-mode.md), "A worker reports back on its own"): a child
+restored after a restart reports to its crewmate again once that crewmate sends
+it something. It is never persisted and grants no access.
+
 **`steer: true` asks for a third outcome on a busy target.** Instead of waiting
 for the running turn, the message cuts into it (`steer_into_running_turn`, the
 same path the dashboard composer's mid-turn steer uses), so a caller watching a
@@ -370,9 +390,10 @@ window and replaces it with a narrower one: the steer RPC suspends on
   second read, so a retarget landing between validation and record would be
   recorded as the admitted audience without having been judged, and the publisher
   would find live and recorded equal and publish the private read into the new
-  room. Written only INSIDE a dashboard-runner turn -- under the identity
-  `_run_chat` publishes on the slot at turn start (`_active_turn_session_key`)
-  and retires in the same teardown that empties this record -- because that
+  room. Written only INSIDE a dashboard-runner turn -- under the identity the
+  turn's admission phase (`_turn_admit`, in `dashboard/chat_turn/turn_admission.py`)
+  publishes on the slot at turn start (`_active_turn_session_key`) and `_run_chat`'s
+  `finally` retires in the same teardown that empties this record -- because that
   teardown is the only thing that clears it: a channel-born session's own turns
   run in the messaging driver, which sets no such marker and runs no such
   teardown, so an owner-DM conductor calling these tools from its channel turn
@@ -501,8 +522,12 @@ caller's own store exactly as an unshadowed template child does (see "A created
 worker receives one execution identity"). On an install with no shadowing member
 the template kind resolves exactly what the bare name resolves — the resolver
 skips only the alias lookup — so the goal conductor's charter and the
-goal-conductor skill always pass it when they dispatch `kirocrew-worker`, and no
-conductor meets the refusal first. There is no `member` kind on this route: a bare
+goal-conductor skill always pass it when they dispatch `kirocrew-worker`. The
+route does not rely on the caller remembering: a bare `agent: "kirocrew-worker"`
+with no kind is read as `agent_kind: "template"` (`_STOCK_WORKER_AGENT` in
+`session_create.py`), so a model that drops the kind still gets the template on
+its own store instead of the refusal. That default covers the stock worker's
+name only; every other crew member named bare still resolves name-first. There is no `member` kind on this route: a bare
 name already selects the member, so the value would only restate that
 resolution. The kind is selection input, never authority, and every gate on this
 route still applies. A stated kind requires `agent` (`agent_kind_requires_agent`,
@@ -555,62 +580,85 @@ the whole create with `model_rejected`; a level outside the five fails it with
 the birth metadata line (`model`, `reasoning_effort`) so an idle newborn keeps
 them across a restart.
 
-**Omitted, each takes the dispatching crewmate's matching explicit pin.** A
-crewmate with a model or effort pin passes that value to a worker it opens unless
-the worker fields say otherwise. An empty crewmate pin leaves that half unpinned,
-so the worker's selected agent or the global default decides. `create_session`
-resolves the caller's member record
+**Omitted, each takes the dispatching mate's matching explicit pin.** A
+mate with a model or effort pin passes that value to a worker it opens unless
+the worker fields say otherwise. The value is copied at creation and pinned on
+the worker's slot the way an explicit one is, so a later edit to the mate's
+profile does not reach a worker already open. An empty mate pin leaves that
+half unpinned, so the worker's selected agent or the global default decides.
+`create_session` resolves the caller's member record
 (`_dispatching_crewmate`: the caller's protected execution record when it names
 a `member` — by persisted id, else by selection name — or, for a slot with no
 record, the slot's agent name as `resolve_crew_identity` reads it) and fills
 what the call left unsaid from `worker_session_defaults(record)`: the record's
 `worker_model` / `worker_reasoning_effort` when set, else its own `model` /
 `reasoning_effort`. `worker_model` is read raw, so `"auto"` is a real pin there
-(workers on the backend default while the crewmate stays on a costly model),
-where the crewmate's own `model` folds it to inherit. The crewmate's own effort
-carries over only while the workers run the crewmate's own model: with
+(workers on the backend default while the mate stays on a costly model),
+where the mate's own `model` folds it to inherit. The mate's own effort
+carries over only while the workers run the mate's own model: with
 `worker_model` set, or a `model` named on the call, the only effort a worker
 takes is `worker_reasoning_effort`, so a `max` chosen for an opus conductor never
 reaches an `auto`, haiku or explicitly named worker model. With none pinned the
 child's first turn resolves its effort as any session does
-(`resolve_session_effort`: the child's own crew pin when it runs as a crewmate,
+(`resolve_session_effort`: the child's own crew pin when it runs as a mate,
 else `agent.reasoning_effort`, else the model default), which is what the profile
 card's "No level set" names. An inherited pin is also dropped when it cannot
 follow the worker onto its harness (`_inherited_pin_foreign_to_child`): the
 crewmate's thread runs on `agent.member_acp_backend` and its own `model` was
-validated there, while the non-member child runs on `agent.acp_backend`, so that
-pin is dropped when the two harnesses disagree on model-id namespace; the
-profile's explicit `worker_model` is validated for the worker's harness
-(`PUT /api/agents/{name}` judges it against `agent.acp_backend`) and crosses
-freely. Either pin is dropped when the child's namespace advertises a list it is
+validated there, while a child that is not the crewmate's own worker runs on
+`agent.acp_backend`, so that pin is dropped when the two harnesses disagree on
+model-id namespace. The crewmate's own worker runs on the crewmate's backend
+(`mate_worker.crewmate_worker_backend`; crew-mode.md, "The worker runs on its
+crewmate's backend"), so its pins are judged there; the profile's explicit
+`worker_model` is validated for that harness (`PUT /api/agents/{name}`) and
+crosses freely. A conductor's hand-off whose worker backend cannot carry the
+worker's kit is refused `worker_kit_harness_unsupported` before anything is
+allocated. Either pin is dropped when the child's namespace advertises a list it is
 not on while another harness claims it; `"auto"` always passes. When the
-crewmate's own model is dropped, the crewmate's own effort that rode along for
+mate's own model is dropped, the mate's own effort that rode along for
 it is dropped too; an explicit `worker_reasoning_effort` stays. A caller whose record is a
-template — a dispatched worker running on its crewmate's store — is not a
-crewmate and its own children inherit nothing (an id-less member's worker keeps
+template — a dispatched worker running on its mate's store — is not a
+mate and its own children inherit nothing (an id-less member's worker keeps
 `member` as its selection, so there the template, read against
-`member_template_id`, is what tells it apart); a caller that is not a crewmate,
-or a crewmate with nothing set, leaves the slot on the agent's or the global
-default, exactly as before. Nor does a child that is itself a crewmate inherit:
+`member_template_id`, is what tells it apart); a caller that is not a mate,
+or a mate with nothing set, leaves the slot on the agent's or the global
+default, exactly as before. Nor does a child that is itself a mate inherit:
 an explicit `agent` that selects a member runs that member's own profile through
 the crew-pin tier, and a copied pin would outrank it as a per-session pick. An
 explicit argument always wins. An inherited model runs the same guard an
 explicit one does (`_model_pin_refusal`, the picker's own), but a refusal there
 is DROPPED rather than raised: a profile pin goes stale (delisted, display-only,
-outside the account's entitlement, or an id only the crewmate's own harness serves) without
-anyone looking at it, and a hard failure would stop every worker the crewmate
+outside the account's entitlement, or an id only the mate's own harness serves) without
+anyone looking at it, and a hard failure would stop every worker the mate
 opens until someone edited the profile or named a model on every call. The child
 then starts on the default, the reply carries `inherited_model_dropped: true`
 (the tool reply says so in words), and the SEL record names the refused id. An
 explicit model the guard refuses still fails the create with `model_rejected`.
-The reply names which of the two came from the profile (`inherited`), as does the
-create's SEL record. The decision is
+The reply names which of the two were copied from the profile (`inherited`), as
+does the create's SEL record; the tool reply calls them copied at creation, not
+inherited, since the worker does not follow later profile edits. The decision is
 [rfc-worker-model-inheritance](../../request-for-change/rfc-worker-model-inheritance.md).
 
-The pair is set from the crewmate's Profile card (**Worker model** / **Worker
+The pair is set from the mate's Profile card (**Worker model** / **Worker
 reasoning effort**, `CrewProfileSettings`), written through
 `PUT /api/agents/{name}` under the crew pin's own validators and shipped on
 `GET /api/members` (not on `GET /api/agents`: the crew editor never shows them).
+
+`session_create` also takes an optional `autocompact_pct`: the compaction
+threshold the child starts with, set as the same per-session override the
+context meter's "Auto-compact at" slider sets. It is checked before anything is
+allocated, and before the dry-run return, so the folder preflight refuses it too.
+The finite and range check is the slider route's own (`parse_autocompact_pct`):
+a value outside `AUTOCOMPACT_PCT_MIN` to `AUTOCOMPACT_PCT_MAX`, infinity
+included, fails the whole create with `pct_out_of_range`, NaN or an integer too
+large for a float with `pct_not_finite`, and a non-number with
+`invalid_field_type`. An accepted value is set on the slot and rides the birth
+metadata line, which restore reads to re-seed the live gate. The session
+manager's override map is seeded once that write lands, and only while the slot
+is still the live one under its key. The write and the seed both run under the
+slider's per-transcript `_autocompact_txn_lock`, so a slider move on the newborn
+orders after them. Omitted, the child follows its agent's default, else the
+global `session.autocompact_pct`.
 
 ### `session_fork`: a created child that carries a transcript
 
@@ -708,6 +756,23 @@ No tail fork (`direction` is fixed to `head`); the human route keeps it behind
 it is `session_send`'s job — the same split that keeps `session_create` from
 being the front half of a delivery.
 
+**A parent with no recorded execution identity.** A legacy slot saved before
+execution carriers were recorded has only its `agent` name and `agent_kind`
+stamp. `chat_fork._fork_execution_context` rebuilds the child's carrier the way
+`resolve_session_agent_bindings` resolves the parent's own turns: a stored
+skill-view name is first mapped back to its source agent with `_source_of_view`,
+then `resolve_agent_identity(cfg, agent, selection_kind=agent_kind)` decides
+whether the name is a mate alias. An alias gets the member carrier
+`resolve_member_execution` writes for an owner's create, with that mate's
+template, model pin and store, so `default` launches `kirocrew` rather than a
+template called `default`. Any other name, and any slot stamped `template`, gets
+a template carrier under the name as written, and an empty name falls back to
+`kirocrew`. The fork is refused with `store_unavailable` when the recorded store
+or the mate's resolved store is private V2 memory, because no carrier proves
+the parent ran on it, and when the resolved store differs from a store the
+parent recorded. `agent_kind` is one of the identity fields the fork re-reads
+to detect a parent changed mid-fork.
+
 ### What a created child inherits
 
 Creation copies two different kinds of state, and the split is deliberate.
@@ -715,14 +780,23 @@ Creation copies two different kinds of state, and the split is deliberate.
 **Identity** — the child is created in the caller's workspace (the memory
 boundary; a child left in `default` would be both a boundary crossing and
 unaddressable by its own creator), inherits the caller's agent when none is
-named, takes that workspace's project directory as its cwd, and is attributed to
+named -- except a crewmate's own chat running on the mate conductor, whose
+child is always its WORKER whatever `agent` it passes, opened as the template
+`kirocrew-mate-worker` on the crewmate's own workspace, store and member
+identity (`_hands_off_to_own_worker` over `_conducts_for_a_worker`, read from
+the caller's execution record through `_dispatching_crewmate`; the one
+exception is a name-first `agent` naming another `config.agents` row, which
+keeps its own resolution and so stays refused as a cross-workspace peer; a
+worker it already opened is a template
+selection, so the worker's own unnamed children inherit the worker; see
+crew-mode.md, "Conductor and worker") -- takes that workspace's project directory as its cwd, and is attributed to
 the caller via `created_by` so the per-creator slot ceiling is countable. The
 caller's ACP session id is also frozen onto the child at this mint
 (`_created_by_sid`), from the live caller handle, so the child's `session/opened`
 lineage cites the creator that was live when it was made rather than a
 replacement that may take the creator's slot before the child's first turn. The
 id is backend-authored, so it is bounded where it is retained: one past
-`MAX_ACP_SESSION_ID_LEN` (`kiro_crew/validation.py`, the constant every store of a
+`MAX_ACP_SESSION_ID_LEN` (`kiro_crew/validation_parts/input_bounds.py`, the constant every store of a
 backend session id shares) is dropped at mint, never truncated -- the sid
 is optional and absent is a legal record. The mint also sets `_lineage_minted`, the
 in-memory witness that THIS process stamped both fields; neither the witness nor
@@ -734,7 +808,11 @@ records (see `crew-log-emitter.md`).
 trusted operator's dispatched worker does not stall on a prompt nobody is
 watching. This is the posture `parent_trusted` already gives a `spawn_run`
 subagent, which reads the parent's stored `"auto"` policy, so the same delegation
-behaves the same whether or not it gets a sidebar tab.
+behaves the same whether or not it gets a sidebar tab. A crewmate's own
+worker (the conductor's hand-off, `_hands_off_to_own_worker`) takes its
+posture from the crewmate's record instead: the Profile Permissions
+`approval_mode`, seeded through `crewmate_approval.seed_for_turn`, whatever the
+thread itself holds at that moment.
 No session-store write happens at creation: the child has no ACP session yet
 (`set_approval_policy` no-ops on a missing session), and `chat_runner` already
 derives the persistable policy from `_trust` on every session create/resume, so
@@ -758,11 +836,13 @@ Nothing about trust is persisted at birth. The birth metadata carries
 `tab_id`, `origin`, `created_at`, `workspace`, `agent`, `project`, `title`,
 `memory_mode`, and `folder_id` / `created_by` / `model` / `reasoning_effort` when
 set — no trust field — so a restart returns the child to interactive along with
-its creator.
+its creator. A crewmate's conductor chat and its workers are the exception: they
+are seeded again from the crewmate's record at the start of their next turn
+(see crew-mode.md, "Conductor and worker").
 
 The create's SEL record carries `agent`, `folder_id`, `model` and
 `reasoning_effort` (each empty when none was pinned), `inherited` (which of the
-two the dispatching crewmate's profile supplied, `""` when neither),
+two the dispatching mate's profile supplied, `""` when neither),
 `inherited_model_dropped` (the profile model the guard refused and the create
 dropped, redacted, `""` when none), and what the
 child was born with: `inherited_trust` and `inherited_trust_reads`, present on both
@@ -811,7 +891,7 @@ that is out of bounds is visible after the fact even though nothing happened.
 | Caller is channel-linked (`linked_session_key` set) | 403 | The exfiltration direction: a linked caller's conversation IS a channel thread, so a read would hand a private dashboard transcript to that channel's readers. `CHANNEL_AGENT_BLOCKED_TOOLS` keys on the agent identity; a linked slot is a second route to the same surface. **Two exceptions:** a `cron:<job_id>` link, which names the job's own run transcript and republishes to nobody; and a 1:1 DM whose only human is the configured owner (`owner_dm_refusal` answering `""`) — see "Owner-DM channel callers" below |
 | Caller's own session is no longer open | 403 | Nothing to attribute the operation to |
 | Caller changed workspace while a creation was in flight | 403 | Creation resolves the workspace's project directory off-loop, so it suspends between authorizing the caller and allocating the slot. Both decisions that read the caller's workspace -- the memory boundary the child inherits, and whether the answering agent is bound to that workspace -- are invalidated by a move, and re-deciding the binding here is not available: it needs a config load, which must not run on the event loop |
-| Agent that would answer is bound to another workspace | 403 | `agent_workspace_mismatch`. The child runs in the caller's workspace, so an agent whose own binding names a different one would carry that workspace's memory into it. Checked on whatever answers, an omitted agent included (it resolves to the default template). **One inheritance:** an explicitly named TEMPLATE (`ResolvedBindings.selection_kind == "template"`, a passthrough or the default template, never a `config.agents` row) passes when the caller has an execution record and is the crew member whose own declared workspace (`config.workspaces`) is the caller slot's workspace (`_caller_member_workspace`). A template has no workspace binding -- `resolve_agent_bindings` files every template session under `default_workspace` -- and the template arm already binds the child to the caller's own store, so the child runs on the caller's workspace, project directory and store, under the template persona. Without it every crew member created on its own `member-<slug>` workspace (#19230) was refused `agent_workspace_mismatch` for `agent="kirocrew-worker"`, while members created before #19230 (workspace `default`) were not. Still refused: a crew MEMBER bound elsewhere (its store would cross), a caller with no record (the child would fall to the default store), and any non-member caller, whose template child has no store of its own in that workspace |
+| Agent that would answer is bound to another workspace | 403 | `agent_workspace_mismatch`. The child runs in the caller's workspace, so an agent whose own binding names a different one would carry that workspace's memory into it. Checked on whatever answers, an omitted agent included (it resolves to the default template). **One inheritance:** an explicitly named TEMPLATE (`ResolvedBindings.selection_kind == "template"`, a passthrough or the default template, never a `config.agents` row) passes when the caller has an execution record and is the crew member whose own declared workspace (`config.workspaces`) is the caller slot's workspace (`_caller_member_workspace`), or whose own store the caller runs on: a crewmate's worker, a template record that keeps the crewmate's id and store (`_store_s_crewmate`), so its own child runs where it does. A template has no workspace binding -- `resolve_agent_bindings` files every template session under `default_workspace` -- and the template arm already binds the child to the caller's own store, so the child runs on the caller's workspace, project directory and store, under the template persona. Without it every crew member created on its own `member-<slug>` workspace (#19230) was refused `agent_workspace_mismatch` for `agent="kirocrew-worker"`, while members created before #19230 (workspace `default`) were not. Still refused: a crew MEMBER bound elsewhere (its store would cross), a caller with no record (the child would fall to the default store), and any non-member caller, whose template child has no store of its own in that workspace |
 | Named agent does not resolve to a configured one | 403 | The resolver falls back to the default agent, which passes the workspace check because it is the caller's own default -- so no boundary is crossed, but the created session would store and advertise a name that is not what answers. `ResolvedBindings.requested_resolved` states that contract for callers that store the requested name. Refused rather than rewritten to the effective agent: nothing exists yet, so a corrected name costs one retry, whereas an existing slot keeps its stored name verbatim so a momentarily stale resolution cannot permanently rebind it |
 | Caller may not bind a child to the selected member's private store | 403 | `memory_delegation_denied`; one check, on the route every branch of agent resolution has already produced, before slot allocation. Two admissions: the store is the caller's OWN, which requires this process's vouched identity and the caller's durable record to agree, or the caller's delegation lineage is not fenced (`_delegation_lineage_fenced`: an owner-rooted chain is admitted; a cron-, channel- or member-rooted chain, or a broken one, is fenced). Same-store workers remain allowed; unfenced global callers retain member assignment. See "A created worker receives one execution identity" |
 | Caller changes history key, agent or memory store during creation | 400 | `caller_memory_changed`; the live caller must still match the identity checked before awaited preparation |
@@ -1209,9 +1289,12 @@ itself opened. Member sessions also bypass the provider warm pool
 default backend, so a warm hit would skip both the member backend route and
 the mount. The member backend is `agent.member_acp_backend` (default `kas`),
 and requires a wire-capable backend (`ACP_BACKENDS_MEMBER_DISPATCH`: the
-claude seam, KAS, codex, opencode, goose, deepseek and pi); kiro-cli v2 reads its template from disk and
-exposes no per-session channel, so a member session on it runs as plain chat —
-the tools are simply not mounted, never mounted-and-refused. Codex qualifies
+claude seam, KAS, codex, opencode, goose, deepseek and pi). A stored `kiro`
+there reads as KAS at config load (`_read_backend_choice`), because crewmates
+run on KAS as their Kiro backend. kiro-cli v2 reads its template from disk and
+exposes no per-session channel, so a member session that still lands on it (the
+selection gate's floor) runs as plain chat — the tools are simply not mounted,
+never mounted-and-refused. Codex qualifies
 because `providers/mirrors/codex.py` already gives it a per-session array and
 its routing is `SESSION_CONFIG`, a member of `ENFORCED_ROUTINGS`, so
 `_apply_session_permission_routing` refuses the session outright when
@@ -1574,7 +1657,7 @@ facts, and any it cannot establish answers **false**.
    mirror.
 
    **The origin does not survive a gateway restart, and the exemption goes with
-   it.** `set_origin_link` holds the record in memory by design (`session.py`),
+   it.** `set_origin_link` holds the record in memory by design (`session_parts/links.py`),
    while the slot and its mirror are persisted and the slot is re-surfaced at boot.
    So between a restart and the owner's next channel message this clause is the one
    that fails while the other three hold: a monitor-loop cycle or a turn taken in
@@ -1587,7 +1670,7 @@ facts, and any it cannot establish answers **false**.
    three gates name it (`ORIGIN_NOT_ON_RECORD`) and say what clears it, rather than
    reporting a channel link the caller cannot do anything about. Making the
    exemption survive a restart means giving the origin (or an equivalent durable
-   record of the conversation a session was born in) persistence in `session.py` —
+   record of the conversation a session was born in) persistence in `session_parts/links.py` —
    out of scope here, since that store serves the auto-compact notice, whose own
    reason for being in memory is that a restart takes the live session with it.
 
@@ -1763,7 +1846,7 @@ marker being the runner's own; and that a turn whose only call is `create_sessio
 records its audience at the creator gate; and that a Telegram allow-list entry that
 is not a positive integer (a group id, zero, text) is never attested as a DM peer,
 so a tab mirrored to such a conversation stays refused with the real transport. The crew-log
-opener is pinned in `test/test_discord_mirroring.py` and `test/test_telegram.py`: a DM turn
+opener is pinned in `test/test_discord_mirroring.py` and `test/test_telegram_link_mirror.py`: a DM turn
 followed by a `work_ledger_record` write against the real writer lands, and the
 resumed-session path opens nothing.
 
@@ -1851,7 +1934,7 @@ one session key, so neither can be aimed at), gets `ok: true, ended: false` with
 an `info` string and nothing is parked. The SEL audit detail records
 `requested`, `not_waiting` or `contested`. Channel agents are blocked from the
 verb, and it is withheld from the conductor and member auto-approve grants; see
-the comment on `_CONDUCTOR_DASHBOARD_GRANTS` in `agent.py`.
+the comment on `_CONDUCTOR_DASHBOARD_GRANTS` in `agent_parts/spec_grants.py`.
 
 ## Stopping is safe to re-send
 
@@ -2107,7 +2190,7 @@ that agent's `allowedTools` — naming individual tools leaves the session verbs
 `_mcp_pattern` maps a bare `@server` entry to a one-level glob and
 `is_tool_in_allowlist` checks `@server` before `@server/<tool>`. The shipped
 conductor is in the second class for the verbs in `_CONDUCTOR_DASHBOARD_GRANTS`
-(`agent.py`: the folder tools, `session_create`, `session_read_message` and
+(`agent_parts/spec_grants.py`: the folder tools, `session_create`, `session_read_message` and
 `session_status`), which is its stated operating model: its patrol
 loop runs with nobody at the keyboard and must not block on an approval no one is
 there to give. An operator who wants folder tools without session control names the

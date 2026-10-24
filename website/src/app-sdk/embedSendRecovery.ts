@@ -34,6 +34,9 @@
  * carries A's user's text; app B mounting an embed for the same slot must not
  * drain it -- B would render A's composer text and delete A's only copy.
  */
+import type { PasteBlock } from '../utils/pasteTokens'
+
+import type { HostSendProof } from './embedSendTails'
 
 export interface PendingEmbedRecovery {
   /** The transcript-tail row to show: a failure, or an unconfirmed notice. */
@@ -41,6 +44,8 @@ export interface PendingEmbedRecovery {
     role: 'error' | 'notice'
     content: string
     sendId: string
+    /** See `SendTail.hostProof`. */
+    hostProof?: HostSendProof
   }
   /** The composer text to hand back, as typed. Absent for a chip send, which
    *  never consumed the draft. */
@@ -48,6 +53,9 @@ export interface PendingEmbedRecovery {
   /** The staged attachment paths to hand back with the text. Absent when the
    *  send carried none, and for a chip send. */
   restoreFiles?: string[]
+  /** The collapsed pastes behind `restoreText`'s tokens, handed back as chips.
+   *  Absent when the send expanded none, and for a chip send. */
+  restorePastes?: PasteBlock[]
 }
 
 /** The parking address: one app's embeds for one slot. `app` is the manifest

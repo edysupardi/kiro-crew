@@ -47,9 +47,10 @@ Instructions, examples, and reference material that the agent reads when this sk
 | `name` | No | Display name; the loader uses the directory-relative path when it is absent. |
 | `description` | No | Summary used in skill listings; the loader falls back to the directory-relative path. |
 | `always` | No | `true` to inject full content every eligible session. |
-| `triggers` | No | Comma-separated phrases. A positive phrase matches when at least 70% of its words appear in the user text. Prefix with `!` for a negative trigger; every negative-trigger word must appear to exclude the skill. |
+| `triggers` | No | Comma-separated phrases. A positive phrase matches when at least 70% of its words appear in the user text. Case is ignored. Prefix a phrase with `=` to match it exactly as written, for a name that is also an ordinary word: `=Word` fires on "Word" but not on "word". Prefix with `!` for a negative trigger; every negative-trigger word must appear to exclude the skill. |
 | `inject_on_trigger` | No | Defaults to `true`. For non-project skills, `false` contributes a one-line pointer instead of the full body. Trusted project skills always inject their body. |
 | `repo_scope` | No | Restricts injection to a session whose active project or an ancestor contains the specified relative path. |
+| `app` | No | The name of the app this skill belongs to, as its `app.json` spells it (`ops-mission-control`, not the display name). While that app is disabled the skill is withheld everywhere, as the app's own bundled skills are. Needed only by an app skill shipped outside its app's folder; ignored on a trusted project skill. |
 
 `SKILL.md` must be UTF-8 text; a UTF-8 byte-order mark is accepted. A file in any
 other encoding (for example UTF-16 from PowerShell) is skipped, with one log
@@ -76,7 +77,7 @@ Kiro Crew ships with built-in skills that are synced from the packaged skills di
 ## Skill Sources and Priority
 
 1. `~/.kiro/crew/skills/` — global skills.
-2. `skills.extra_paths` — read-only extra directories; a global skill wins on a duplicate name.
+2. `skills.extra_paths` — read-only extra directories; a global skill wins on a duplicate name. Edit them in Settings → Skills → Extra skill paths: one path per line, and spaces around a path and blank lines are ignored (order and duplicates are kept). The list is saved when you leave the field and applies without a restart; a path that does not exist or is not allowed is skipped, not rejected. From a terminal, `kirocrew config set skills.extra_paths '["/opt/skills"]'` works too; if your shell mangles the quotes (Windows PowerShell does), pass the JSON as Base64 in one attached argument: `kirocrew config set skills.extra_paths --value-base64=WyIvb3B0L3NraWxscyJd`.
 3. `<active-project>/.kiro/skills/` — loaded last, only when project skills are enabled and the user has granted that exact project directory trust.
 
 The startup sync also copies `$KIROCREW_PROJECT_DIR/skills/` and packaged built-in skills into the global directory, preserving newer user files unless the source is newer.

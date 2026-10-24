@@ -34,6 +34,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+# Imported before any test here patches ``kiro_crew.sel.sel``. The gateway binds
+# ``sel`` by name at import, and ``_resolve_permission`` reaches it lazily
+# (``hook_runtime.gate_tiers``); a first import under the broken-factory patch
+# would keep that factory for every later test in the same worker.
+import kiro_crew.slack.gateway  # noqa: F401
 from kiro_crew import llm_helpers
 from kiro_crew.hooks import ToolHookResult
 from kiro_crew.llm_helpers import ToolApprovalPolicy, _resolve_permission
@@ -44,6 +49,7 @@ from kiro_crew.providers.base import (
     EVENT_TEXT_CHUNK,
     LLMEvent,
 )
+from kiro_crew.testing.wait import async_wait_until, await_until
 
 _GENERIC = "User denied tool execution"
 _TAG = "[Kiro Crew host notice]"
@@ -323,10 +329,7 @@ async def test_interactive_rejection_still_audits_before_the_wire(monkeypatch):
     )
     # The scan runs off-loop (asyncio.to_thread) before the callback, so give
     # the hop real time rather than a fixed number of loop turns.
-    for _ in range(300):
-        await asyncio.sleep(0.01)
-        if provider.calls:
-            break
+    await async_wait_until(lambda: bool(provider.calls))
     assert provider.calls == ["reject"]
     assert audited == ["rejected"], "the user's no reached the pipe before the audit trail"
     task.cancel()
@@ -427,10 +430,7 @@ async def test_audit_lands_before_the_steer_and_survives_cancellation(monkeypatc
     task = asyncio.ensure_future(
         _resolve_permission(provider, _event(), ToolApprovalPolicy.REJECT_ALL, None)
     )
-    for _ in range(300):
-        await asyncio.sleep(0.01)
-        if provider.calls:
-            break
+    await async_wait_until(lambda: bool(provider.calls))
     assert provider.calls == ["steer"], provider.calls
     assert audited == ["rejected"], "the decision reached the pipe before the audit trail"
     task.cancel()
@@ -465,14 +465,11 @@ async def test_cancelled_mid_steer_does_not_hang_on_a_stalled_reject(monkeypatch
     task = asyncio.ensure_future(
         _resolve_permission(provider, _event(), ToolApprovalPolicy.REJECT_ALL, None)
     )
-    for _ in range(300):
-        await asyncio.sleep(0.01)
-        if provider.calls:
-            break
+    await async_wait_until(lambda: bool(provider.calls))
     started = time.monotonic()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=2.0)
+        await await_until(task, timeout=2.0)
     # No fixed wait stacked on top of the caller's own deadline.
     assert time.monotonic() - started < 0.5
     await asyncio.sleep(0)
@@ -644,6 +641,8 @@ class TestEveryHostDenyInLlmHelpersSteersFirst:
     """
 
     MODULE = pathlib.Path(__file__).resolve().parents[1] / "src/kiro_crew/llm_helpers.py"
+    #: The facade and every owner module it is composed from, read as one text.
+    MODULES = (MODULE, *sorted(MODULE.with_name("llm_helpers_parts").glob("*.py")))
     REJECT = re.compile(r"^\s*await \w+\.reject_tool\(")
     STEER = re.compile(r"^\s*await _steer_host_deny\(")
     #: The audit spellings: ``_resolve_permission``'s single raising funnel, and
@@ -666,8 +665,11 @@ class TestEveryHostDenyInLlmHelpersSteersFirst:
     #: refuse when they did.
     USER_REJECTIONS = ("interactive_rejected",)
 
+    def _text(self) -> str:
+        return "\n".join(path.read_text(encoding="utf-8") for path in self.MODULES)
+
     def _lines(self) -> list[str]:
-        return self.MODULE.read_text(encoding="utf-8").splitlines()
+        return self._text().splitlines()
 
     def _reject_sites(self) -> list[int]:
         return [i for i, line in enumerate(self._lines()) if self.REJECT.match(line)]
@@ -686,7 +688,7 @@ class TestEveryHostDenyInLlmHelpersSteersFirst:
         # walker's regex misses cannot drop a site out of the coverage assertion.
         import inspect
 
-        src = self.MODULE.read_text(encoding="utf-8")
+        src = self._text()
         # The one non-awaited spelling is the cancellation fallback INSIDE the
         # steer helper -- it answers the wire for a site whose own reject the
         # cancellation skipped, so it is not a deny site of its own. Pin it to
@@ -800,3 +802,13 @@ class TestEveryHostDenyInLlmHelpersSteersFirst:
             if "cause=DENY_CAUSE_" not in block:
                 unnamed.append(i + 1)
         assert not unnamed, unnamed
+
+
+def test_the_sel_patches_here_leave_the_gateway_on_the_real_factory():
+    """Runs after the audit-failure tests above, which patch ``kiro_crew.sel.sel``
+    with a factory that raises. The gateway must still hold the real factory, or a
+    later grant decline in the same worker audits through the broken one."""
+    import kiro_crew.sel
+    from kiro_crew.slack import gateway
+
+    assert gateway.sel is kiro_crew.sel.sel

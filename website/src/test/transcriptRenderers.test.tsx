@@ -396,6 +396,50 @@ describe('a usage-limit error row that refuses the seeded feature-request turn o
   })
 })
 
+describe('a missing kiro-cli under the seeded feature-request turn offers the issue form too', () => {
+  // "Request a Feature" is an agent turn, so a host with no kiro-cli refuses it
+  // at session start. The backend tags that refusal `kiro_cli_missing`, and the
+  // row offers the same form the usage-limit refusal does.
+  const seedRow = msg('user', { content: 'I’d like to request a feature!', meta: { sendId: 's-fr-seed', mid: 'u-1', [FEATURE_REQUEST_ROW_META_KEY]: true } })
+  const missingRow = msg('error', {
+    content: '❌ kiro-cli not found (searched 3 directories: /a, /b, /c). Install it from https://kiro.dev/cli/, or point KIROCREW_KIRO_BIN at the binary.',
+    meta: { kind: 'kiro_cli_missing' },
+  })
+  const rows = [seedRow, missingRow]
+  const recoverable = { slot: 's1', continuable: true, interrupted: true, onContinue: () => undefined }
+
+  it('hands the card the form route with the kiro-cli copy and withholds Continue', () => {
+    const el = render(missingRow, recoverable, { index: 1, messages: rows }) as ReactElement
+    expect(el.props.featureRequestFormUrl).toBe(FEATURE_REQUEST_FORM_URL)
+    expect(el.props.kiroCliMissing).toBe(true)
+    expect(el.props.onContinue).toBeUndefined()
+    expect(featureRequestRefusalIsNewest(rows)).toBe(true)
+    expect(newestErrorOwnsRecovery(rows)).toBe(true)
+  })
+
+  it('reads the kind from the rebuilt carrier too', () => {
+    const rebuilt = msg('error', { content: missingRow.content, kind: 'kiro_cli_missing' })
+    const el = render(rebuilt, { slot: 's1' }, { index: 1, messages: [seedRow, rebuilt] }) as ReactElement
+    expect(el.props.featureRequestFormUrl).toBe(FEATURE_REQUEST_FORM_URL)
+  })
+
+  it('keeps the usage-limit copy on a usage-limit row', () => {
+    const limitRow = msg('error', { content: '❌ The monthly usage limit has been reached.', meta: { kind: 'usage_limit' } })
+    const el = render(limitRow, recoverable, { index: 1, messages: [seedRow, limitRow] }) as ReactElement
+    expect(el.props.featureRequestFormUrl).toBe(FEATURE_REQUEST_FORM_URL)
+    expect(el.props.kiroCliMissing).toBe(false)
+  })
+
+  it('leaves the row of an ordinary chat alone: no form, Resume kept', () => {
+    const typed = msg('user', { content: 'hello', meta: { sendId: 's-typed', mid: 'u-1' } })
+    const el = render(missingRow, recoverable, { index: 1, messages: [typed, missingRow] }) as ReactElement
+    expect(el.props.featureRequestFormUrl).toBeUndefined()
+    expect(el.props.kiroCliMissing).toBeUndefined()
+    expect(el.props.onContinue).toBeTypeOf('function')
+    expect(newestErrorOwnsRecovery([typed, missingRow])).toBe(false)
+  })
+})
+
 describe('a session start that failed twice in a row swaps Resume for the restart remedy', () => {
   const TIMEOUT = 'Request session/new timed out after 90s (4/4 session-injected MCP server(s) reported)'
   const failed = () => msg('error', { content: TIMEOUT, meta: { kind: 'session_start_failed' } })
@@ -592,6 +636,52 @@ describe('a changed member agent file routes to Capabilities, never Resume', () 
   })
 })
 
+describe('a capability refusal as the newest state owns recovery', () => {
+  for (const code of ['materialization_changed', 'parent_identity_changed', 'foreign_private_copy', 'project_identity_changed', 'private_template_shadowed']) {
+    it(`${code}: the composer withholds Resume until a new turn opens`, () => {
+      const row = msg('error', { content: `${code}: x`, meta: { code, member: 'reviewer' } })
+      expect(newestErrorOwnsRecovery([msg('user'), row])).toBe(true)
+      expect(newestErrorOwnsRecovery([msg('user'), row, msg('assistant')])).toBe(false)
+    })
+  }
+  it('leaves an ordinary error row to Resume', () => {
+    expect(newestErrorOwnsRecovery([msg('user'), msg('error', { content: 'boom' })])).toBe(false)
+  })
+})
+
+describe('the crewmate-editor fix needs a crewmate to open', () => {
+  it('offers no button when the row names no member', () => {
+    const row = msg('error', { content: 'foreign_private_copy: x', meta: { code: 'foreign_private_copy', member: '' } })
+    const el = render(row, { slot: 's1', onOpenCapabilities: () => undefined }, { index: 0, messages: [row] }) as ReactElement
+    expect(el.props.onOpenCapabilities).toBeUndefined()
+  })
+})
+
+describe('each sibling capability refusal routes to its own fix, never Resume', () => {
+  const recoverable = { slot: 's1', continuable: true, interrupted: true, onContinue: () => undefined }
+  const cases = [
+    ['parent_identity_changed', 'member'],
+    ['foreign_private_copy', 'member'],
+    ['project_identity_changed', null],
+    ['private_template_shadowed', null],
+  ] as const
+
+  for (const [code, fix] of cases) {
+    it(`${code}: ${fix ?? 'no in-app fix'}`, () => {
+      const row = msg('error', { content: `${code}: x`, meta: { code, member: 'reviewer' } })
+      const opened: [string, string][] = []
+      const el = render(row, { ...recoverable, onOpenCapabilities: (name, f) => { opened.push([name, f]) } }, { index: 0, messages: [row] }) as ReactElement
+      expect(el.props.onContinue).toBeUndefined()
+      if (fix) {
+        el.props.onOpenCapabilities()
+        expect(opened).toEqual([['reviewer', fix]])
+      } else {
+        expect(el.props.onOpenCapabilities).toBeUndefined()
+      }
+    })
+  }
+})
+
 describe('rows the defaults already draw correctly are left to them', () => {
   it('keeps the default entry for the rows this module does not claim', () => {
     expect(idFor(msg('user'))).toBe('user')
@@ -662,11 +752,11 @@ describe('the single-chat surface renders from THIS row set', () => {
   })
 })
 
-describe("a change card in a crewmate's chat", () => {
+describe("a change card in a mate's chat", () => {
   const mate = { name: 'mate', label: 'Mate' }
   const card = msg(CARD_ROLE, { meta: { card_id: 'c1' } })
 
-  it("is the crewmate's own message, opening the run when it comes first", () => {
+  it("is the mate's own message, opening the run when it comes first", () => {
     const messages = [msg('user', { content: 'hi' }), card, msg('assistant', { content: 'Press Apply change.' })]
     const el = render(card, { slot: 's1', crewmate: mate }, { index: 1, messages }) as ReactElement<{ pos: string }>
     expect(el.type).toBe(CrewmateMessage)
@@ -681,7 +771,7 @@ describe("a change card in a crewmate's chat", () => {
     expect(el.props.pos).toBe('cont')
   })
 
-  it('stays a plain card outside a crewmate chat', () => {
+  it('stays a plain card outside a mate chat', () => {
     const el = render(card, { slot: 's1' }, { index: 0, messages: [card] }) as ReactElement
     expect(el.type).not.toBe(CrewmateMessage)
   })

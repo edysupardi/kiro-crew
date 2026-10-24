@@ -961,27 +961,34 @@ class TestWriteLock:
         # Flat buffer: the lock wait is judged a stall. If the holder releases
         # right as the verdict lands, the acquire may still complete -- and the
         # lock must not stay held by a caller that already returned False.
-        stdin = _stdin_with_buffer([3_000_000, 3_000_000, 3_000_000], drain_after=None)
+        # The holder releases INSIDE the verdict's own level poll, so the release
+        # and the verdict land in the same loop step on every run. Racing a
+        # timer against the window instead let the acquire win first; the frame
+        # was then written and its drain (flat, never draining) stalled, which
+        # also returns False and made the write assertion fail.
+        stdin = _stdin_with_buffer([3_000_000], drain_after=None)
         stdin.write = MagicMock()
         lock = asyncio.Lock()
         await lock.acquire()
+        level = stdin.transport.get_write_buffer_size.side_effect
 
-        async def _release_at_the_bound() -> None:
-            await asyncio.sleep(short_bound)
-            lock.release()
+        def _release_on_the_verdict_poll() -> int:
+            if stdin.polls["n"] == 1:  # poll 0 is the baseline, poll 1 the verdict
+                lock.release()
+            return level()
 
-        holder = asyncio.ensure_future(_release_at_the_bound())
+        stdin.transport.get_write_buffer_size.side_effect = _release_on_the_verdict_poll
         ok = await await_until(
             asyncio.ensure_future(
                 write_response_frame_bounded(stdin, lock, b"{}\n", bound_secs=short_bound)
             ),
             what="write_response_frame_bounded to resolve",
         )
-        await holder
         await asyncio.sleep(0)
-        assert not lock.locked()
-        if not ok:
-            stdin.write.assert_not_called()
+        assert ok is False
+        assert stdin.polls["n"] == 2, "the release did not land on the verdict poll"
+        assert not lock.locked(), "the stall verdict left the stdin lock held"
+        stdin.write.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_runtime_request_in_flight_does_not_mask_the_response_progress(
@@ -1569,7 +1576,34 @@ class TestEveryBackendIdLogSiteIsSanitized:
     permission-answer lines, and the read-loop/permission bookkeeping lines."""
 
     SITES = {
-        "src/kiro_crew/acp/client.py": [
+        "src/kiro_crew/acp/client.py": [],
+        "src/kiro_crew/acp/runtime_tree_kill.py": [],
+        "src/kiro_crew/acp/runtime_spawn_launch.py": [],
+        "src/kiro_crew/acp/runtime_spawn_entry.py": [],
+        "src/kiro_crew/acp/runtime_session_setup.py": [],
+        "src/kiro_crew/acp/runtime_session_create.py": [],
+        "src/kiro_crew/acp/runtime_session_load.py": [],
+        "src/kiro_crew/acp/runtime_session_registry.py": [],
+        "src/kiro_crew/acp/runtime_mode_activation.py": [],
+        "src/kiro_crew/acp/runtime_wire.py": [
+            "send_notification method=%s: %s; activity clock not refreshed",
+            "response to req=%s; marking runtime dead",
+            "while sending request method=%s req=%s;",
+        ],
+        "src/kiro_crew/acp/runtime_liveness.py": [],
+        "src/kiro_crew/acp/runtime_host_requests.py": [
+            "Ownerless server request answered -32601 — method=%s id=%s",
+            "answer-task cap (%d) reached at %s request id=%s%s and no ",
+            "auto-rejected permission request id=%s for session %s ",
+            "answer for permission request id=%s could not be written in ",
+            "failed to answer unroutable permission request id=%s",
+        ],
+        "src/kiro_crew/acp/runtime_frame_accounting.py": [
+            "Dropped %d unroutable frame(s) for session %s (method=%s)",
+        ],
+        "src/kiro_crew/acp/runtime_reader_loop.py": [],
+        "src/kiro_crew/acp/runtime_class.py": [],
+        "src/kiro_crew/acp/client_turn.py": [
             "ACP event: method=%s id=%s action=%s",
         ],
         "src/kiro_crew/acp/client_transport.py": [
@@ -1596,25 +1630,40 @@ class TestEveryBackendIdLogSiteIsSanitized:
         "src/kiro_crew/acp/client_tool_events.py": [],
         "src/kiro_crew/acp/client_turn_control.py": [],
         "src/kiro_crew/acp/client_usage.py": [],
-        "src/kiro_crew/acp/session_handle.py": [
-            "reject_tool: no deny option advertised for req=%s",
+        "src/kiro_crew/acp/client_class.py": [],
+        "src/kiro_crew/acp/client_start.py": [],
+        "src/kiro_crew/acp/session_handle.py": [],
+        "src/kiro_crew/acp/session_handle_runtime_contract.py": [],
+        "src/kiro_crew/acp/session_handle_watchdog.py": [],
+        "src/kiro_crew/acp/session_handle_lifecycle.py": [],
+        "src/kiro_crew/acp/session_handle_compaction.py": [],
+        "src/kiro_crew/acp/session_handle_turn.py": [
             "rejected permission request id=%s stranded in the ",
+        ],
+        "src/kiro_crew/acp/session_handle_dispatch.py": [
             "Dropping stray response frame id=%s (no waiter)",
             "id=%s for fidelity-unaware consumer (child=%s)",
+        ],
+        "src/kiro_crew/acp/session_handle_mcp.py": [],
+        "src/kiro_crew/acp/session_handle_kas.py": [],
+        "src/kiro_crew/acp/session_handle_native_children.py": [],
+        "src/kiro_crew/acp/session_handle_model_selection.py": [],
+        "src/kiro_crew/acp/session_handle_steering.py": [],
+        "src/kiro_crew/acp/session_handle_permissions.py": [
+            "reject_tool: no deny option advertised for req=%s",
             "approve_tool: security floor rejected req=%s: %s",
         ],
-        "src/kiro_crew/acp/runtime.py": [
-            "send_notification method=%s: %s; activity clock not refreshed",
-            "Dropped %d unroutable frame(s) for session %s (method=%s)",
-            "response to req=%s; marking runtime dead",
-            "while sending request method=%s req=%s;",
-            "Ownerless server request answered -32601 — method=%s id=%s",
-            "answer-task cap (%d) reached at %s request id=%s%s and no ",
-            "auto-rejected permission request id=%s for session %s ",
-            "answer for permission request id=%s could not be written in ",
-            "failed to answer unroutable permission request id=%s",
-        ],
-        "src/kiro_crew/acp/_dispatch.py": [
+        "src/kiro_crew/acp/session_handle_updates.py": [],
+        "src/kiro_crew/acp/session_handle_class.py": [],
+        "src/kiro_crew/acp/runtime.py": [],
+        "src/kiro_crew/acp/_dispatch.py": [],
+        "src/kiro_crew/acp/_dispatch_parts/tool_call_identity.py": [],
+        "src/kiro_crew/acp/_dispatch_parts/surfaced_text.py": [],
+        "src/kiro_crew/acp/_dispatch_parts/tool_call_provenance.py": [],
+        "src/kiro_crew/acp/_dispatch_parts/adapter_signals.py": [],
+        "src/kiro_crew/acp/_dispatch_parts/tool_result_events.py": [],
+        "src/kiro_crew/acp/_dispatch_parts/session_update_parser.py": [],
+        "src/kiro_crew/acp/_dispatch_parts/permission_requests.py": [
             "(req=%s tool_call_id=%s)",
         ],
     }

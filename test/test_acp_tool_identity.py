@@ -2,14 +2,14 @@
 
 Three landed fixes are pinned here:
 
-1. **ACP identity plumbing** (``acp/types.py`` + ``acp/_dispatch.py``): an
+1. **ACP identity plumbing** (``acp/types.py`` + ``acp/_dispatch_parts/tool_call_identity.py``): an
    ``AcpEvent`` now carries the NON-model-authored tool identity from
    ``_meta.kiro`` — ``tool_name`` (``_kiro_tool_name``) and ``mcp_server_name``
    (``_kiro_mcp_server_name``). A non-empty ``mcp_server_name`` is the trusted
    "this was a real MCP tool call" discriminator; both are ``""`` when the
    backend emits no ``_meta`` (fail-closed).
 
-2. **chat_runner directive gate** (``dashboard/chat_runner.py``): the
+2. **chat_runner directive gate** (``chat_turn/tool_rows.py``, ``tool_results.py``): the
    ``EVENT_TOOL_CALL`` handler records ``_pending_dir_tool[id]`` ONLY when
    ``event.mcp_server_name`` is set AND ``session_directive.match_tool`` resolves
    a directive tool; the ``EVENT_TOOL_RESULT`` gate applies a directive only for

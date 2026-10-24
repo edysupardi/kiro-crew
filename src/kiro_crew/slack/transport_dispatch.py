@@ -54,6 +54,7 @@ from kiro_crew.platform import current_context
 from kiro_crew.security import redact, redact_local_paths
 from kiro_crew.sel import sel
 from kiro_crew.session_allocation import SessionClosingError
+from kiro_crew.slack.channel_crew import resolve_channel_crew
 from kiro_crew.slack.format import escape_mrkdwn
 from kiro_crew.slack.handler import (
     _get_default_agent,
@@ -81,6 +82,7 @@ from kiro_crew.slack.thread_parent import (
     ThreadParent,
     fetch_thread_parent,
     has_prior_turns,
+    is_cron_owned,
     is_slack_born,
     parent_prompt_text,
     record_thread_parent,
@@ -250,11 +252,16 @@ async def handle_message_transport(
     from_trusted_bot: bool = False,
     dm_single_session: bool = False,
     start_priority: StartPriority = StartPriority.BACKGROUND,
+    spool_text: str | None = None,
+    spool_attachments: int = 0,
 ) -> None:
     """Drive a Slack message through the new transport path end-to-end.
 
     ``start_priority``: as for ``handler.handle_message`` (rule:
     ``kiro_crew.start_priority``).
+
+    ``spool_text`` / ``spool_attachments``: as for ``handler.handle_message`` --
+    the pre-ingestion message the shutdown spool records instead of *text*.
 
     This replaces handle_message when the feature flag is on. It uses
     TurnDriver + SlackRenderer instead of the inline stream loop.
@@ -267,7 +274,7 @@ async def handle_message_transport(
     """
     Stats().inc_message_received()
     _t0 = time.monotonic()
-    inbound_text = text
+    inbound_text = text if spool_text is None else spool_text
     # Same key discipline as native handle_message: reply_ts is the bare Slack
     # thread timestamp (posting + thread-index key); session_key is the
     # canonical namespaced form (registry, conversation log, thread overrides
@@ -393,6 +400,7 @@ async def handle_message_transport(
         user_id=user_id,
         thread_id=reply_ts,
         message_id=msg_ts,
+        attachments_dropped=spool_attachments,
     )
     if not await admit_inbound_callback(
         sessions,
@@ -641,8 +649,24 @@ async def handle_message_transport(
             or _get_default_agent()
             or _DEFAULT_KIROCREW_AGENT
         )
+        # A channel bound to a Crew agent RECORD runs as that record: its
+        # kiro_agent as the mode, its name as crew_agent, its workspace as cwd
+        # (slack/channel_crew.py). Only when the selected agent IS the channel's
+        # binding -- a thread value equal to it is that binding restored from the
+        # transcript header by ``_hydrate_thread_overrides`` -- and the session is
+        # Slack's own: a dashboard-linked session keeps its slot's project.
+        # ``_agent`` stays the record's name for the transcript header and the
+        # context builder.
+        _channel_crew = (
+            await asyncio.to_thread(resolve_channel_crew, agent_override)
+            if agent_override and _agent == agent_override and is_slack_born(session_key)
+            else None
+        )
+        _alloc: dict[str, Any] = (
+            _channel_crew.allocation_kwargs() if _channel_crew else {"agent": _agent}
+        )
         client, is_new, resumed = await sessions.get_or_create(
-            session_key, agent=_agent, channel_id=channel, start_priority=start_priority
+            session_key, channel_id=channel, start_priority=start_priority, **_alloc
         )
         _acquired = True
         # Authorize the outbound-image root, which only exists once the provider
@@ -651,8 +675,14 @@ async def handle_message_transport(
         # `files_outbound=True` advertises it: an agent that writes
         # `![chart](/tmp/chart.png)` ships the raw path as text. The root is the
         # provider's own resolved cwd, which is what bounds extraction to files
-        # the session may read. Mirrors the Discord dispatcher.
-        renderer.authorize_upload_root(client.cwd)
+        # the session may read. Mirrors the Discord dispatcher. The runtime's own
+        # `$KIROCREW_SCRATCH` goes beside it: that is where the agent is told to
+        # stage screenshots, and it is never under the cwd. Read defensively, like
+        # the other channels: a client without it must cost the scratch root,
+        # never the turn.
+        renderer.authorize_upload_root(
+            client.cwd, scratch_root=str(getattr(client, "work_scratch_dir", None) or "")
+        )
         # Expire AGAIN, now that the turn is serialized. The pass above (just
         # before the turn machinery) runs before `get_or_create` waits its turn,
         # so two messages arriving together both clear the control while it is
@@ -704,19 +734,28 @@ async def handle_message_transport(
         # answering an agent's DM, a reply under a cron post -- otherwise opens a
         # session knowing only the reply. Read once, on a fresh session with no
         # prior turns; recorded BEFORE the receipt row below so the transcript
-        # shows it above the reply. See ``slack/thread_parent.py``.
+        # shows it above the reply. A cron-owned thread reads it for the prompt
+        # only, on any fresh session. See ``slack/thread_parent.py``.
         _thread_parent: ThreadParent | None = None
         # One transcript read serves the parent and the thread-replies checks.
         _prior: bool | None = None
+        _slack_born = is_slack_born(session_key)
         if (
             is_new
             and not resumed
             and thread_ts
             and thread_ts != msg_ts
-            and is_slack_born(session_key)
-            and not (_prior := await has_prior_turns(conversation_log, session_key))
+            and (
+                is_cron_owned(session_key)
+                or (
+                    _slack_born
+                    and not (_prior := await has_prior_turns(conversation_log, session_key))
+                )
+            )
         ):
-            _record_parent = bool(conversation_log and not _is_slack_restricted(session_key))
+            _record_parent = bool(
+                conversation_log and _slack_born and not _is_slack_restricted(session_key)
+            )
             _thread_parent = await fetch_thread_parent(
                 slack, channel, thread_ts, with_author=_record_parent
             )
@@ -1225,6 +1264,7 @@ async def handle_message_transport(
                     user_id=user_id,
                     thread_id=reply_ts,
                     message_id=msg_ts,
+                    attachments_dropped=spool_attachments,
                 ),
             )
         with contextlib.suppress(Exception):
@@ -1362,7 +1402,7 @@ async def handle_message_transport(
         # setup (A trusts B, B trusts A) an error reply is itself a
         # bot-authored event the peer admits, so replying would open an
         # unbounded error-reply ping-pong. Mirrors the native path's guard in
-        # handler.py (from_trusted_bot and _had_error). The thread STATUS is
+        # handler_runtime/delivery.py (from_trusted_bot and _had_error). The thread STATUS is
         # cleared unconditionally — skipping it would leave a stale "working"
         # status pinned to the thread forever.
         if from_trusted_bot:
@@ -1428,3 +1468,9 @@ async def handle_message_transport(
                 )
         if _acquired:
             sessions.release(session_key)
+            # The release is what ends the turn for an open dashboard tab bound to
+            # this thread (it reads the lease as the turn running), and a release
+            # raises no slots push of its own. Refresh once more AFTER it, or the
+            # tab keeps showing the finished turn as running until the next
+            # background pass. Best-effort; never raises.
+            await _refresh_dashboard_tab(session_key)

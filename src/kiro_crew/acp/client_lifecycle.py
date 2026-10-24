@@ -8,22 +8,24 @@ Each function here whose first parameter is ``self`` is an ``AcpClient`` method:
 class binds it by name, so it reads and writes the session's own state on the instance,
 and a patch of the method on the class or on an instance reaches every caller.
 
-Instance fields written: ``_background_launches``, ``_bound_workspace_fd``, ``_buffer``,
-``_cancel_grace_secs``, ``_cancel_ts``, ``_cancelled``, ``_channel_id``,
-``_child_pids``, ``_claude_settings_authored``, ``_claude_settings_claim_unrevoked``,
-``_claude_settings_shared``, ``_claude_settings_written``, ``_fork_request``,
-``_kill_sent``, ``_last_activity``, ``_last_stop_reason``, ``_mcp_ref_spec``,
+Instance fields written: ``_background_launches``, ``_between_turn_credits``, ``_bound_workspace_fd``, ``_buffer``,
+``_cancel_grace_secs``, ``_cancel_ts``, ``_cancelled``, ``_capability_projection_gaps``,
+``_channel_id``, ``_child_pids``, ``_claude_settings_authored``,
+``_claude_settings_claim_unrevoked``, ``_claude_settings_shared``,
+``_claude_settings_written``, ``_confirmed_capability_session``, ``_consult_future``,
+``_fork_request``, ``_kill_sent``, ``_last_activity``, ``_last_stop_reason``,
+``_liveness_oracle``, ``_loaded_capability_template``, ``_mcp_ref_spec``,
 ``_mcp_report``, ``_mcp_report_frame_floor``, ``_oauth_emitted_servers``,
 ``_opencode_denies_in_force``, ``_opencode_denies_unenforced``,
 ``_opencode_native_mounts``, ``_pending_oauth_requests``,
 ``_permission_surface_share_validated``, ``_pi_mcp_handoff``, ``_pi_mcp_server_names``,
 ``_pid``, ``_process``, ``_process_instance``, ``_process_tree_confirmed_dead``,
 ``_prompt_or_tool_seen``, ``_resume_session_id``, ``_resumed``, ``_sandbox_cleanup``,
-``_session_harness_deny_rules``, ``_session_id``, ``_session_key``,
-``_session_mcp_cache``, ``_session_mcp_snapshot``, ``_session_mcp_unhonoured``,
-``_spawn_start_token``, ``_spawn_work_dir``, ``_spec_denied_tools``,
-``_spec_zero_tools``, ``_stderr_lines``, ``_stderr_task``, ``_stdin_stalled``,
-``_windows_tree_cleanup_failed``.
+``_session_agent_spec``, ``_session_harness_deny_rules``, ``_session_id``,
+``_session_key``, ``_session_mcp_cache``, ``_session_mcp_snapshot``,
+``_session_mcp_unhonoured``, ``_spawn_start_token``, ``_spawn_work_dir``,
+``_spec_denied_tools``, ``_spec_zero_tools``, ``_stderr_lines``, ``_stderr_task``,
+``_stdin_stalled``, ``_windows_tree_cleanup_failed``.
 
 Instance fields read: ``_entitlement_probe_inflight``, ``_mcp_gateway_socket``,
 ``_native_skill_projection``, ``_sandbox_hidden_dirs``, ``_sandbox_mode``,
@@ -48,11 +50,14 @@ from kiro_crew.acp.client_timeouts import (
     _CANCEL_GRACE_SECS,
     _SUPPRESSED_STDERR_SUMMARY_INTERVAL_SECS,
 )
+from kiro_crew.acp.liveness import LivenessOracle, _consume_future_exception
 from kiro_crew.acp.mcp_session_report import McpSessionReport
 from kiro_crew.acp.runtime_process_tree import ChildRecord
 from kiro_crew.acp.transport_errors import (
+    AcpDelegateLaunchFailed,
     AcpError,
     AcpSandboxInitFailed,
+    is_delegate_launch_failure_output,
     is_sandbox_init_failure_output,
     registration_throttle_line,
     sandbox_init_failure,
@@ -103,7 +108,7 @@ _T = TypeVar("_T")
 #
 # Why drop rather than just downgrade the level:
 #   1. Log hygiene — gateway.log uses a RotatingFileHandler(maxBytes=2MB,
-#      backupCount=3) (see cli.py), so a sustained burst rolls genuine
+#      backupCount=3) (see cli_logging.py), so a sustained burst rolls genuine
 #      diagnostics out of the retained 8MB window.
 #   2. Event-loop load — the file handler is a plain *synchronous* handler and
 #      _drain_stderr runs as a task on the gateway event loop, so each forwarded
@@ -162,7 +167,7 @@ def rekey(
     """Re-key this client for a different session (used by warm pool).
 
     ``crew_agent`` and ``watchdog`` exist only for signature parity with
-    AcpSessionProvider.rekey (session_allocation.py calls
+    AcpSessionProvider.rekey (session_allocation_parts/get_or_create.py calls
     provider.client.rekey uniformly): this client's dispatch loop carries no
     per-agent watchdog snapshot, so both are accepted and deliberately not
     stored."""
@@ -175,6 +180,9 @@ def rekey(
     # previous session's context_pct to the new chat and the first
     # check_context_usage() compacts an empty conversation.
     self.last_prompt_stats.reset_context_state()
+    # Credits held between turns belong to the session served before the
+    # claim; the claiming session's first turn must not bill them.
+    self._between_turn_credits = 0.0
     # Claim-push: tell gatewayd this runtime PID now belongs to
     # ``session_key`` so every MCP stub connection under it carries the
     # right ``_meta.caller`` immediately — event-driven replacement for
@@ -654,6 +662,12 @@ def _reset_state(self: AcpClient) -> None:
     # a replacement process must not inherit this one's snapshot.
     self._session_mcp_cache = None
     self._session_mcp_snapshot = None
+    self._session_agent_spec = None
+    self._loaded_capability_template = ""
+    self._capability_projection_gaps = ()
+    # Per SESSION, not per spawn: a replacement process' session is judged on its
+    # own consumed spec, even when it resumes the same id.
+    self._confirmed_capability_session = ""
     # Same per-spawn freshness rule as the array above: an edited spec must be
     # what the next session's guard judges, not this one's.
     self._mcp_ref_spec = None
@@ -689,13 +703,12 @@ def _reset_state(self: AcpClient) -> None:
     # grace — on behalf of work that is already dead. "Never reset per
     # turn" (see __init__) is a statement about turns, not processes.
     self._background_launches = BackgroundLaunchRecord()
-    # The adapter's cumulative cost counter is in-process: a replacement
-    # process restarts it at zero, so the delta baseline must restart with
-    # it or spend up to the old total is silently dropped — the monotonic
-    # guard only catches a counter that has NOT yet caught back up to the
-    # stale baseline. The current turn's already-billed delta is kept;
-    # carry_over() zeroes it at the next turn boundary.
-    self.last_prompt_stats.cost_session_usd = 0.0
+    # The cost baseline is deliberately left as it is. What the replacement
+    # process's counter starts from depends on how its session opens:
+    # session/new starts a fresh ledger at zero (begin_cost_session), while a
+    # restore of this same session brings the old ledger back from the
+    # harness transcript (restore_cost_session keeps the baseline). Zeroing
+    # here re-billed the whole lifetime on the first turn after every resume.
     self._buffer.clear()
     self._stderr_lines.clear()
     # A fresh process opens a fresh registration window: cleared WITH the
@@ -868,6 +881,26 @@ async def _sandbox_init_failure(self: AcpClient) -> AcpSandboxInitFailed | None:
     )
 
 
+async def _delegate_launch_failure(self: AcpClient) -> AcpDelegateLaunchFailed | None:
+    """The delegate-launch error for this child's stderr, or ``None``.
+
+    The ``AcpClient`` side of the classification ``AcpRuntime`` latches per
+    stderr line: the same shared :func:`is_delegate_launch_failure_output`
+    signature, read off the ring buffer the way :meth:`_sandbox_init_failure`
+    reads it, so the two transports cannot disagree about what a
+    ``kiro-cli-chat`` launch failure is. ``None`` when nothing was retained (a
+    restricted-memory session keeps no stderr by design, so it keeps today's
+    behaviour rather than a guessed verdict). The message is fixed wording, so
+    no child output rides it and nothing needs redacting.
+    """
+    await self._settle_stderr()
+    if not self._stderr_lines:
+        return None
+    if not is_delegate_launch_failure_output("\n".join(self._stderr_lines)):
+        return None
+    return AcpDelegateLaunchFailed()
+
+
 async def _registration_throttle_line(self: AcpClient) -> str | None:
     """One redacted stderr line showing a throttled registration, or ``None``.
 
@@ -953,3 +986,38 @@ async def shutdown(self: AcpClient) -> None:
             await self._discard_claude_settings_seed()
         finally:
             self._reset_state()  # untracks all PIDs (root + children)
+
+
+def _retire_liveness_state(self: AcpClient) -> None:
+    """Release the tracked consult and swap in a fresh, configured oracle.
+
+    Both boundaries that drop a movement baseline — turn start in
+    ``_prompt_loop`` under ``_turn_lock``, and process reset — retire rather
+    than ``reset()``,
+    and both must retire the future TOGETHER with the oracle. Their lifetimes
+    cannot diverge: if only the oracle were replaced, a walk wedged during the
+    previous turn would answer every later poll with "prior consult still in
+    flight", so the new turn never samples its own process and the 90s cutoff
+    completes it early — the truncation this gate exists to prevent.
+
+    Releasing the future costs at most one abandoned worker per boundary
+    instead of per silent read, which is the bound this gate is actually for.
+    A walk submitted through ``_consult_liveness_model_wait`` already carries a
+    retrieval callback from submission time, so its eventual exception is
+    consumed even though nobody awaits it any more; the consume/attach here
+    additionally covers a future that did not come from that path.
+
+    ``fresh()`` carries the configuration over: a default-constructed
+    replacement would silently repoint a caller-supplied /proc root, clock or
+    sampling interval. ``getattr`` because the low-level PID lifecycle tests
+    build clients with ``__new__``.
+    """
+    prior_consult = getattr(self, "_consult_future", None)
+    self._consult_future = None
+    if prior_consult is not None:
+        if prior_consult.done():
+            _consume_future_exception(prior_consult)
+        else:
+            prior_consult.add_done_callback(_consume_future_exception)
+    retiring = getattr(self, "_liveness_oracle", None)
+    self._liveness_oracle = retiring.fresh() if retiring is not None else LivenessOracle()

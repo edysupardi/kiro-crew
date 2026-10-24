@@ -47,9 +47,10 @@ export type TabKind = ViewKind | 'file' | 'diff' | 'wtdiff' | 'artifact' | 'term
  *
  *  `syncPinned` below is PARAMETERISED and would drop a view left out of the set
  *  it is handed, so the FUNCTION reads as content-gated on its own. It is not:
- *  the one production caller — `SidePanel`'s `syncPinned(PINNED_VIEWS)`,
- *  unconditional in an effect keyed only on the callback — always passes this
- *  whole list, so no pinned view is ever removed. Pinned at the render level by
+ *  the one production caller — `usePinnedViews`'s `syncPinned(PINNED_VIEWS, …)`,
+ *  unconditional in an effect keyed only on the callback and on Pin Summary —
+ *  always passes this whole list, so no pinned view is ever removed. Pin Summary
+ *  only adds Summary ahead of the block. Pinned at the render level by
  *  `sidePanelPinnedAlwaysPresent.test.tsx`. A host that cannot feed a pinned
  *  view (`SidePanel.hiddenViews`, the Members page and `changes`) hides it at
  *  RENDER time and leaves the bucket alone.
@@ -285,7 +286,16 @@ const nextRevealNonce = (): number => ++revealSeq
  *  path and title a directory tab '/a/b/' instead of 'b'. */
 const basename = (p: string) => pathBasename(stripTrailingSeparators(p)) || p
 
-type Bucket = { tabs: PanelTab[]; activeId: string | null }
+/** `recent` is the strip's focus history, oldest first and the current focus
+ *  last, each id once. Only `mutateSlot` writes it (see `trackFocus`); closing
+ *  the focused tab reads it to return to the tab viewed before. A bucket
+ *  persisted before the history existed has none. */
+type Bucket = { tabs: PanelTab[]; activeId: string | null; recent?: string[] }
+/** Most ids the focus history keeps. A closed tab leaves the history, so it
+ *  holds only open tabs and the host's leading tabs; the cap bounds what a
+ *  drifted or hand-edited store can carry. Declared above `store`, whose
+ *  load at module evaluation reads it. */
+const MAX_RECENT = 50
 type BySlot = Record<string, Bucket>
 /** Module-level so an empty strip yields STABLE tabs/activeId identities
  *  (a per-render fallback object would churn the hook's memoized return). */
@@ -429,16 +439,110 @@ function getSnapshot(): BySlot { return store }
 const NO_SLOT_KEY = '__no_slot__'
 const bucketKey = (slotKey: string | null): string => slotKey ?? NO_SLOT_KEY
 
+/** Move `id` to the most recent end of the focus history. */
+function touchRecent(recent: string[], id: string): string[] {
+  if (recent[recent.length - 1] === id) return recent
+  return [...recent.filter(r => r !== id), id].slice(-MAX_RECENT)
+}
+
+/** Carry the focus history across one bucket change. Ids of tabs the change
+ *  removed drop out. A focus that moved records the tab it left as well as the
+ *  one it reached: the focus a bucket was loaded with is on no history yet
+ *  (one persisted before the history existed, or one `serializeBucket` moved
+ *  off a dropped tab), and it is still the tab the user was looking at.
+ *  `left` is that tab: the stored focus, or what a strip with none shows. */
+function trackFocus(prev: Bucket, next: Bucket, left: string | null): Bucket {
+  const open = new Set(next.tabs.map(t => t.id))
+  const closed = new Set(prev.tabs.filter(t => !open.has(t.id)).map(t => t.id))
+  let recent = (prev.recent ?? []).filter(id => !closed.has(id))
+  if (next.activeId !== prev.activeId) {
+    if (left !== null && !closed.has(left)) recent = touchRecent(recent, left)
+    if (next.activeId !== null) recent = touchRecent(recent, next.activeId)
+  }
+  return { ...next, recent }
+}
+
 /** Apply a transform to one slot's bucket, publish the new store, and persist.
  *  A new top-level object is created only on real change so useSyncExternalStore
- *  consumers re-render exactly when their store reference changes. */
-function mutateSlot(key: string, fn: (b: Bucket) => Bucket): void {
+ *  consumers re-render exactly when their store reference changes.
+ *
+ *  `unfocusedShows` is the tab a bucket with no stored focus displays: the
+ *  bound host's first leading tab, which `usePanelTabs` derives on read rather
+ *  than storing. Passing it lets the focus history record that tab when the
+ *  focus moves off it, so a close outside the host (a shell that exits) can
+ *  return to it too. Callers with no host leave it `null`.
+ *
+ *  `choice` marks a tab that was asked for (see `takePlainPanelShow`); it is
+ *  counted even when it names the tab already shown, since that ask still
+ *  decides the tab and releases any Summary landing that owned focus. */
+function mutateSlot(key: string, fn: (b: Bucket) => Bucket, unfocusedShows: string | null = null, opts?: { choice?: boolean }): void {
+  if (opts?.choice) {
+    tabChoices.set(key, (tabChoices.get(key) ?? 0) + 1)
+    stoppedAt.set(key, null)
+  }
   const prev = store[key] ?? { tabs: [], activeId: null }
-  const nextBucket = fn(prev)
-  if (nextBucket === prev) return
+  const changed = fn(prev)
+  if (changed === prev) return
+  const nextBucket = trackFocus(prev, changed, prev.activeId ?? unfocusedShows)
   store = { ...store, [key]: nextBucket }
   for (const cb of listeners) cb()
   schedulePersist(key)
+}
+
+/* ── Plain opens of the side panel ─────────────────────────────────────────
+ * Pin Summary lands the panel on Summary once per show of a strip, and only
+ * when nothing asked for a tab since the panel last stopped showing it. Each
+ * strip counts its tab CHOICES: an open or a focus a person or a request asked
+ * for (a file chip, a sub-agent card, an app render, a chip click), the tab
+ * already shown included. A write the store makes on its own (the pinned-block
+ * reconcile, a dead terminal's refocus) and an `automatic` open (a tab created
+ * for discovery: Git, or Changes for a new link) are not choices. Once a
+ * landing selects pinned Summary, a later discovery open keeps that focus
+ * while Summary stays pinned and active. The chat page reports the strip with
+ * `notePanelShown`, which ends a show when the panel closes or shows another
+ * chat; the panel calls `takePlainPanelShow` when it shows a strip. A remount
+ * (the find pane closing, a resize across the phone breakpoint, or a return to
+ * the chat page on the same chat) stops nothing, so it lands nothing. With Keep
+ * side panel open on, a phone width or an embedded chat holds the setting off
+ * and closes a panel the setting opened, so the panel it reopens afterwards is
+ * a new show. In-memory only: a reload is a plain open. */
+const tabChoices = new Map<string, number>()
+/** The choice count when the panel last stopped showing the strip; `landed`
+ *  while this show still owns the Summary focus; or `null` once this show was
+ *  checked but did not land. No entry means the strip has not been shown in
+ *  this page session, which is a plain open. */
+const stoppedAt = new Map<string, number | 'landed' | null>()
+/** Ends the show of `slot`'s strip: the panel closed, or it shows another chat
+ *  (see `notePanelShown`). */
+export function notePanelStoppedShowing(slot: string | null): void {
+  const key = bucketKey(slot)
+  stoppedAt.set(key, tabChoices.get(key) ?? 0)
+}
+/** Take this show's landing: true once per show, when nothing has asked for a
+ *  tab in `slot`'s strip since the panel last stopped showing it. A successful
+ *  take stays marked so later discovery opens can keep its Summary focus. */
+export function takePlainPanelShow(slot: string | null): boolean {
+  const key = bucketKey(slot)
+  const at = stoppedAt.has(key) ? stoppedAt.get(key) : 0
+  if (at === 'landed') return false
+  const lands = at !== null && at === (tabChoices.get(key) ?? 0)
+  stoppedAt.set(key, lands ? 'landed' : null)
+  return lands
+}
+/** The chat whose strip the panel showed at the chat page's last report, or
+ *  `null`: the panel was closed, or no chat was active. Module state, so it
+ *  outlives the chat page: a page that mounts again compares its first report
+ *  with the last one made before it unmounted. */
+let shownPanelSlot: string | null = null
+/** Called by the chat page with the chat whose strip the panel shows, or `null`
+ *  when it shows none. A change ends the previous strip's show: the panel
+ *  closed, or it shows another chat. That includes a chat change made while the
+ *  chat page was unmounted (the Projects page, a notification, the command
+ *  palette). The same strip reported again ends nothing, as on a return to the
+ *  same chat. */
+export function notePanelShown(slot: string | null): void {
+  if (shownPanelSlot !== null && shownPanelSlot !== slot) notePanelStoppedShowing(shownPanelSlot)
+  shownPanelSlot = slot
 }
 
 /* Hydrate-time ruling on restored terminal tabs: the dock store's two-look
@@ -495,14 +599,15 @@ function upsertInBucket(b: Bucket, tab: PanelTab, replaceId?: string): Bucket {
 }
 
 /** Open (and focus) a singleton view tab in a SPECIFIC slot's strip, with no
- *  hook binding.
+ *  hook binding. Always a tab choice (see `takePlainPanelShow`): both callers,
+ *  a session row's chip and a first pin, act on a click.
  *
  *  The sidebar asks for a panel view on a chat that is not active yet — clicking
  *  a session row's PR chip switches sessions and opens Changes in one gesture.
  *  `usePanelTabs` is bound to whichever slot was active when it rendered, so
  *  going through `openView` there would open the tab on the chat being LEFT. */
 export function openPanelView(slotKey: string | null, kind: ViewKind): void {
-  mutateSlot(bucketKey(slotKey), b => upsertInBucket(b, { id: kind, kind, title: viewTitle(kind) }))
+  mutateSlot(bucketKey(slotKey), b => upsertInBucket(b, { id: kind, kind, title: viewTitle(kind) }), null, { choice: true })
 }
 
 /** Drop every document body the panel holds in memory, in EVERY slot, so the
@@ -614,14 +719,19 @@ export function closePanelTerminalTabs(sessionId: string): void {
       if (doomed.length === 0) return b
       const at = b.tabs.indexOf(doomed[0])
       const next = b.tabs.filter(t => !doomed.includes(t))
-      // Move focus only when it was on the dead tab; then take the left
-      // neighbour, as closeTab does. A focus on a host-owned leading tab names
-      // no bucket tab and must be kept. An emptied strip stores `null`.
+      // Move focus only when it was on the dead tab. A focus on a host-owned
+      // leading tab names no bucket tab and must be kept.
       const droppedFocus = b.activeId !== null && doomed.some(t => t.id === b.activeId)
-      const activeId = !droppedFocus
-        ? b.activeId
-        : next.length === 0 ? null : (next[at - 1] ?? next[at] ?? next[next.length - 1]).id
-      return { tabs: next, activeId }
+      if (!droppedFocus) return { tabs: next, activeId: b.activeId }
+      // Then back to the tab viewed before it, as closeTab does. This runs with
+      // no host, so a recorded id that names no stored tab is taken for a
+      // leading tab, which never sits in the bucket. Nor can it tell which app
+      // tabs are hidden: a hidden one it picks is shown as the last visible tab
+      // by the read path, as a hidden left neighbour was. With nothing to
+      // return to, take the left neighbour; an emptied strip stores `null`.
+      const back = b.recent?.findLast(r => next.some(t => t.id === r) || !b.tabs.some(t => t.id === r))
+      const neighbour = next.length === 0 ? null : (next[at - 1] ?? next[at] ?? next[next.length - 1]).id
+      return { tabs: next, activeId: back ?? neighbour }
     })
   }
 }
@@ -658,7 +768,10 @@ function serializeBucket(b: Bucket): string {
   const activeId = droppedFocus
     ? (tabs.length ? tabs[tabs.length - 1].id : null)
     : b.activeId
-  return JSON.stringify({ activeId, tabs })
+  // The focus history loses the same dropped tabs and keeps every other id,
+  // a leading tab's included, for the reason the focus above does.
+  const recent = b.recent?.filter(id => tabs.some(t => t.id === id) || !b.tabs.some(t => t.id === id))
+  return JSON.stringify({ activeId, tabs, recent })
 }
 
 function loadPersisted(): BySlot {
@@ -681,7 +794,14 @@ function loadPersisted(): BySlot {
           // app tabs are hidden on the READ path instead (see `usePanelTabs`),
           // which also handles an app disabled mid-session and restores the tab
           // if it is re-enabled.
-          out[slot] = { tabs: b.tabs as PanelTab[], activeId: (b.activeId as string | null) ?? null }
+          out[slot] = {
+            tabs: b.tabs as PanelTab[],
+            activeId: (b.activeId as string | null) ?? null,
+            // Ids only: a non-string entry could become the focus on a close.
+            recent: Array.isArray(b.recent)
+              ? b.recent.filter(r => typeof r === 'string').slice(-MAX_RECENT)
+              : undefined,
+          }
         }
       } catch { /* skip malformed bucket */ }
     }
@@ -719,6 +839,9 @@ export function __resetPanelTabs(): void {
   terminalRuling = newTerminalRuling(new Set())
   inlineDrafts.clear()
   autoOpenedApps.clear()
+  tabChoices.clear()
+  stoppedAt.clear()
+  shownPanelSlot = null
   clearTimeout(persistTimer)
   dirtySlots.clear()
   if (typeof localStorage !== 'undefined') {
@@ -766,9 +889,10 @@ export function usePanelTabs(
   opts?: {
     /** Ids of the HOST-OWNED leading tabs (SidePanel's `leadingTabs`), in strip
      *  order: tabs that sit ahead of the pinned block, are never in the bucket,
-     *  and whose bodies the host renders. The bucket only ever holds one of them
-     *  as `activeId`. Naming them here is what lets focus fall back to them — a
-     *  fresh strip opens on `leadingIds[0]` rather than on the first pinned view,
+     *  and whose bodies the host renders. The bucket holds them only as a focus
+     *  (`activeId` and its history). Naming them here is what lets focus fall
+     *  back to them — a fresh strip opens on `leadingIds[0]` rather than on the
+     *  first pinned view, closing a tab can return to the one viewed before it,
      *  and a stored focus on any of them is never "repaired" away by `syncPinned`
      *  for not being a stored tab. Pass a module constant: the array is a
      *  dependency of the strip callbacks. */
@@ -828,22 +952,31 @@ export function usePanelTabs(
   )
 
   /** Apply a bucket transform to the CURRENT slot's strip. */
-  const update = useCallback((fn: (b: Bucket) => Bucket) => {
-    mutateSlot(key, fn)
-  }, [key])
+  const update = useCallback((fn: (b: Bucket) => Bucket, opts?: { choice?: boolean }) => {
+    mutateSlot(key, fn, defaultLeadingId, opts)
+  }, [key, defaultLeadingId])
 
   /** Add tab if its id is absent, otherwise merge patch into the existing tab;
    *  either way focus it. When `replaceId` is given (e.g. a file opened FROM
    *  the Files tab replaces that Files tab), the new tab takes the replaced
    *  tab's strip position; if the new tab already exists elsewhere, the
-   *  replaced tab is simply closed. */
-  const upsert = useCallback((tab: PanelTab, replaceId?: string) => {
-    update(b => upsertInBucket(b, tab, replaceId))
+   *  replaced tab is simply closed. A tab choice unless `choice` is false. */
+  const upsert = useCallback((tab: PanelTab, replaceId?: string, choice = true) => {
+    update(b => upsertInBucket(b, tab, replaceId), { choice })
   }, [update])
 
-  const openView = useCallback((kind: ViewKind) => {
-    upsert({ id: kind, kind, title: viewTitle(kind) })
-  }, [upsert])
+  /** `automatic`: a tab created for discovery, not asked for, so it does not
+   *  stop Pin Summary's landing (see `takePlainPanelShow`). After that landing,
+   *  discovery updates its tab without replacing the pinned Summary focus. */
+  const openView = useCallback((kind: ViewKind, opts?: { automatic?: boolean }) => {
+    const automatic = !!opts?.automatic
+    update(b => {
+      const next = upsertInBucket(b, { id: kind, kind, title: viewTitle(kind) })
+      const keepSummary = automatic && stoppedAt.get(key) === 'landed'
+        && b.activeId === 'summary' && b.tabs[0]?.id === 'summary'
+      return keepSummary ? { ...next, activeId: b.activeId } : next
+    }, { choice: !automatic })
+  }, [key, update])
 
   /** Open an app-contributed body-owning tab (one instance per kind, like a
    *  view). Persists the metadata (`appName`/`appTabId`) needed to re-mount the
@@ -860,18 +993,21 @@ export function usePanelTabs(
 
   /** Reconcile the pinned views (Changes / Artifacts / Files) to exactly the
    *  ``available`` set: its members are kept (or created), pinned to the FRONT in
-   *  PINNED_VIEWS order; a pinned view left OUT of it is removed. Dynamic tabs
-   *  (documents / terminal / other views) keep their order after the pinned
+   *  PINNED_VIEWS order; a pinned view left OUT of it is removed. ``leading``
+   *  views are pinned AHEAD of that block (Summary, while Pin Summary is on);
+   *  one that leaves the list stays in the strip as an ordinary tab. Dynamic
+   *  tabs (documents / terminal / other views) keep their order after the pinned
    *  block. No-ops when already in the target shape so it's safe to call from an
-   *  effect that runs on every render.
+   *  effect that runs on every render. Its focus write is not a tab choice
+   *  (see `takePlainPanelShow`).
    *
    *  The removal arm is reachable through the ARGUMENT, not through content: the
    *  one production caller passes PINNED_VIEWS whole, so it does not fire in the
    *  shipped app. See PINNED_VIEWS above. */
-  const syncPinned = useCallback((available: ViewKind[]) => {
+  const syncPinned = useCallback((available: ViewKind[], leading: readonly ViewKind[] = []) => {
     update(b => {
-      const desired = PINNED_VIEWS.filter(k => available.includes(k))
-      const dynamic = b.tabs.filter(t => !(PINNED_VIEWS as string[]).includes(t.id))
+      const desired = [...leading, ...PINNED_VIEWS.filter(k => available.includes(k))]
+      const dynamic = b.tabs.filter(t => !(PINNED_VIEWS as string[]).includes(t.id) && !(leading as readonly string[]).includes(t.id))
       const pinned = desired.map(
         k => b.tabs.find(t => t.id === k) ?? { id: k, kind: k, title: viewTitle(k) },
       )
@@ -921,6 +1057,7 @@ export function usePanelTabs(
     // bucket, keyed elsewhere). Routing the mutation to `bucketKey(slot)` keeps
     // the stamp and the bucket the SAME slot. `null` slot keeps the bound key.
     const target = slot !== null ? bucketKey(slot) : key
+    // Only the bound bucket shows this host's leading tab when unfocused.
     mutateSlot(target, b => {
       const prev = b.tabs.find(t => t.id === `file:${path}`)
       if (prev && prev.content !== prev.savedContent) {
@@ -955,8 +1092,8 @@ export function usePanelTabs(
         revealLine: reveal,
         ...(opts?.diffMode != null ? { diffMode: opts.diffMode } : {}),
       }, opts?.replaceId)
-    })
-  }, [key])
+    }, target === key ? defaultLeadingId : null, { choice: true })
+  }, [key, defaultLeadingId])
 
   /** Open (and focus) a file's WORKING-TREE DIFF as its own tab, keyed
    *  `wtdiff:${path}` so it coexists with the plain `file:${path}` tab instead
@@ -992,8 +1129,8 @@ export function usePanelTabs(
       binary: opts?.binary,
       partial: opts?.partial,
       diffMode: true,
-    }))
-  }, [key])
+    }), target === key ? defaultLeadingId : null, { choice: true })
+  }, [key, defaultLeadingId])
 
   const openDiff = useCallback((path: string, modified: string, original = '') => {
     upsert({ id: `diff:${path}`, kind: 'diff', title: i18nT('hooks.usePanelTabs.diff', { name: basename(path) }), path, modified, original })
@@ -1057,7 +1194,7 @@ export function usePanelTabs(
       }
       const tab: PanelTab = { id, kind: 'app', title, appToolCallId: toolCallId, slot, appActiveAt: now }
       return { tabs: [...kept, tab], activeId: id }
-    })
+    }, { choice: true })
   }, [update])
 
   const openArtifact = useCallback((art: { slug: string; kind: Artifact['kind']; title?: string }, content: string, slot: string | null = null) => {
@@ -1081,15 +1218,18 @@ export function usePanelTabs(
       const i = b.tabs.findIndex(t => t.id === id)
       if (i === -1) return b
       const next = b.tabs.filter(t => t.id !== id)
-      // Refocus a neighbor when closing the active tab (prefer the left one);
-      // an emptied strip falls back to the host's first leading tab when there
-      // is one.
-      const activeId = b.activeId !== id
-        ? b.activeId
-        : next.length === 0 ? defaultLeadingId : (next[i - 1] ?? next[i] ?? next[next.length - 1]).id
-      return { tabs: next, activeId }
+      if (b.activeId !== id) return { tabs: next, activeId: b.activeId }
+      // Closing the focused tab returns to the tab viewed before it, which may
+      // be one of the host's leading tabs. A tab hidden because its app is gone
+      // is skipped: it stays stored, but the strip cannot show it. With none to
+      // return to, a host with leading tabs rests on its first one (what a
+      // fresh strip shows), and a host without them takes the left neighbour,
+      // then the right.
+      const back = b.recent?.findLast(r => (next.some(t => t.id === r) && !prunedIds.has(r)) || !!leadingIds?.includes(r))
+      const neighbour = next.length === 0 ? null : (next[i - 1] ?? next[i] ?? next[next.length - 1]).id
+      return { tabs: next, activeId: back ?? defaultLeadingId ?? neighbour }
     })
-  }, [update, defaultLeadingId])
+  }, [update, leadingIds, defaultLeadingId, prunedIds])
 
   const closeAll = useCallback(() => { update(() => ({ tabs: [], activeId: null })) }, [update])
 
@@ -1103,7 +1243,7 @@ export function usePanelTabs(
       const next = b.tabs.slice()
       next[i] = { ...next[i], appActiveAt: Date.now() }
       return { tabs: next, activeId: id }
-    })
+    }, { choice: true })
   }, [update])
 
   /** Replace the tab order wholesale (drag-to-reorder in the strip). */

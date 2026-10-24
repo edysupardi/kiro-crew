@@ -29,13 +29,13 @@ beforeEach(() => {
 })
 
 describe('useFirstGreeting', () => {
-  it('asks once the crewmate thread is confirmed', async () => {
+  it('asks once the mate thread is confirmed', async () => {
     renderHook(() => useFirstGreeting('mate', 'member-mate', true), { wrapper })
     await waitFor(() => expect(greet).toHaveBeenCalledWith('mate'))
     expect(greet).toHaveBeenCalledTimes(1)
   })
 
-  it('asks for a crewmate the page enabled it for, by that crewmate\'s slug, once', async () => {
+  it('asks for a mate the page enabled it for, by that mate\'s slug, once', async () => {
     const { rerender } = renderHook(({ slot }) => useFirstGreeting('scout', slot, true), {
       wrapper,
       initialProps: { slot: 'member-scout' },
@@ -102,6 +102,54 @@ describe('useFirstGreeting', () => {
     expect(selectComposerBusy(store.getState(), slot)).toBe(false)
     renderHook(() => useFirstGreeting('mate', slot, true), { wrapper })
     await waitFor(() => expect(selectComposerBusy(store.getState(), slot)).toBe(true))
+  })
+
+  // The first Mate's entrance (#23207) keys on this callback: only the answer
+  // that means "dispatched now" fires it, so the entrance runs in exactly the
+  // one tab the server's once-only claim picked, and never on a replay.
+  it('onStarted fires with the slot for `started`, the one answer that dispatched a greeting', async () => {
+    const onStarted = vi.fn()
+    renderHook(() => useFirstGreeting('mate', 'member-mate-entrance', true, onStarted), { wrapper })
+    await waitFor(() => expect(onStarted).toHaveBeenCalledWith('member-mate-entrance'))
+    expect(onStarted).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['already_greeted', 'not_empty', 'busy', 'not_owed', 'no_thread', 'not_crewmate'])(
+    'onStarted stays silent on `%s`',
+    async (outcome) => {
+      greet.mockResolvedValueOnce({ outcome })
+      const onStarted = vi.fn()
+      renderHook(() => useFirstGreeting('mate', `member-mate-${outcome}`, true, onStarted), { wrapper })
+      await waitFor(() => expect(greet).toHaveBeenCalledTimes(1))
+      await act(async () => { await Promise.resolve() })
+      expect(onStarted).not.toHaveBeenCalled()
+    },
+  )
+
+  it('onStarted stays silent on a failed request', async () => {
+    greet.mockRejectedValueOnce(new Error('offline'))
+    const onStarted = vi.fn()
+    renderHook(() => useFirstGreeting('mate', 'member-mate-failed', true, onStarted), { wrapper })
+    await waitFor(() => expect(greet).toHaveBeenCalledTimes(1))
+    await act(async () => { await Promise.resolve() })
+    expect(onStarted).not.toHaveBeenCalled()
+  })
+
+  it('the latest onStarted hears the answer; a new callback never asks again', async () => {
+    let resolve: (v: { outcome: string }) => void = () => {}
+    greet.mockImplementationOnce(() => new Promise((res) => { resolve = res }))
+    const first = vi.fn()
+    const second = vi.fn()
+    const { rerender } = renderHook(
+      ({ cb }: { cb: (slot: string) => void }) => useFirstGreeting('mate', 'member-mate-latest', true, cb),
+      { wrapper, initialProps: { cb: first } },
+    )
+    await waitFor(() => expect(greet).toHaveBeenCalledTimes(1))
+    rerender({ cb: second })
+    await act(async () => { resolve({ outcome: 'started' }) })
+    await waitFor(() => expect(second).toHaveBeenCalledWith('member-mate-latest'))
+    expect(first).not.toHaveBeenCalled()
+    expect(greet).toHaveBeenCalledTimes(1)
   })
 
   it('a declined greeting leaves the thread idle', async () => {

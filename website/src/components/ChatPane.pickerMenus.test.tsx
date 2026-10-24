@@ -39,6 +39,7 @@ function setup(overrides: Partial<Record<string, unknown>> = {}) {
     paneAgentName: 'alpha',
     defaultAgent: 'beta',
     installedAgents: [],
+    agentChoices: [],
     toggleDefaultAgent: vi.fn(),
     defaultAgentFailed: false,
     modelDD,

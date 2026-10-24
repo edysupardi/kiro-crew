@@ -56,6 +56,15 @@ PROVIDER_LOCAL = "local"
 # `apple` streams on-device via SpeechAnalyzer (macOS 26+), and `transcribe`
 # streams from AWS. The default is first.
 _STREAMING_PROVIDERS = (PROVIDER_LOCAL, "apple", "transcribe")
+
+
+def streaming_providers() -> tuple[str, ...]:
+    """Who may open ``/api/ws/stt``; see ``speech_providers.streaming_stt_names``."""
+    from kiro_crew import speech_providers
+
+    return speech_providers.streaming_stt_names(_STREAMING_PROVIDERS)
+
+
 # Cap per-WebSocket-frame size (128 KiB) — small enough to reject obvious
 # abuse, large enough for any reasonable 16 kHz PCM chunk cadence.
 _MAX_WS_MSG_SIZE = 128 * 1024
@@ -201,6 +210,10 @@ _MODEL_PROGRESS_INTERVAL_SECS = 2.0
 # being remapped, so one vocabulary covers the settings panel and the socket.
 _CODE_MAX_DURATION = "stt_max_duration_exceeded"
 _CODE_SESSION_FAILED = "stt_session_failed"
+# When the gateway's streaming gate refuses the WebSocket before the upgrade,
+# the client only sees a 503 — no error frame, no code. Sending an error frame
+# through the upgraded socket lets `STT_ERROR_KEY` map it to the right message.
+_CODE_STREAMING_DISABLED = "stt_streaming_disabled"
 # The one condition no existing code names: streaming Transcribe bills per audio
 # second, so the socket refuses without a recorded operator grant for this exact
 # profile+region. Distinct from `_CODE_SESSION_FAILED` because the fix is an
@@ -657,6 +670,7 @@ async def _run_local_session(
             partial_interval_ms=cfg.stt.partial_interval_ms,
             idle_evict_secs=cfg.stt.idle_evict_secs,
             timeout_secs=cfg.stt.timeout_secs,
+            threads=cfg.stt.threads,
         )
 
     # The FIRST fatal cause wins. Both the duration cap and a failed send can end
@@ -1240,6 +1254,58 @@ async def _run_apple_session(
             locale=cfg.stt.effective_language_code,
             sample_rate=STREAM_SAMPLE_RATE_HZ,
         )
+    await _drive_helper_session(
+        ws,
+        caller,
+        session,
+        endpointer,
+        start_failure_code=lambda: _apple_start_failure_code(cfg),
+        label="apple",
+    )
+
+
+async def _run_registered_session(
+    ws: web.WebSocketResponse,
+    cfg: "KiroCrewConfig",
+    request: web.Request,
+    caller: str,
+) -> None:
+    """Drive an edition provider's ``open_stream()`` session through the ``apple`` loop.
+
+    Same events, redaction, endpointer, cap and audit; a raise while opening is
+    audited as a setup failure.
+    """
+    from kiro_crew import speech_providers
+
+    with _audited_setup(caller):
+        provider = speech_providers.stt_provider(cfg.stt.provider)
+        if provider is None or not speech_providers.streams(provider):
+            raise RuntimeError(f"STT provider {cfg.stt.provider!r} cannot stream")
+        endpointer = _build_endpointer(ws, cfg, request)
+        session = provider.open_stream(cfg.stt)
+    await _drive_helper_session(
+        ws,
+        caller,
+        session,
+        endpointer,
+        start_failure_code=lambda: _CODE_SESSION_FAILED,
+        label=f"STT provider {cfg.stt.provider!r}",
+    )
+
+
+async def _drive_helper_session(
+    ws: web.WebSocketResponse,
+    caller: str,
+    session: Any,
+    endpointer: "_Endpointer | None",
+    *,
+    start_failure_code: Callable[[], str],
+    label: str,
+) -> None:
+    """Run one started-on-demand helper session to its end; see :func:`_run_apple_session`.
+
+    *session* has the ``SttStreamSession`` shape. *label* names it in the log.
+    """
     try:
         problem = await session.start()
     except BaseException:
@@ -1257,7 +1323,7 @@ async def _run_apple_session(
         _emit_end_audit(caller, outcome="error")
         raise
     if problem:
-        await _send_error(ws, problem, _apple_start_failure_code(cfg))
+        await _send_error(ws, problem, start_failure_code())
         await _close_and_end_audit(ws, caller, outcome="error")
         if endpointer is not None:
             await endpointer.aclose()
@@ -1375,7 +1441,7 @@ async def _run_apple_session(
                     # recording, with everything it says from here silently dropped —
                     # the same failure mode as swallowing an `error` event, reached
                     # through the write side instead of the read side.
-                    logger.warning("apple streaming helper stopped accepting audio")
+                    logger.warning("%s streaming helper stopped accepting audio", label)
                     _claim_fatal("error")
                     await _send_error(ws, "speech helper stopped", _CODE_SESSION_FAILED)
                     return
@@ -1408,7 +1474,7 @@ async def _run_apple_session(
             if not reader_cancelled_by_cap:
                 raise
     except Exception:
-        logger.exception("apple streaming STT session failed")
+        logger.exception("%s streaming STT session failed", label)
         outcome = "error"
     finally:
         # An EXPLICIT claim, not `deadline_task.done()`. Inferring from task state
@@ -1422,13 +1488,15 @@ async def _run_apple_session(
         # the next request may already own.
         deadline_task.cancel()
         if timed_out:
-            logger.info("apple streaming STT session hit the %ds cap", _MAX_STREAM_DURATION_SECS)
+            logger.info(
+                "%s streaming STT session hit the %ds cap", label, _MAX_STREAM_DURATION_SECS
+            )
         # Closing stdin is the helper's cue to finalize, so the trailing finals
         # arrive AFTER this — hence finish() before waiting on the relay.
         try:
             await session.finish()
         except Exception:
-            logger.warning("apple streaming helper did not finish cleanly", exc_info=True)
+            logger.warning("%s streaming helper did not finish cleanly", label, exc_info=True)
         try:
             await asyncio.wait_for(asyncio.shield(relay_task), timeout=3)
         except (asyncio.TimeoutError, Exception):
@@ -1577,9 +1645,21 @@ async def api_ws_stt(request: web.Request) -> web.WebSocketResponse:
         raise web.HTTPForbidden(text="WebSocket origin not allowed")
 
     cfg = KiroCrewConfig.load()
-    if not cfg.stt.enabled or cfg.stt.provider not in _STREAMING_PROVIDERS or not cfg.stt.streaming:
+    if (
+        not cfg.stt.enabled
+        or cfg.stt.provider not in streaming_providers()
+        or not cfg.stt.streaming
+    ):
+        # Complete the WebSocket upgrade so the client receives a typed error frame
+        # rather than a bare 503 it can only report as a generic 'connection' error.
+        # The guard audit records the refusal; no stt_stream_start is emitted, so
+        # no stt_stream_end is needed.
         _emit_guard_audit(request.remote or "unknown", outcome="unavailable")
-        raise web.HTTPServiceUnavailable(text="streaming STT not enabled")
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await _send_error(ws, "streaming STT is not enabled", _CODE_STREAMING_DISABLED)
+        await ws.close()
+        return ws
 
     global _active_sessions
     if _active_sessions >= _MAX_CONCURRENT_SESSIONS:
@@ -1622,6 +1702,13 @@ async def api_ws_stt(request: web.Request) -> web.WebSocketResponse:
             # setup below, which is entirely AWS-specific (credentials, region,
             # billing deadline).
             await _run_apple_session(ws, cfg, request, caller)
+            return ws
+
+        if cfg.stt.provider not in _STREAMING_PROVIDERS:
+            # An edition provider that declared ``streaming`` (the gate above
+            # admits no other non-built-in). Same client protocol and the same
+            # helper-session loop as ``apple``.
+            await _run_registered_session(ws, cfg, request, caller)
             return ws
 
         if TranscribeStreamingClient is None:

@@ -33,6 +33,7 @@ from kiro_crew.apps.registry_pipeline.checkout import _communicate_with_timeout
 from kiro_crew.apps.registry_pipeline.git_targets import (
     _entry_git_url,
     _git_target_is_unsupported,
+    _git_url_host,
     _normalize_git_target,
     _public_registry_name,
     _same_git_target,
@@ -42,6 +43,7 @@ from kiro_crew.apps.registry_pipeline.indexes import (
     _apply_configured_branch,
     _fetch_and_cache_external_registry,
     _load_external_registries,
+    _registry_sign_in_refused,
 )
 from kiro_crew.apps.registry_pipeline.manifests import _resolve_manifest
 from kiro_crew.apps.registry_pipeline.sources import _effective_registries, _load_registry_file
@@ -426,7 +428,9 @@ async def refresh_registries(repo: str | None = None) -> dict[str, Any]:
     Returns ``{ok, refreshed, failed, results, apps, lastSyncedAt}`` where
     ``ok`` is True only if every matched registry refreshed successfully and
     ``results`` carries the per-registry outcome so the UI can distinguish
-    "synced" from "sync failed, serving stale". When *repo* is supplied but
+    "synced" from "sync failed, serving stale"; a failed row whose clone git
+    refused for credentials also carries ``reason: "auth"`` and the ``host`` from
+    its configured URL, so the UI can name the fix and where it applies. When *repo* is supplied but
     matches no configured registry, returns ``ok: False`` with
     ``not_found: True`` so the route can map it to HTTP 404.
     """
@@ -470,7 +474,13 @@ async def refresh_registries(repo: str | None = None) -> dict[str, Any]:
         entries = await _fetch_and_cache_external_registry(reg)
         if entries is None:
             failed.append(display_name)
-            results.append({"name": display_name, "ok": False})
+            row: dict[str, Any] = {"name": display_name, "ok": False}
+            if _registry_sign_in_refused(reg.repo, reg.branch):
+                row["reason"] = "auth"
+                host = _git_url_host(reg.repo)
+                if host:
+                    row["host"] = host
+            results.append(row)
             continue
         # Expire per-app manifest caches so fresh display info is refetched
         # lazily on the next read (mtime expiry preserves the stale fallback).
@@ -628,11 +638,25 @@ async def _append_external_registry_apps(
         kept.append(entry)
     if not kept:
         return rows, set()
+    # Snapshot the index's version BEFORE the merge, which takes ``version`` from
+    # the app's own app.json -- and for an installed app that file is read from
+    # its persistent checkout, i.e. the tree that was installed, so it names the
+    # installed version until that checkout moves. The index is then the only
+    # listing input that has seen the registry's newer release.
+    index_versions = [e.get("version") for e in kept]
     resolved = await asyncio.gather(
         *[_resolve_manifest(e) for e in kept],
         return_exceptions=True,
     )
     kept = [r if isinstance(r, dict) else kept[i] for i, r in enumerate(resolved)]
+    for row, index_version in zip(kept, index_versions, strict=True):
+        # The index may only RAISE the version: a manifest fetched from the remote
+        # tip can be ahead of a lagging index, and that answer stands. An index
+        # value `_version_newer` cannot parse is never newer, so it is ignored.
+        if isinstance(index_version, str) and _version_newer(
+            index_version, row.get("version") or "0"
+        ):
+            row["version"] = index_version
     detected = await _detect_installed_probe(kept, installed_map)
     rows.extend(kept)
     return rows, detected
@@ -1221,7 +1245,10 @@ def _resolve_install_entry(name: str) -> tuple[dict[str, Any] | None, str]:
     pinned_url = str(meta.get("sourceUrl", "") or "")
     if not pinned_url:
         try:
-            return get_registry_app(name), ""
+            # The install itself: one bad store-listing response must not
+            # refuse this click from memory without a real fetch attempt.
+            with official_catalog.install_attempt():
+                return get_registry_app(name), ""
         except official_catalog.CatalogUnavailable as exc:
             # A refusal, not an absence: report the cause so the user is not sent
             # looking for a missing app during a catalog outage.

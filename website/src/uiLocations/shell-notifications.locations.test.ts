@@ -16,7 +16,7 @@ const INDEX_FILE = path.resolve(__dirname, '../../../src/kiro_crew/docs/ui-index
 const index = JSON.parse(fs.readFileSync(INDEX_FILE, 'utf-8')) as { locations: Loc[]; labels: Record<string, Record<string, string>> }
 const byId = new Map(index.locations.map(l => [l.id, l]))
 const src = (rel: string) => fs.readFileSync(path.resolve(__dirname, rel), 'utf-8')
-const APP_SRC = src('../App.tsx')
+const APP_SRC = ['../App.tsx', '../shell/appShell.tsx', '../shell/topbar/shellHeader.tsx', '../shell/nav/navRail.tsx', '../shell/nav/navRow.tsx'].map(src).join('\n')
 const FEED_SRC = src('../components/notifications/NotificationFeed.tsx')
 const DETAIL_SRC = src('../components/notifications/NotificationDetailPanel.tsx')
 const TERMINAL_SRC = src('../components/BottomTerminalPanel.tsx')
@@ -89,7 +89,7 @@ const EXPECTED: Record<string, Expect> = {
     placements: [shell('menu', ['shell.notifications'], [cond('has_unread_notifications')])],
   },
   'notifications.clear-all': {
-    kind: 'button', labelKey: 'components.notifications.notificationFeed.clear_all_notifications', source: FEED_SRC, en: 'Clear all notifications?', zh: '清除所有通知？',
+    kind: 'button', labelKey: 'components.notifications.notificationFeed.clear_all_notifications', source: FEED_SRC, en: 'Clear all notifications', zh: '清除所有通知',
     placements: [shell('menu', ['shell.notifications'], [cond('has_notifications')])],
   },
   'notifications.page-mark-all-read': {
@@ -97,8 +97,8 @@ const EXPECTED: Record<string, Expect> = {
     source: FEED_SRC, en: 'All', zh: '全部', placements: [page('toolbar', [cond('has_unread_notifications')])],
   },
   'notifications.page-clear-all': {
-    kind: 'button', labelKey: 'components.notifications.notificationFeed.clear', aliasKeys: ['components.notifications.notificationFeed.clear_all_notifications'],
-    source: FEED_SRC, en: 'Clear', zh: '清除', placements: [page('toolbar', [cond('has_notifications')])],
+    kind: 'button', labelKey: 'components.notifications.notificationFeed.clear_all', aliasKeys: ['components.notifications.notificationFeed.clear_all_notifications'],
+    source: FEED_SRC, en: 'Clear all', zh: '全部清除', placements: [page('toolbar', [cond('has_notifications')])],
   },
   'notifications.detail.mark-unread': {
     kind: 'button', labelKey: 'components.notifications.notificationDetailPanel.mark_unread', source: DETAIL_SRC, en: 'Mark unread', zh: '标为未读',

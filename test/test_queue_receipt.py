@@ -25,6 +25,7 @@ from kiro_crew.messaging.queue_receipt import (
     receipt_address_key,
     receipt_text,
 )
+from kiro_crew.testing.wait import finished
 
 
 class _Surface:
@@ -375,12 +376,18 @@ class TestLockIsCallerHeld:
         q, s = ReceiptQueue(), _Surface()
 
         async def go() -> None:
+            # The bound is tight on purpose: a transition that took the lock itself
+            # deadlocks here, and that deadlock is what the test asserts against.
             async with q.lock:
-                await asyncio.wait_for(q.create_or_grow_locked("s", s, "a", "alice"), timeout=2)
-                await asyncio.wait_for(
-                    q.flip_answering_locked("s", s, ["a"], owner="alice"), timeout=2
+                await finished(
+                    q.create_or_grow_locked("s", s, "a", "alice"), "create_or_grow", timeout=2
                 )
-                await asyncio.wait_for(q.finish_cancelled_locked("s", s), timeout=2)
+                await finished(
+                    q.flip_answering_locked("s", s, ["a"], owner="alice"),
+                    "flip_answering",
+                    timeout=2,
+                )
+                await finished(q.finish_cancelled_locked("s", s), "finish_cancelled", timeout=2)
 
         asyncio.run(go())
 
@@ -401,7 +408,8 @@ def _dispatch_owners() -> list[Path]:
     pkg = Path(Q.__file__).resolve().parent.parent
     found = sorted(pkg.glob("*/dispatch/*.py"))
     assert len(found) >= 8, f"expected telegram's dispatch owners, found {found}"
-    return found
+    # Discord's owners sit beside its facade (``discord/transport_dispatch_*.py``).
+    return found + sorted(pkg.glob("*/transport_dispatch_*.py"))
 
 
 #: The two names a drain reaches the flip through: the registry transition itself, and a

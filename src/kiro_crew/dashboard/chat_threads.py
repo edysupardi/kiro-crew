@@ -40,7 +40,7 @@ from kiro_crew.dashboard.chat_utils import slot_history_key
 from kiro_crew.dashboard.handlers._shared import read_bounded_json
 from kiro_crew.dashboard.request_priority import owner_start_priority
 from kiro_crew.dashboard.side_readonly_spec import ReadOnlySpecError, publish_readonly_spec
-from kiro_crew.dashboard.slot_ownership import deny_app_slot_access
+from kiro_crew.dashboard.slot_ownership import deny_app_slot_access, slot_not_found
 from kiro_crew.dashboard.state import DashboardState, _ChatSlot
 from kiro_crew.dashboard.ws import broadcast_thread_reply
 from kiro_crew.history import (
@@ -157,10 +157,10 @@ _NO_TEXT_FALLBACK_NO_TOOLS = (
 #: One sentence per failure. A retry line only where a retry can succeed.
 _FAILED_FALLBACK = "The reply didn't go through. Try again."
 _UNREADABLE_FALLBACK = "This chat's threads can't be read right now, so the reply was not kept."
-_NO_SPEC_FALLBACK = "This crewmate can't reply in threads right now. Ask in the main chat."
+_NO_SPEC_FALLBACK = "This mate can't reply in threads right now. Ask in the main chat."
 _CREWMATE_GONE_FALLBACK = (
-    "This crewmate is no longer available, so the reply was not answered. "
-    "Restore the crewmate or choose another one."
+    "This mate is no longer available, so the reply was not answered. "
+    "Restore the mate or choose another one."
 )
 _FULL_FALLBACK = "This thread is full. Ask in the main chat instead."
 _SIDECAR_FULL_FALLBACK = (
@@ -422,7 +422,7 @@ def _feature_off() -> web.Response:
     # The same shape the app-isolation refusal answers with, so a caller cannot
     # tell "threads are off" from "no such slot": the feature's presence is not
     # enumerable.
-    return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+    return slot_not_found()
 
 
 def _resolve_slot(
@@ -435,14 +435,14 @@ def _resolve_slot(
         )
     slot = state.get_slot(slot_key)
     if slot is None:
-        return None, web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+        return None, slot_not_found()
     denied = _deny_foreign_app(request, slot, operation)
     if denied is not None:
         return None, denied
     if slot.mode != DM_SLOT_MODE:
         return None, web.json_response(
             {
-                "error": "Threads live on a crewmate's chat.",
+                "error": "Threads live on a mate's chat.",
                 "code": "not_crewmate_chat",
             },
             status=409,
@@ -658,7 +658,7 @@ async def api_chat_thread_reply(request: web.Request) -> web.Response:
     if flight_key in _in_flight:
         return web.json_response(
             {
-                "error": f"{slot.agent or 'Your crewmate'} is still replying. Wait for that reply.",
+                "error": f"{slot.agent or 'Your mate'} is still replying. Wait for that reply.",
                 "code": "thread_turn_in_flight",
             },
             status=409,
@@ -1035,7 +1035,9 @@ async def _run_thread_turn(
             logger.warning("Thread turn aborted (prompt busy): slot=%s mid=%s", slot.key, mid)
             _final(_FAILED_FALLBACK, is_error=True)
             return
-        if not chunks:
+        # The returned text, not the streamed chunks: a prompt-busy retry starts its
+        # text over, so chunks from an earlier attempt can stand beside an empty answer.
+        if not response_text:
             response_text = (
                 _NO_TEXT_FALLBACK_TOOLS if tools_available else _NO_TEXT_FALLBACK_NO_TOOLS
             )

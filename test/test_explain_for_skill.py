@@ -28,7 +28,6 @@ import importlib.util
 import json
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -36,6 +35,7 @@ import pytest
 import kiro_crew.skills as skills_module
 from kiro_crew.config.loader import KiroCrewConfig, SkillsConfig
 from kiro_crew.skills import SkillsLoader
+from kiro_crew.testing.wait import wait_until
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILL_DIR = ROOT / "src" / "kiro_crew" / "builtin_skills" / "explain-for"
@@ -72,7 +72,7 @@ def loader(tmp_path: Path, opened) -> SkillsLoader:
     **``config`` is passed explicitly, and the fixture is function-scoped.**
     ``SkillsLoader(config=None)`` falls back to ``KiroCrewConfig.load()``, which
     resolves ``config_dir()`` — and that CREATES the operator's real data home as
-    a side effect (see ``_isolate_kirocrew_home`` in the rootdir ``conftest.py``),
+    a side effect (see ``_isolate_kirocrew_home`` in ``test/conftest_floor_home.py``),
     which ``no-test-side-effects`` forbids. A module-scoped fixture is built
     BEFORE that function-scoped autouse isolation applies, so the scope is load
     bearing here, not a performance choice.
@@ -131,17 +131,19 @@ def _settle_catalog(loader: SkillsLoader) -> None:
     sleep decides the outcome; the deadline only bounds a runner that is truly
     stuck.
     """
-    deadline = time.monotonic() + _CATALOG_WAIT_SECS
-    while True:
+
+    def _published() -> bool:
         loader.list_skills()
-        if loader.catalog_status() == "complete":
-            return
-        if time.monotonic() >= deadline:
-            raise AssertionError(
-                f"skill catalog still building after {_CATALOG_WAIT_SECS:.0f}s; "
-                "the fixture cannot vouch for a complete catalog"
-            )
-        time.sleep(0.01)
+        return loader.catalog_status() == "complete"
+
+    wait_until(
+        _published,
+        timeout=_CATALOG_WAIT_SECS,
+        describe=lambda: (
+            f"skill catalog still building after {_CATALOG_WAIT_SECS:.0f}s; "
+            "the fixture cannot vouch for a complete catalog"
+        ),
+    )
 
 
 @pytest.fixture

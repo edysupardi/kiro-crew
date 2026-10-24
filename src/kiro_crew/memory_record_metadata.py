@@ -95,6 +95,14 @@ def verified_correction(
             return None
         if not observed or (current_updated and observed < current_updated):
             return None
+        source_ref = f"{session_key}#message:{index}: {statement}"
+        try:
+            normalize_metadata({"source_ref": source_ref})
+        except ValueError:
+            # The evidence is stored as the record's source_ref and must pass
+            # the same validation there; evidence it cannot hold leaves the
+            # correction pending, like any unverified one.
+            return None
         return CorrectionEvidence(
             key,
             before["value_json"],
@@ -104,7 +112,7 @@ def verified_correction(
             # correction would stall as a conflict proposal.
             json.dumps(value, ensure_ascii=False),
             revision,
-            f"{session_key}#message:{index}: {statement}",
+            source_ref,
             observed,
         )
     return None
@@ -123,6 +131,10 @@ _FIELDS = (
     "observed_at",
     "source_ref",
 )
+_NOT_AN_OBJECT = "Memory metadata must be an object"
+# How much of an unknown field name an error or a log line repeats.
+_FIELD_NAME_CHARS = 40
+_FIELD_NAMES_SHOWN = 3
 _EMAIL = re.compile(
     r"(?<![\w.+-])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
     r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
@@ -134,9 +146,11 @@ _DERIVED = {"embedding", "last_accessed_at", "access_count", "id", "kind", "meta
 _HASH_DERIVED = _DERIVED | {"updated_at"}
 
 
-def ensure_schema(db: sqlite3.Connection) -> None:
-    """Create additive tables/indexes without executescript's implicit COMMIT."""
-    statements = (
+#: Every additive object, by name: :func:`ensure_schema` builds them and
+#: :func:`schema_is_current` reads whether they all exist, from the one list.
+_SCHEMA_OBJECTS: tuple[tuple[str, str], ...] = (
+    (
+        "memory_record_meta",
         """CREATE TABLE IF NOT EXISTS memory_record_meta (
             record_id TEXT PRIMARY KEY, kind TEXT NOT NULL,
             revision INTEGER NOT NULL, category TEXT NOT NULL DEFAULT '',
@@ -146,21 +160,45 @@ def ensure_schema(db: sqlite3.Connection) -> None:
             observed_at TEXT NOT NULL DEFAULT '', source_ref TEXT NOT NULL DEFAULT '',
             content_hash TEXT NOT NULL, email_addresses TEXT NOT NULL DEFAULT '[]',
             updated_at TEXT NOT NULL)""",
+    ),
+    (
+        "memory_revisions",
         """CREATE TABLE IF NOT EXISTS memory_revisions (
             id INTEGER PRIMARY KEY AUTOINCREMENT, record_id TEXT NOT NULL,
             revision INTEGER NOT NULL, base_revision INTEGER NOT NULL,
             status TEXT NOT NULL, operation TEXT NOT NULL, source TEXT NOT NULL,
             before_json TEXT, after_json TEXT, metadata_json TEXT NOT NULL,
             created_at TEXT NOT NULL)""",
+    ),
+    (
+        "idx_memory_revision_record",
         "CREATE INDEX IF NOT EXISTS idx_memory_revision_record "
         "ON memory_revisions(record_id, id)",
+    ),
+    (
+        "idx_memory_fact_identity",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_fact_identity "
         "ON memory_record_meta(scope, subject, predicate) "
         "WHERE kind IN ('fact', 'directive') AND subject <> '' AND predicate <> '' "
         "AND status = 'active'",
-    )
-    for statement in statements:
+    ),
+)
+
+
+def ensure_schema(db: sqlite3.Connection) -> None:
+    """Create additive tables/indexes without executescript's implicit COMMIT."""
+    for _name, statement in _SCHEMA_OBJECTS:
         db.execute(statement)
+
+
+def schema_is_current(db: sqlite3.Connection) -> bool:
+    """Whether every object :func:`ensure_schema` creates already exists. Reads only."""
+    names = [name for name, _statement in _SCHEMA_OBJECTS]
+    placeholders = ", ".join("?" for _ in names)
+    found = db.execute(
+        f"SELECT count(*) FROM sqlite_schema WHERE name IN ({placeholders})", names
+    ).fetchone()[0]
+    return found == len(names)
 
 
 def identity_key(db: sqlite3.Connection, key: str, metadata: dict | None) -> str:
@@ -240,15 +278,43 @@ def _timestamp(value: Any, field: str) -> str:
         raise ValueError(f"{field} must be an ISO date or timestamp") from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    try:
+        return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    except OverflowError as exc:
+        # An offset can move a date at the edge of the calendar past it in UTC
+        # ("9999-12-31T23:59:59-05:00"): an invalid value, not a crash.
+        raise ValueError(f"{field} is out of the supported date range") from exc
+
+
+def describe_fields(names: list[str]) -> str:
+    """Field names for an error or a log line: escaped, truncated and bounded.
+
+    An unknown name is untrusted text (model output or a request body), so a
+    message repeats at most ``_FIELD_NAME_CHARS`` characters of each and at most
+    ``_FIELD_NAMES_SHOWN`` names, escaped by ``repr`` so it stays on one line.
+    """
+    shown = [
+        repr(name[:_FIELD_NAME_CHARS]) + ("..." if len(name) > _FIELD_NAME_CHARS else "")
+        for name in names[:_FIELD_NAMES_SHOWN]
+    ]
+    more = len(names) - len(shown)
+    return ", ".join(shown) + (f" (+{more} more)" if more else "")
 
 
 def normalize_metadata(metadata: dict | None) -> dict:
-    """Validate a patch; canonical identity is explicit, never inferred from text."""
+    """Validate a patch; canonical identity is explicit, never inferred from text.
+
+    An unknown field is refused by name, so the error says which field the
+    schema does not know.
+    """
     if metadata is None:
         return {}
-    if not isinstance(metadata, dict) or any(key not in _FIELDS for key in metadata):
-        raise ValueError("Unknown memory metadata field")
+    if not isinstance(metadata, dict):
+        raise ValueError(_NOT_AN_OBJECT)
+    unknown = [str(key) for key in metadata if key not in _FIELDS]
+    if unknown:
+        plural = "s" if len(unknown) > 1 else ""
+        raise ValueError(f"Unknown memory metadata field{plural} {describe_fields(unknown)}")
     result = {}
     for key, value in metadata.items():
         if key in {"valid_from", "valid_until", "observed_at"}:
@@ -259,6 +325,19 @@ def normalize_metadata(metadata: dict | None) -> dict:
             result[key] = value.strip() if key == "scope" else " ".join(value.split())
             if key in {"subject", "predicate", "category"}:
                 result[key] = result[key].casefold()
+            # Casefolding can lengthen text ("ß" -> "ss"). The bound holds for the
+            # normalized value too, so a later pass over it (``sync_record``
+            # normalizes again) cannot refuse what this pass accepted.
+            if len(result[key]) > 1024:
+                raise ValueError(f"{key} must be text of at most 1024 characters")
+            # json.loads accepts a lone surrogate, which SQLite cannot encode:
+            # refuse it here as this field's invalid value, not at the INSERT.
+            try:
+                result[key].encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError(
+                    f"{key} contains unpaired surrogate characters and cannot be stored as UTF-8"
+                ) from None
     if "status" in result and result["status"] not in _STATUSES:
         raise ValueError("Unknown memory status")
     if (
@@ -268,6 +347,27 @@ def normalize_metadata(metadata: dict | None) -> dict:
     ):
         raise ValueError("valid_until must be later than valid_from")
     return result
+
+
+def normalize_extracted_metadata(metadata: object) -> tuple[dict, list[str]]:
+    """Normalize metadata a consolidation MODEL authored; returns ``(fields, dropped)``.
+
+    The write-side policy for metadata the model, not a caller, wrote. A field
+    name outside the schema carries nothing this table can store, so it is
+    dropped and returned for the caller to count and log rather than failing
+    the item or the span; unknown names never reach stored metadata. The known
+    fields are validated exactly as :func:`normalize_metadata` validates a
+    caller's patch, so a known field with an invalid value, or metadata that is
+    not an object, still raises ``ValueError`` for the caller to skip that one
+    item.
+    """
+    if metadata is None:
+        return {}, []
+    if not isinstance(metadata, dict):
+        raise ValueError(_NOT_AN_OBJECT)
+    dropped = [str(key) for key in metadata if key not in _FIELDS]
+    known = {key: value for key, value in metadata.items() if key in _FIELDS}
+    return normalize_metadata(known), dropped
 
 
 def _emails(row: dict | None) -> list[str]:

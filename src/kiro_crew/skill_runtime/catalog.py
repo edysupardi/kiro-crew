@@ -852,7 +852,7 @@ def _iter_visible(
     return [
         (name, skill_file, within)
         for name, skill_file, within in loader._iter(project_dir)
-        if loader._owning_app(name, skill_file) not in disabled_apps
+        if loader._owning_app(name, skill_file, within) not in disabled_apps
     ]
 
 
@@ -949,8 +949,20 @@ def _iter_uncached(
 
     # Unconfined (None): the global tree may legitimately hold app-registered
     # symlinks resolving into a provider root outside it.
+    #
+    # warn_outside_links: this is the catalog base walk, the one surface that
+    # can say a direct-child link in the skills dir was dropped from the whole
+    # catalog, so it is the only caller that turns the outside-root warning on.
+    # It passes the resolved ``skills.extra_paths`` as extra_path_roots: a link
+    # whose target is under one of those loads through the extra-path walk
+    # below, so it must not warn — the operator already followed the advice.
+    # Admission and containment are unchanged; only the warning is affected.
+    _extra_real = tuple(os.path.realpath(path) for path in loader._extra_paths)
     results: list[tuple[str, Path, str | None]] = [
-        (name, path, None) for name, path in sk._iter_skill_files(loader._dir)
+        (name, path, None)
+        for name, path in sk._iter_skill_files(
+            loader._dir, warn_outside_links=True, extra_path_roots=_extra_real
+        )
     ]
     seen = {name for name, _, _ in results}
     # (root, confine_to): only the project root is confined — see
@@ -1064,7 +1076,9 @@ def _invalidate_iter_cache(loader: SkillsLoader) -> None:
         loader._request_catalog_refresh(scope)
 
 
-def _owning_app(loader: SkillsLoader, name: str, skill_file: Path) -> str | None:
+def _owning_app(
+    loader: SkillsLoader, name: str, skill_file: Path, within: str | None = None
+) -> str | None:
     """The app whose bundle this skill came from, or ``None``.
 
     Two shapes have to resolve to the same owner, because ``bridges``
@@ -1085,6 +1099,13 @@ def _owning_app(loader: SkillsLoader, name: str, skill_file: Path) -> str | None
     Path-shaped, not manifest-keyed, on purpose: it must answer for a
     third-party app just as well as a builtin, and the registration layout
     is the one thing every app shares.
+
+    A skill whose path names no app may name one itself in an ``app:``
+    frontmatter line. An app's skill shipped in ``builtin_skills/`` needs it:
+    the builtin sync copies it into the skills directory, so neither shape
+    above sees it. The line can only withhold the skill that carries it. A
+    confined project skill (*within* set) belongs to its repository, so its
+    frontmatter is not read here.
     """
     from kiro_crew import skills as sk  # circular import: the facade imports this module
 
@@ -1095,7 +1116,8 @@ def _owning_app(loader: SkillsLoader, name: str, skill_file: Path) -> str | None
         from kiro_crew.apps.manager import apps_dir
 
         real = Path(os.path.realpath(skill_file))
-        root = apps_dir()
+        # Resolved like ``real``: the default data home keeps $HOME's spelling.
+        root = Path(os.path.realpath(apps_dir()))
         if real.is_relative_to(root):
             # <apps root>/<app>/... — the segment directly under the root.
             return real.relative_to(root).parts[0]
@@ -1105,7 +1127,10 @@ def _owning_app(loader: SkillsLoader, name: str, skill_file: Path) -> str | None
             return _builtin_dir_app_name(str(pkg_dir))
     except Exception:
         return None
-    return None
+    if within is not None:
+        return None
+    meta = loader._readable_frontmatter(skill_file, within=None) or {}
+    return meta.get("app", "").strip() or None
 
 
 def _resolve_path(

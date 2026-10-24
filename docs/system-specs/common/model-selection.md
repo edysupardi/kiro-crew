@@ -230,8 +230,10 @@ an out-of-scope pin reads exactly like an unset one:
   every surface routes through. It takes the per-session `backend` because
   `create_provider_factory` resolves that before the model; a member-DM thread
   auto-routed to another harness is judged against the harness it runs.
-- `config.loader.resolve_effective_model` — the display resolver behind the model
-  chip. It scopes against the configured backend.
+- `config.loader.resolve_effective_model` — the default-model ladder, read by the
+  model chip and by every new session a caller starts without naming a model
+  (`session._session_model`, run inside `get_or_create`). It scopes against the
+  configured backend, or against the per-session backend the session layer passes.
 
 The two MUST agree on whether a pin survives, or the chip names a model no turn
 runs. `test_model_scope_wire_paths.py` pins that agreement.
@@ -412,7 +414,7 @@ its own once the cache refreshes with a list that carries it.
   every validated model pin (`agent.role_models.*`, `agent.fallback_model`,
   `agent.refusal_fallback_model`, the per-app `apps.<name>.model` and the
   `decisions.model_route` tiers) one
-  grammar, `_MODEL_PIN_PATTERN` in `dashboard/handlers/core.py`: a bare id, or the
+  grammar, `_MODEL_PIN_PATTERN` in `dashboard/handlers/core_config_schema.py`: a bare id, or the
   provider-qualified `provider/model` form OpenCode advertises, built from the
   same `QUALIFIED_MODEL_PATTERN` the spawn and cron model-name check uses (so
   `ollama/qwen3:8b` saves too). It refuses empty
@@ -461,19 +463,61 @@ its own once the cache refreshes with a list that carries it.
   read or the agent-pin read fails (`useSettingsDefaultModel` reports `failed`),
   the composer shows an inline "failed to load config" notice instead.
 - **A dashboard chat slot with an empty `slot.model` inherits**, and keeps inheriting
-  across turns. When neither the slot nor its crewmate pins a model, the turn resolves
-  the default the slot inherits (`_default_session_model`). While that default is
-  non-empty, neither `slot.model` backfill site writes the provider's served model
-  into the slot; the composer chip reads it from `served_model`. The backfill still
-  runs when every tier defers to the backend. A settings change to the default
+  across turns and across a restart: a metadata line whose `model` is `""` restores
+  `""`. Only a line with no `model` key, saved before every save wrote one, takes the
+  agent's configured model (`metadata_codec._read_model`). When neither the slot nor
+  its mate pins a model, the turn asks
+  `get_or_create` for no model and the allocation resolves the ladder itself; the turn
+  reads the same resolver over the session manager's config
+  (`_inherited_default_model`) only to know which default the slot inherits. Neither
+  `slot.model` backfill site writes the provider's served model into such a slot,
+  whatever that default is, Auto included (every tier deferring to the backend); the
+  composer chip reads it from `served_model`. The backfill writes only a slot whose
+  mate pins a model. A settings change to the default
   rebuilds the provider factory but leaves live sessions alone, so the next turn of an
   inheriting slot compares its live session's allocation stamp
   (`allocation_requested_model`) with the default it inherits now. When they differ
   it queues the same reset a model pick queues, consumed with `skip_if_busy`, so a
   turn already streaming on that session is never cut. An empty stamp is unknown and
-  triggers nothing. A slot or crewmate pin never triggers it. A `slot.model` an
-  earlier backfill stored is indistinguishable from a person's pick and stays until
-  the user picks Auto.
+  triggers nothing. A slot or mate pin never triggers it. A `slot.model` an
+  earlier backfill stored is indistinguishable from a person's pick, so nothing
+  clears it on its own: it stays until the user picks Auto in that chat, or presses
+  **Make my chats follow the default** under Settings > Chat > Model. That action
+  (`dashboard/chat_follow_default.py`, owner-only) counts the chats a person started
+  that keep a model, through `GET /api/chat/slots/follow-default`. The count also
+  answers the saved Default Model (`""` on Auto), the kept models with how many
+  chats keep each, and the titles of the first five counted chats, open ones first,
+  each redacted for display before it is capped; the confirm names all three, so it
+  says where the chats land, which models they leave and which chats change.
+  Kept model names are redacted for display too, with counts grouped by display label.
+  A chat whose agent template pins a model follows that pin rather than the Default
+  Model, as that setting's own hint says. On confirm,
+  `POST` clears `slot.model` on exactly the counted set: the request carries the
+  count's digest and is refused `409 chats_changed`, changing nothing, when the set
+  has moved since, and it answers `500 chats_not_saved` with the counts, never a
+  success, when a line cannot be rewritten. A chat being opened at that moment, or
+  one whose close is still being saved, is left for the next press. So is a chat
+  whose tab the boot restore has not rebuilt yet (or could not read), like one
+  being opened. A chat a
+  throttle or refusal fallback is serving is not counted, so the press never strands
+  it on the fallback: the fallback's restore still moves it back. A chat
+  `session_create` made (its line names a `created_by`), a mate's own chat, and
+  app, cron, channel and remote sessions are never counted. Neither is a chat on a
+  mate whose config pins a model: that pin outranks the default, and the chat's
+  next turn would write it back. A slot kind a person does not start must set a
+  non-person origin or a `created_by`: the origin check is the guard that keeps it
+  out. Config pins are read, never written. An open chat's clear is saved at once
+  and confirmed as a guarded write, so a close waits for it or refuses it. A
+  skipped save does not count as changed. A failed save restores
+  the model, provided the slot, session key, cleared model and pick generation still
+  match and no fallback is serving. A reset this clear queued stays armed and
+  restarts the session on the restored model.
+  That chat fails the confirm and is counted again on the next press. A replacement
+  or a later pick wins and is skipped; other drift fails without rollback, leaving
+  the slot dirty for the flush to retry. The press itself resets no live session.
+  A chat whose cleared pin or non-empty allocation stamp differs from the Default
+  Model setting gets the pick's `skip_if_busy` reset at its next turn, Auto included.
+  The pin also covers a session switched in place, which leaves the stamp unchanged.
 - **Per-project Claude route model preference (`claude.project_routes`)**:
   When a slot has an empty `slot.model` and its working directory is bound to a Claude route,
   `_default_session_model` consults the route's persistent model preference
@@ -508,16 +552,18 @@ its own once the cache refreshes with a list that carries it.
   `AgentConfig.resolve_model(role)` in `config/sections_agent.py`. Roles default to
   `"auto"` and deliberately do NOT inherit `agent.model`, so a user's chat model
   does not silently become the price of every background task. The sessions a
-  crewmate dispatches with `session_create` are the one decided exception
+  mate dispatches with `session_create` are the one decided exception
   ([rfc-worker-model-inheritance](../../request-for-change/rfc-worker-model-inheritance.md)):
-  they take the CREWMATE profile's explicit model and effort pins (the values
-  the person chose on that crewmate's profile, never the user's chat model).
-  An empty crewmate pin leaves that half unpinned, so the worker's selected agent
+  they take a copy, made at creation, of the CREWMATE profile's explicit model
+  and effort pins (the values the person chose on that mate's profile, never
+  the user's chat model), so a later profile edit does not reach a worker
+  already open.
+  An empty mate pin leaves that half unpinned, so the worker's selected agent
   or the global default decides. The per-crewmate cost cap is that
   profile's `worker_model` / `worker_reasoning_effort`, where
   `"auto"` is a real pin on the backend default. `worker_session_defaults` in
   `config/sections_agent_fields.py` resolves the pair, and an explicit argument on the call
-  wins. An inherited model the picker guard refuses, or one the worker's harness
+  wins. A copied model the picker guard refuses, or one the worker's harness
   does not serve, is dropped and the session starts on the default; the full
   rule is in [session-control](../modules/session-control.md).
 - **A served context window** is declared only through `agent.model_context_tokens`, one
@@ -566,6 +612,10 @@ its own once the cache refreshes with a list that carries it.
   the call and raises `AcpModelUnavailable` itself, so the handler answers 400 and
   the slot keeps its old model instead of reporting a switch the session never
   made. `AcpClient.set_model` (dedicated runtime) raises inside the call as before.
+  The same raise reaches `session_control.apply_deferred_model_switch` when a pick
+  taken mid-turn lands at the turn boundary; with no request left to answer it arms
+  the deferred reset instead, and the cold start's withheld-pin handling is what
+  tells the user (see "Model switch during a response" in learn-cron-dashboard).
   On a backend that switches through `session/set_model` (kiro-cli),
   `AcpSessionHandle.set_model` waits briefly for the adapter's reply before
   recording the model. An explicit error reply is recorded in `model_pin_refused`
@@ -594,11 +644,16 @@ comes only from live providers sharing that scoped backend's namespace: `kiro`
 (including the empty default backend) and `kas` share `acp`. Providers with
 unknown identity or another namespace supply no evidence, so a pin the scoped
 backend has no live catalog for is treated as unknown (allowed), never rejected
-by an unrelated harness's advertised ids.
+by an unrelated harness's advertised ids. The one exception: when the scoped
+backend shares the `acp` namespace and `model_registry.lacks_acp_id` says the
+registry knows the model but gives it no kiro id, the pin is refused with no
+catalog, because nothing offline can confirm kiro-cli serves it (the registry has
+no kiro id to check against). A live catalog is still asked first and accepts the
+pin if it advertises it.
 
 ## The one allowed concrete fallback
 
-The `claude_code` seam's `cc_model` (`_BACKGROUND_CC_MODEL` in `agent.py`) is the one
+The `claude_code` seam's `cc_model` (`_BACKGROUND_CC_MODEL` in `agent_parts/spec_build.py`) is the one
 allowed concrete fallback, because that backend cannot resolve `"auto"`. Keep it off
 the default path.
 

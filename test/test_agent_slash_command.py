@@ -23,6 +23,7 @@ from kiro_crew.dashboard import chat_handlers, chat_runner
 from kiro_crew.dashboard.chat_handlers import SlotAgentSwitchCaller, _switch_target_busy
 from kiro_crew.dashboard.state import _ChatSlot
 from kiro_crew.execution_context import read_session_execution
+from kiro_crew.testing.wait import await_until
 
 WORKER = "kirocrew-worker"
 
@@ -119,7 +120,7 @@ async def test_a_turns_caller_is_refused_an_owner_only_choice():
 
 
 async def _chat_with_worker(tmp_path, monkeypatch):
-    state, slot, _ = await asyncio.wait_for(_template_chat(tmp_path, monkeypatch), 20)
+    state, slot, _ = await await_until(asyncio.ensure_future(_template_chat(tmp_path, monkeypatch)))
     monkeypatch.setattr(
         "kiro_crew.config.loader._materialized_kiro_agent",
         lambda name, project_dir=None: name if name in (TEMPLATE, WORKER) else "",
@@ -134,10 +135,10 @@ async def _run_command(state, slot, text):
     # read that reservation as its own turn, not as a turn in flight.
     slot._turn_admission_reserved = True
     try:
-        await asyncio.wait_for(chat_runner._run_chat(state, slot, text), 10)
+        await await_until(asyncio.ensure_future(chat_runner._run_chat(state, slot, text)))
     finally:
         slot._turn_admission_reserved = False
-    await asyncio.wait_for(drain_background_tasks(state), 10)
+    await await_until(asyncio.ensure_future(drain_background_tasks(state)))
 
 
 def _last_assistant(slot) -> str:
@@ -159,8 +160,8 @@ async def test_agent_command_switches_through_the_pickers_transaction(tmp_path, 
     assert execution is not None and execution.selection_kind == "template"
 
     # And the next turn starts on the new agent instead of being refused.
-    await asyncio.wait_for(chat_runner._run_chat(state, slot, "Continue."), 10)
-    await asyncio.wait_for(drain_background_tasks(state), 10)
+    await await_until(asyncio.ensure_future(chat_runner._run_chat(state, slot, "Continue.")))
+    await await_until(asyncio.ensure_future(drain_background_tasks(state)))
     state.sessions.record_failure.assert_not_awaited()
     state.sessions.get_or_create.assert_awaited_once()
     assert not any(row["role"] == "error" for row in slot.messages)
@@ -209,8 +210,8 @@ async def test_agent_subcommands_still_reach_the_harness(tmp_path, monkeypatch):
 
 async def _post_switch(state, body):
     async with TestClient(TestServer(as_owner(_make_app_with_agent_routes(state)))) as client:
-        response = await asyncio.wait_for(
-            client.post("/api/chat/slots/template-chat/agent", json=body), 10
+        response = await await_until(
+            asyncio.ensure_future(client.post("/api/chat/slots/template-chat/agent", json=body))
         )
         return response.status, await response.json()
 
@@ -233,13 +234,38 @@ async def test_announce_appends_the_same_line_the_in_turn_command_does(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_the_picker_without_announce_appends_nothing(tmp_path, monkeypatch):
+async def test_the_picker_without_announce_appends_only_the_boundary_notice(tmp_path, monkeypatch):
+    """The picker writes no ``/agent`` line, only the session-switch notice."""
     state, slot = await _chat_with_worker(tmp_path, monkeypatch)
     before = list(slot.messages)
     status, body = await _post_switch(state, {"agent": WORKER, "agent_kind": "template"})
     assert status == 200 and body["ok"], body
     assert slot.agent == WORKER
+    assert slot.messages[: len(before)] == before
+    added = slot.messages[len(before) :]
+    assert [row["meta"]["kind"] for row in added] == ["session_switch"]
+    assert added[0]["content"] == switch_announcement(WORKER)
+
+
+@pytest.mark.asyncio
+async def test_a_re_pick_of_the_bound_agent_appends_no_boundary_row(tmp_path, monkeypatch):
+    state, slot = await _chat_with_worker(tmp_path, monkeypatch)
+    status, body = await _post_switch(state, {"agent": WORKER, "agent_kind": "template"})
+    assert status == 200 and body["ok"], body
+    before = list(slot.messages)
+    status, body = await _post_switch(state, {"agent": WORKER, "agent_kind": "template"})
+    assert status == 200 and body["ok"], body
     assert slot.messages == before
+
+
+@pytest.mark.asyncio
+async def test_an_announced_switch_appends_no_second_boundary_row(tmp_path, monkeypatch):
+    state, slot = await _chat_with_worker(tmp_path, monkeypatch)
+    status, body = await _post_switch(
+        state, {"agent": WORKER, "agent_kind": "template", "announce": True}
+    )
+    assert status == 200 and body["ok"], body
+    assert not any((row.get("meta") or {}).get("kind") == "session_switch" for row in slot.messages)
 
 
 @pytest.mark.asyncio

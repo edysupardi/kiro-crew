@@ -116,7 +116,7 @@ It has to be its own file because every other place a decision could land is a
 TAIL. The status file's `events_tail` is bounded by schema and rewritten whole
 each cycle. The session ledger keeps `_MAX_EVENTS` = 100 events on disk and
 `session_ledger_read` returns only the newest `_MAX_EVENT_TAIL` = 20 (both in
-`session_ledger.py`; the injected `[work ledger]` block carries no events at
+`session_ledger_layout.py`; the injected `[work ledger]` block carries no events at
 all). A patrol writes at least one event per cycle, so a decision recorded in
 cycle 3 of a 40-cycle run is off the readable tail by about cycle 23 and off
 disk long before the `max_cycles=960` patrol ends. Tails answer "what just
@@ -321,10 +321,12 @@ via `monitor_update`, see "Live steering"):
 
 ## Your panel: publish JUDGMENTS, never numbers
 
-The Dashboard tab beside your chat draws your own page, where an item reaches the
-reader only through an agentic field written with `dashboard_write` (it appears
-under "Needs you" with the act it needs). So publish every item under `you` here,
-and also write it to the Dashboard tab's field.
+The Dashboard tab beside your chat draws the page you have, where an item reaches
+the reader only through an agentic field written with `dashboard_write` (on
+`project-report` it appears under "Needs you" with the act it needs). So publish
+every item under `you` here, and also write it to the Dashboard tab's field when
+your `[DASHBOARD]` block names one; with no such block you have no page yet, and
+the write is refused.
 
 `panel_publish` and `dashboard_write` belong to the `@kirocrew-panel` server,
 which is mounted only on a crew member's own chat session (with `agent.crew_panel`

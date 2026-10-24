@@ -335,11 +335,11 @@ def test_crewmate_cards_name_the_crewmate_the_way_the_user_knows_it():
     )
     before = {"exists": True, "fields": {"description": "old"}}
     preview = catalog.build_preview("crewmate.update", p, before, {"label": "Rock"})
-    assert preview["title"] == "Update crewmate “Rock”"
+    assert preview["title"] == "Update mate “Rock”"
     assert preview["scope"]["members"] == ["Rock"]
     assert preview["apply"][0]["path"] == "/api/agents/scout"
     plain = catalog.build_preview("crewmate.update", p, before, {})
-    assert plain["title"] == "Update crewmate “scout”"
+    assert plain["title"] == "Update mate “scout”"
     assert plain["scope"]["members"] == ["scout"]
 
 
@@ -429,7 +429,33 @@ def test_undo_restores_the_prior_state_and_says_when_it_cannot():
     assert ops == [{"section": "allowedTools", "id": "@a/b", "action": "inherit"}]
 
 
-def test_only_editable_fields_may_change_on_a_re_preview():
+def test_a_crewmates_capability_undo_removes_instead_of_inheriting():
+    """A crewmate's own file has no parent: an absent or off row is undone by ``remove``."""
+    draft = {
+        "operations": [
+            {"section": "allowedTools", "id": "@a/new", "action": "set", "value": True},
+            {"section": "allowedTools", "id": "@a/off", "action": "set", "value": True},
+        ]
+    }
+    rows = [
+        {"section": "allowedTools", "id": "@a/off", "state": "local", "present": False},
+        {"section": "allowedTools", "id": "@a/on", "state": "local", "present": True},
+    ]
+    draft["operations"].append({"section": "allowedTools", "id": "@a/on", "action": "remove"})
+    p = {"member": "pixel", "draft": draft}
+    before = {"revision": "r0", "mode": "mate", "rows": rows}
+
+    undo, reason = catalog.build_undo(
+        catalog.KIND_CREWMATE_CAPABILITIES, p, before, [{}, {"revision": "r1"}], 1
+    )
+
+    assert reason is None
+    ops = undo[0]["body"]["operations"]
+    assert [(op["action"], op.get("value")) for op in ops] == [
+        ("remove", None),
+        ("remove", None),
+        ("set", True),
+    ]
     catalog.check_editable(
         "setting.change", {"path": "a.b", "value": 1}, {"path": "a.b", "value": 2}
     )
@@ -528,7 +554,7 @@ def test_a_failed_first_step_is_retryable_and_a_failed_later_step_is_partial():
     store.record_failure(rec, op="apply", index=1, status=500, body=None)
     assert rec["status"] == "partial"
     assert rec["result"]["summary"] == (
-        "Created crewmate “Scout”, but its goal or its schedule was not saved"
+        "Created mate “Scout”, but its goal or its schedule was not saved"
     )
 
 
@@ -593,8 +619,8 @@ def test_store_survives_a_restart(tmp_path):
 def test_reload_admits_at_most_the_card_cap_and_refuses_an_oversized_file(tmp_path, monkeypatch):
     path = tmp_path / "change_cards.json"
     store = CardStore(path, clock=Clock())
-    for _ in range(3):
-        _propose(store)
+    for value in ("brief", "ultra-brief", "detailed"):
+        _propose(store, params={"path": "chat.verbosity", "value": value})
     asyncio.run(store.flush())
     monkeypatch.setattr(cards, "MAX_STORED_CARDS", 2)
     again = CardStore(path, clock=Clock())
@@ -706,7 +732,7 @@ def test_capacity_pruning_keeps_cards_that_still_have_a_step_to_run(monkeypatch)
         store.get(settled["id"])
     # Full with nothing settled: a new card is refused instead of evicting one.
     with pytest.raises(CardError) as exc:
-        _propose(store)
+        _propose(store, params={"path": "chat.verbosity", "value": "detailed"})
     assert exc.value.code == "too_many_cards"
     assert store.get(running["id"])["status"] == "applying"
 
@@ -882,3 +908,34 @@ def test_guide_text_carrying_a_credential_is_refused():
     with pytest.raises(guide_catalog.GuideCatalogError) as exc:
         guide_catalog.clean_guide_text(f"paste {_FAKE_TOKEN} here", "intro", 300)
     assert exc.value.code == "invalid_text"
+
+
+def test_a_card_identical_to_one_still_waiting_is_refused():
+    """Atlas raised two identical milestone cards 7 s apart: the second only doubled
+    what the person had to press. A card the same slot already has waiting, with the
+    same kind and params, is refused; a different proposal, or the same one after the
+    first was answered, is a new question."""
+    store = CardStore(None, clock=Clock())
+    first = _propose(store)
+    with pytest.raises(CardError) as exc:
+        _propose(store)
+    assert exc.value.code == "duplicate_card"
+    assert exc.value.status == 409
+    assert first["id"] in str(exc.value)
+    assert len(store.pending(None)) == 1
+    other = _propose(store, params={"path": "chat.verbosity", "value": "detailed"})
+    assert other["id"] != first["id"]
+    store.cancel(first, revision=1)
+    again = _propose(store)
+    assert again["id"] != first["id"]
+
+
+def test_the_same_proposal_after_the_waiting_card_expired_is_a_new_card():
+    """An expired card is not waiting on the person any more, even before a sweep
+    has marked it: the same proposal then is a new question, not a repeat."""
+    clock = Clock()
+    store = CardStore(None, clock=clock)
+    first = _propose(store)
+    clock.now = first["expires_at"] + 1
+    again = _propose(store)
+    assert again["id"] != first["id"]

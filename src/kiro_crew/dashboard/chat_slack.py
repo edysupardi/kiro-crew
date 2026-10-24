@@ -475,7 +475,7 @@ async def link_slot_to_slack(
             # → neutral default. Redaction runs on the full snippet text before
             # truncation so a truncation boundary can never split (and hide) a
             # credential. Slots initialize title to their raw key
-            # (state.py), so gate on display_title — a slot still showing
+            # (state_parts/chat_slot.py), so gate on display_title — a slot still showing
             # NEW_SESSION_TITLE has no real title, while cron/plan/handoff slots
             # (real titles, _titled unset) pass their title through.
             base = slot.title if slot.display_title != dashboard_state.NEW_SESSION_TITLE else ""
@@ -972,7 +972,7 @@ async def api_chat_slot_slack_pause(request: web.Request) -> web.Response:
     name = request.match_info.get("name") or request.match_info.get("slot", "")
     slot = state.get_slot(name) or state._slots.get(name)
     if not slot:
-        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+        return slot_not_found()
 
     try:
         body = await request.json()

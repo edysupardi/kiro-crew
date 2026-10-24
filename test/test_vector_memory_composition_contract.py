@@ -63,16 +63,33 @@ STORE_LOGGER = "kiro_crew.vector_memory"
 #: composition, so the set is spelled out rather than globbed.
 RUNTIME_MODULES = frozenset(
     {
+        "bulk_ingest",
+        "derived_state",
         "embedding",
         "embedding_repair",
         "episodic_search",
+        "episodic_write",
         "faiss_index",
+        "lesson_write",
         "lessons",
         "migration",
         "recall",
         "retirement",
         "semantic",
+        "store_bookkeeping",
         "text_scoring",
+        "write_outcomes",
+    }
+)
+
+#: The owners beside the facade. They hold what a runtime module may not (a member-only
+#: relation, the code that opens the connection) and are bound into the store the same way.
+OUT_OWNER_MODULES = frozenset(
+    {
+        "vector_memory_inventory",
+        "vector_memory_lifecycle",
+        "vector_memory_member",
+        "vector_memory_semantic_write",
     }
 )
 
@@ -196,9 +213,10 @@ _STORE_MEMBERS = {
     "static": """_cosine_sim _extract_value_from_text _fact_label _infer_semantic_key
         _lesson_keywords _matches_tags _parse_preference _stored_similarity_scorer""",
     "property": """algorithm_version db policy_revision space_generation""",
-    "method": """__init__ _any_lesson_overlap _append_history _backfill_lesson_embeddings
+    "method": """__init__ _any_lesson_overlap _append_history _apply_migration
+        _backfill_lesson_embeddings
         _backfill_rows _backfill_semantic_kv_embeddings _bind_lineage
-        _build_episodic_scoring_set _check_recall_query _decay_rate_for
+        _build_episodic_scoring_set _check_recall_query _crew_stamps_missing _decay_rate_for
         _delete_episodic_row _eligible_rows _embed_bulk_row _embedding_config_guard
         _embedding_current _embedding_token _enforce_episodic_cap _episodic_candidate
         _episodic_relevance_threshold _episodic_scoring_set _fact_identities
@@ -209,9 +227,10 @@ _STORE_MEMBERS = {
         _rank_from_scoring_set _rank_lessons _read_editable_history_for_day _read_meta
         _recall_once _reconcile_embedding_space_locked _record_mutation
         _release_store_use_lock _require_facets _restrict_memory_files
-        _retire_one_episodic _retire_stale_episodic _retire_stale_episodic_v1
+        _retire_one_episodic _retire_stale_episodic _retire_stale_episodic_v1 _schema_steps
         _search_episodic_v2 _secret_bearing_files _semantic_candidates_v1 _semantic_scoring_set
-        _semantic_candidates_v2 _sqlite_data_version _sqlite_vector_search _stamp_facets
+        _semantic_candidates_v2 _sqlite_data_version _sqlite_vector_search _stamp_crew_lineage
+        _stamp_facets
         _touch_last_accessed _try_embed _validate_key _vector_commit _write_history
         _write_meta _write_meta_in_transaction _write_semantic append_history
         apply_consolidation backfill_missing_embeddings begin_space_change
@@ -244,6 +263,7 @@ _STORE_SIGNATURES = {
     "__init__": "(self, db_path: 'Path | None' = None, confidence_threshold: 'float' = 0.8, extra_prefixes: 'list[str] | None' = None, dedup_threshold: 'float' = 0.88, episodic_max: 'int' = 10000, embedding_dim: 'int' = 1024, episodic_limit: 'int' = 8, decay_rates: 'dict[str, float] | None' = None, config: 'object | None' = None)",
     "_any_lesson_overlap": "(self, entries: 'list[tuple[dict, str]]', query_text: 'str') -> 'bool'",
     "_append_history": "(self, entry: 'str') -> 'None'",
+    "_apply_migration": "(self, ver: 'int', sql: 'str', fn: 'Callable[[sqlite3.Connection], None] | None', migrated: 'list[int]') -> 'None'",
     "_backfill_lesson_embeddings": "(self, progress: \"'Callable[[int, int], None] | None'\" = None, *, pace: 'bool' = True, max_rows: 'int | None' = None, should_stop: \"'Callable[[], bool] | None'\" = None) -> 'int'",
     "_backfill_rows": "(self, sql: 'str', *, kind: 'str', identity: 'str', limit: 'int | None') -> 'list[sqlite3.Row]'",
     "_backfill_semantic_kv_embeddings": "(self, progress: \"'Callable[[int, int], None] | None'\" = None, *, pace: 'bool' = True, max_rows: 'int | None' = None, should_stop: \"'Callable[[], bool] | None'\" = None) -> 'int'",
@@ -251,6 +271,7 @@ _STORE_SIGNATURES = {
     "_build_episodic_scoring_set": "(self, dim: 'int', version: 'int') -> '_EpisodicScoringSet | None'",
     "_check_recall_query": "(self, query: '_RecallQuery | None') -> 'None'",
     "_cosine_sim": "(a: 'list[float]', b: 'list[float]') -> 'float'",
+    "_crew_stamps_missing": "(self, named_store: 'str | None') -> 'bool'",
     "_decay_rate_for": "(self, raw_tags: 'str | list[str] | None') -> 'float'",
     "_delete_episodic_row": "(self, mem_id: 'str') -> 'None'",
     "_eligible_rows": "(self, rows, kind: 'str') -> 'list'",
@@ -295,6 +316,7 @@ _STORE_SIGNATURES = {
     "_retire_one_episodic": "(self, mem_id: 'str', text: 'str', superseded_by: 'str') -> 'None'",
     "_retire_stale_episodic": "(self, key: 'str', old_value: 'str', *, defer_embedding: 'bool' = False, query_embedding: 'list[float] | None' = None, embedding_resolved: 'bool' = False) -> 'None'",
     "_retire_stale_episodic_v1": "(self, key: 'str', old_value: 'str', *, defer_embedding: 'bool' = False, query_embedding: 'list[float] | None' = None, embedding_resolved: 'bool' = False) -> 'None'",
+    "_schema_steps": "(self, migrated: 'list[int]') -> 'list[Callable[[], object]]'",
     "_search_episodic_v2": "(self, query_embedding: 'list[float] | None', query_text: 'str', limit: 'int', mmr: 'bool', tag_filter: 'list[str] | None', relevance_filter: 'bool') -> 'list[dict]'",
     "_secret_bearing_files": "(self) -> 'tuple[Path, ...]'",
     "_semantic_candidates_v1": "(self, query_text: 'str', *, recall_query: '_RecallQuery | None' = None) -> 'list[dict]'",
@@ -302,6 +324,7 @@ _STORE_SIGNATURES = {
     "_semantic_scoring_set": "(self) -> '_SemanticScoringSet | None'",
     "_sqlite_data_version": "(self) -> 'int | None'",
     "_sqlite_vector_search": "(self, query_embedding: 'list[float]', query_text: 'str', limit: 'int', mmr: 'bool' = True, tag_filter: 'list[str] | None' = None, relevance_filter: 'bool' = False) -> 'list[dict]'",
+    "_stamp_crew_lineage": "(self, named_store: 'str | None') -> 'None'",
     "_stamp_facets": "(self, item_id: 'str', facets: \"'memory_schema.MemoryFacets | None'\") -> 'None'",
     "_stored_similarity_scorer": "(query_emb: 'list[float] | None') -> 'Callable[[dict], float]'",
     "_touch_last_accessed": "(self, mem_ids: 'list[str]') -> 'None'",
@@ -445,7 +468,11 @@ def _member_row(name: str, raw: object) -> tuple[str, str]:
     if isinstance(raw, property):
         return "property", str(inspect.signature(raw.fget))
     if callable(raw):
-        return "method", str(inspect.signature(raw))
+        # A member bound from its owner module annotates ``self``; the rest of the
+        # signature is the method's own and is compared byte for byte.
+        return "method", str(inspect.signature(raw)).replace(
+            "(self: 'VectorMemoryStore'", "(self", 1
+        )
     return "attr", repr(raw)
 
 
@@ -454,6 +481,13 @@ def _runtime_sources() -> dict[str, str]:
         path.stem: path.read_text(encoding="utf-8")
         for path in sorted(RUNTIME_DIR.glob("*.py"))
         if path.stem != "__init__"
+    }
+
+
+def _out_owner_sources() -> dict[str, str]:
+    return {
+        stem: FACADE_PATH.with_name(f"{stem}.py").read_text(encoding="utf-8")
+        for stem in sorted(OUT_OWNER_MODULES)
     }
 
 
@@ -866,17 +900,20 @@ class TestPlacement:
 
     @staticmethod
     def _delegation_map() -> dict[tuple[str, str], str]:
-        """``(runtime module, function) -> store method`` for every delegate.
+        """``(owner module, function) -> store method`` for every delegate.
 
-        A delegate is a store method whose body forwards to ``<alias>.<function>``
-        where ``<alias>`` is a runtime module the facade imported.
+        A delegate is a store method whose body forwards to ``<alias>.<function>``, or a
+        member bound to that function (``m = <alias>.<function>``,
+        ``staticmethod(<alias>.<function>)``), where ``<alias>`` is a runtime module or an
+        owner beside the facade that the facade imported.
         """
         tree = ast.parse(FACADE_PATH.read_text(encoding="utf-8"))
         aliases = {
             alias.asname or alias.name: alias.name
             for node in tree.body
-            if isinstance(node, ast.ImportFrom) and node.module == RUNTIME_PACKAGE
+            if isinstance(node, ast.ImportFrom) and node.module in (RUNTIME_PACKAGE, "kiro_crew")
             for alias in node.names
+            if node.module == RUNTIME_PACKAGE or alias.name in OUT_OWNER_MODULES
         }
         # A module-level helper the facade also re-exports by name (``_json_value_equal``)
         # is shared code a store method calls, not the implementation it forwards to.
@@ -894,6 +931,18 @@ class TestPlacement:
         )
         mapping: dict[tuple[str, str], str] = {}
         for method in klass.body:
+            if isinstance(method, ast.Assign) and len(method.targets) == 1:
+                value = method.value
+                if isinstance(value, ast.Call) and len(value.args) == 1:
+                    value = value.args[0]
+                if (
+                    isinstance(method.targets[0], ast.Name)
+                    and isinstance(value, ast.Attribute)
+                    and isinstance(value.value, ast.Name)
+                    and value.value.id in aliases
+                ):
+                    mapping.setdefault((aliases[value.value.id], value.attr), method.targets[0].id)
+                continue
             if not isinstance(method, ast.FunctionDef):
                 continue
             for node in ast.walk(method):
@@ -915,13 +964,15 @@ class TestPlacement:
         # Non-vacuous: most of the store's rules are delegated.
         assert len(delegated) > 80
         offenders = []
-        for stem, source in _runtime_sources().items():
+        for stem, source in {**_runtime_sources(), **_out_owner_sources()}.items():
             tree = ast.parse(source)
             aliases = {
                 alias.asname or alias.name: alias.name
                 for node in tree.body
-                if isinstance(node, ast.ImportFrom) and node.module == RUNTIME_PACKAGE
+                if isinstance(node, ast.ImportFrom)
+                and node.module in (RUNTIME_PACKAGE, "kiro_crew")
                 for alias in node.names
+                if node.module == RUNTIME_PACKAGE or alias.name in OUT_OWNER_MODULES
             }
             names = {
                 alias.asname or alias.name: (node.module.rsplit(".", 1)[-1], alias.name)
@@ -1047,7 +1098,11 @@ class TestOneBindingPerSharedName:
 
     @staticmethod
     def _scanned_sources() -> dict[str, str]:
-        return {"vector_memory": FACADE_PATH.read_text(encoding="utf-8"), **_runtime_sources()}
+        return {
+            "vector_memory": FACADE_PATH.read_text(encoding="utf-8"),
+            **_out_owner_sources(),
+            **_runtime_sources(),
+        }
 
     def test_every_shared_name_is_read_through_its_owner(self) -> None:
         assert _split_reads(self._scanned_sources()) == _SPLIT_BY_A_PATCHING_TEST
@@ -1062,12 +1117,12 @@ class TestOneBindingPerSharedName:
         planted["episodic_search"] = sources["episodic_search"].replace(
             "_text_scoring._MMR_MAX_POOL", "_MMR_MAX_POOL"
         )
-        planted["vector_memory"] = sources["vector_memory"].replace(
+        planted["vector_memory_semantic_write"] = sources["vector_memory_semantic_write"].replace(
             "_semantic._json_value_equal(", "_json_value_equal("
         )
         assert _split_reads(planted) == _SPLIT_BY_A_PATCHING_TEST | {
             ("episodic_search", "_MMR_MAX_POOL"),
-            ("vector_memory", "_json_value_equal"),
+            ("vector_memory_semantic_write", "_json_value_equal"),
         }
 
     def test_no_runtime_module_imports_a_value_from_a_sibling(self) -> None:
@@ -1655,8 +1710,9 @@ class TestReadOnlyGuardsReachTheRuntime:
 
     def test_no_runtime_module_calls_a_redactor(self) -> None:
         """A redactor call belongs to ``vector_memory.py``, the registered sink."""
-        for stem in RUNTIME_MODULES:
-            path = RUNTIME_DIR / f"{stem}.py"
+        owners = {stem: RUNTIME_DIR / f"{stem}.py" for stem in RUNTIME_MODULES}
+        owners.update({stem: FACADE_PATH.with_name(f"{stem}.py") for stem in OUT_OWNER_MODULES})
+        for stem, path in owners.items():
             assert not _REDACTOR_CALL_RE.search(path.read_text(encoding="utf-8")), stem
             assert _find_slice_inside_redact_call(path) == []
         assert _REDACTOR_CALL_RE.search(FACADE_PATH.read_text(encoding="utf-8"))
@@ -1668,7 +1724,7 @@ class TestReadOnlyGuardsReachTheRuntime:
         assert _find_slice_inside_redact_call(path)
 
     def test_no_runtime_module_hashes_with_md5(self) -> None:
-        for stem, source in _runtime_sources().items():
+        for stem, source in {**_runtime_sources(), **_out_owner_sources()}.items():
             assert "hashlib.md5(" not in source, stem
         assert "hashlib.md5(" in FACADE_PATH.read_text(encoding="utf-8")
 

@@ -22,7 +22,6 @@ import inspect
 import json
 import re
 import threading
-import time
 import uuid
 from pathlib import Path
 
@@ -46,6 +45,7 @@ from kiro_crew.artifacts import (
     ForkMetadata,
     ImageMetadata,
 )
+from kiro_crew.testing.wait import wait_until
 
 NOW = "2026-01-02T03:04:05.000006+00:00"
 TOKEN = "0123456789abcdef" * 4
@@ -96,6 +96,7 @@ class TestPersistedBytes:
             '  "events_backfilled": true,\n'
             '  "folder_id": "",\n'
             '  "fork_metadata": null,\n'
+            '  "goal_report": false,\n'
             '  "image": null,\n'
             '  "kind": "widget",\n'
             '  "kind_auto": false,\n'
@@ -337,6 +338,7 @@ class TestResponseShape:
             "pinned",
             "session_key",
             "auto_registered",
+            "goal_report",
             "publication",
             "fork_metadata",
             "version_kinds",
@@ -677,9 +679,10 @@ class TestFacadeSeams:
         threads = [threading.Thread(target=build) for _ in range(4)]
         for t in threads:
             t.start()
-        deadline = time.monotonic() + 10
-        while len(entered) < 4 and len(builds) < 4 and time.monotonic() < deadline:
-            time.sleep(0.005)
+        wait_until(
+            lambda: len(entered) >= 4 or len(builds) >= 4,
+            describe=lambda: f"{len(entered)} entered, {len(builds)} built",
+        )
         release.set()
         for t in threads:
             t.join(timeout=10)

@@ -1,8 +1,10 @@
 """Client for live app lifecycle changes using ordinary dashboard authentication.
 
 The local credential mint and the authenticated app action travel exclusively over
-the dashboard's owner-only Unix socket. The gateway kernel-verifies the socket peer,
-so neither credential can reach a foreign process bound to the resolved TCP port.
+the dashboard's owner-only Unix socket, and each connection is checked, before any
+byte is sent, to be answered by the gateway process recorded for the port. Neither
+credential can reach a foreign process bound to the resolved TCP port or to a
+rebound socket path.
 There is deliberately no TCP fallback and no MCP/internal-secret authorization path.
 """
 
@@ -18,7 +20,7 @@ from pathlib import Path
 
 from kiro_crew.config.loader import read_local_secret
 from kiro_crew.dashboard.urls import dashboard_socket_path
-from kiro_crew.loopback_http import unix_socket_urlopen
+from kiro_crew.loopback_http import deadline_expired, unix_socket_urlopen
 from kiro_crew.port_resolution import resolve_client_port_ex
 from kiro_crew.terminal_safe import safe_terminal_line
 
@@ -31,11 +33,14 @@ _ACTION_TIMEOUT_SECS = 300
 class AppGatewayError(RuntimeError):
     """A running gateway refused or could not complete an app lifecycle request."""
 
-    def __init__(self, message: str) -> None:
-        # This exception is rendered by cli_commands on ONE prefixed line, so the
+    def __init__(self, message: str, *, code: str = "") -> None:
+        # This exception is rendered by cli_commands_app on ONE prefixed line, so the
         # terminal boundary is here even when the message came from an HTTP error
         # or response payload, and a line break in it must not start a new line.
         super().__init__(safe_terminal_line(message))
+        # The gateway's machine-readable ``code`` when it sent one, so the CLI can
+        # act on a refusal (``session_approval_consent_required``) without parsing prose.
+        self.code = code
 
 
 class AppGatewayTimeout(AppGatewayError):
@@ -57,15 +62,16 @@ def _read_json(response: object) -> object:
         raise AppGatewayError("gateway returned a malformed response") from exc
 
 
-def _gateway_error_detail(exc: urllib.error.HTTPError) -> str:
-    """Return the gateway's structured error text, falling back to its status."""
+def _gateway_error(exc: urllib.error.HTTPError) -> AppGatewayError:
+    """Return the gateway's structured error text and code, falling back to its status."""
     try:
         body = json.loads(exc.read())
         if isinstance(body, dict) and isinstance(body.get("error"), str):
-            return body["error"]
+            code = body.get("code")
+            return AppGatewayError(body["error"], code=code if isinstance(code, str) else "")
     except Exception:
         pass
-    return f"{exc.code} {exc.reason}"
+    return AppGatewayError(f"{exc.code} {exc.reason}")
 
 
 def _socket_unavailable(exc: OSError) -> bool:
@@ -76,17 +82,6 @@ def _socket_unavailable(exc: OSError) -> bool:
     return (
         isinstance(reason, OSError) and "AF_UNIX" in str(reason) and "not available" in str(reason)
     )
-
-
-def _deadline_expired(exc: BaseException) -> bool:
-    """Whether the action request ended because OUR deadline passed, not the peer's.
-
-    ``urllib`` surfaces a read timeout as ``TimeoutError`` (``socket.timeout``) and a
-    connect timeout wrapped in ``URLError.reason``; either means the gateway may
-    still be working, which is the one outcome the CLI must not report as a refusal.
-    """
-    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-    return isinstance(reason, TimeoutError)
 
 
 def toggle_app(
@@ -127,6 +122,41 @@ def install_app(source: str) -> dict[str, object] | None:
     )
 
 
+def _gateway_peer_check(port: int):
+    """A connect-time check that the socket is answered by the gateway recorded for *port*.
+
+    The socket file sits in a directory its owner can rewrite, so a same-UID
+    process could rebind it. Before any byte is written, the kernel-reported peer
+    pid must equal the gateway recorded for *port* with a matching start token
+    (``cli_server_peer._connected_unix_peer_is_recorded_gateway``, the same
+    recorded-identity check the unix arm of ``_owner_verified_secret_urlopen``
+    applies). Raises :class:`AppGatewayError`, which is not
+    an ``OSError``, so the refusal is never read as "no gateway" and never drops the
+    CLI to its file-only path.
+    """
+    from kiro_crew.cli_server_peer import (
+        _audit_peer_allowed,
+        _audit_peer_denied,
+        _connected_unix_peer_is_recorded_gateway,
+    )
+
+    def _verify(sock: object) -> None:
+        # Both arms of this permission decision are audited, in the same SEL
+        # shape the CLI's other connection-bound proofs emit.
+        if not _connected_unix_peer_is_recorded_gateway(sock, port):
+            _audit_peer_denied(
+                "app_lifecycle", port, "connected socket peer is not this install's gateway"
+            )
+            raise AppGatewayError(
+                "the dashboard socket is not answered by this install's recorded "
+                "gateway; nothing was sent. If this is your own gateway, restart it "
+                "to re-publish its identity record."
+            )
+        _audit_peer_allowed("app_lifecycle", port)
+
+    return _verify
+
+
 def _post_lifecycle_action(
     route: str, action: str, subject: str, *, payload: dict[str, object] | None
 ) -> dict[str, object] | None:
@@ -149,17 +179,20 @@ def _post_lifecycle_action(
         return None
 
     socket_path = dashboard_socket_path(port)
+    verify_peer = _gateway_peer_check(port)
     base = "http://127.0.0.1:%d" % port
     mint = urllib.request.Request(
         f"{base}/api/token/local?ttl=2m", headers={"X-Local-Secret": secret}
     )
     try:
-        with unix_socket_urlopen(mint, timeout=5, socket_path=socket_path) as response:
+        with unix_socket_urlopen(
+            mint, timeout=5, socket_path=socket_path, verify_peer=verify_peer
+        ) as response:
             minted = _read_json(response)
     except AppGatewayError:
         raise
     except urllib.error.HTTPError as exc:
-        raise AppGatewayError(_gateway_error_detail(exc)) from exc
+        raise _gateway_error(exc) from exc
     except Exception as exc:  # noqa: BLE001 — peer bytes must not crash the CLI
         if isinstance(exc, OSError) and _socket_unavailable(exc):
             return None
@@ -185,15 +218,18 @@ def _post_lifecycle_action(
     )
     try:
         with unix_socket_urlopen(
-            request, timeout=_ACTION_TIMEOUT_SECS, socket_path=socket_path
+            request,
+            timeout=_ACTION_TIMEOUT_SECS,
+            socket_path=socket_path,
+            verify_peer=verify_peer,
         ) as response:
             result = _read_json(response)
     except AppGatewayError:
         raise
     except urllib.error.HTTPError as exc:
-        raise AppGatewayError(_gateway_error_detail(exc)) from exc
+        raise _gateway_error(exc) from exc
     except Exception as exc:  # noqa: BLE001 — peer bytes must not crash the CLI
-        if _deadline_expired(exc):
+        if deadline_expired(exc):
             raise AppGatewayTimeout(
                 f"the gateway did not finish {action} for {subject} within "
                 f"{_ACTION_TIMEOUT_SECS} s; it may still be applying it. Check "
@@ -208,10 +244,14 @@ def _post_lifecycle_action(
         raise AppGatewayError("gateway returned an invalid app lifecycle response")
     if result.get("ok") is False:
         response_detail = result.get("error")
+        response_code = result.get("code")
         raise AppGatewayError(
-            str(response_detail)
-            if response_detail
-            else "gateway rejected the app lifecycle request"
+            (
+                str(response_detail)
+                if response_detail
+                else "gateway rejected the app lifecycle request"
+            ),
+            code=response_code if isinstance(response_code, str) else "",
         )
     return result
 

@@ -15,6 +15,10 @@ tiers that follow who owns the field:
   and a report its own account. Admitted on any turn in the crewmate's own
   dashboard thread, including the Daily Goal Reminder's hidden turn
   (:mod:`kiro_crew.dashboard.handlers.member_goals`).
+* **Notes** -- ``save_notes`` replaces the crewmate's own briefing, the
+  ``[CURRENT ASSIGNMENT]`` section it keeps for itself
+  (:mod:`kiro_crew.member_notes`). Its chat runs on the conductor, which has no
+  file tool, so this is how it keeps them. Admitted like the goal tools.
 * **Card-backed** -- ``set_model``, ``set_approval_mode``,
   ``request_capabilities``, ``set_goal`` (add or change one goal), ``set_key_results``
   (how the goals are measured, the whole set at once): what the crewmate
@@ -311,7 +315,19 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "daily is the Daily Goal Reminder (you read your goal and record where "
                 "each milestone stands), weekly the Weekly report (on weekday, 0 = "
                 "Sunday), monthly the Monthly review (on month_day, 1-28); all run at "
-                "time (HH:MM, 24-hour). Give only what changes. Explain in one plain "
+                "time (HH:MM, 24-hour). heartbeat wakes you every interval minutes "
+                f"({_goals.interval_minutes_text()}; to the user say "
+                f"{_goals.interval_choices()}) to "
+                "move your work forward on your own and "
+                "uses credits on each wake, so propose it only when the work suits "
+                "it. The card has no timing control: the user turns each check-in "
+                "off on its own, or changes its time, in your profile "
+                "under Goals, then Check-ins (to the user say: open my profile, "
+                "then Goals, then Check-ins); the Heartbeat's switch and interval "
+                "are the first row of your profile's Schedules tab (to the user "
+                "say: open my profile, then Schedules). Point there rather than at "
+                "the card. Give only "
+                "what changes. Explain in one plain "
                 "sentence what each one you propose does for the user before you call "
                 "it; they need a goal first. " + _CARD_NOTE
             ),
@@ -321,11 +337,29 @@ def _tool_definitions() -> list[dict[str, Any]]:
                     "daily": {"type": "boolean"},
                     "weekly": {"type": "boolean"},
                     "monthly": {"type": "boolean"},
+                    "heartbeat": {"type": "boolean"},
                     "weekday": {"type": "integer", "minimum": 0, "maximum": 6},
                     "month_day": {"type": "integer", "minimum": 1, "maximum": _goals.MAX_MONTH_DAY},
                     "time": {"type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"},
+                    "interval": {"type": "integer", "enum": list(_goals.HEARTBEAT_INTERVALS)},
                     "reason": {"type": "string", "maxLength": 500},
                 },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "offer_dashboard_page",
+            "description": (
+                "Offer, once, to build a Dashboard page around your goal: this raises one "
+                "card and writes nothing. Call it only when a Kiro Crew note in your turn "
+                "says you can offer one. If the user says yes you are woken to write the "
+                "page; if they say no, or let the card expire, nothing changes and you do "
+                "not ask again. A page the user asks for in chat needs no card: write it. "
+                + _CARD_NOTE
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"reason": {"type": "string", "maxLength": 500}},
                 "additionalProperties": False,
             },
         },
@@ -355,8 +389,11 @@ def _tool_definitions() -> list[dict[str, Any]]:
             "name": "save_goal_report",
             "description": (
                 "Save your weekly report or monthly review as a report the user can "
-                "open: kind weekly or monthly, a short title, and the report in "
-                "Markdown. It is filed under Crewmates/<your name>/Reports and the user "
+                "open: kind weekly or monthly, a short title, and the report itself as "
+                "one of two formats -- html, a whole self-contained page laid out as a "
+                "printable document (the check-in prompt's 'How the report looks' "
+                "describes it), or markdown for a plain one. Send one of the two. "
+                "It is filed under Crewmates/<your name>/Reports and the user "
                 "gets a notification linking it. After saving, reply in the chat with "
                 "one short line that points at it; the report itself stays out of the "
                 "chat."
@@ -375,8 +412,32 @@ def _tool_definitions() -> list[dict[str, Any]]:
                         "minLength": 1,
                         "maxLength": _goals.REPORT_MAX_CHARS,
                     },
+                    "html": {
+                        "type": "string",
+                        "minLength": 1,
+                        # The server holds the real cap, in bytes of UTF-8.
+                        "maxLength": _goals.REPORT_HTML_MAX_BYTES,
+                    },
                 },
-                "required": ["kind", "title", "markdown"],
+                "required": ["kind", "title"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "save_notes",
+            "description": (
+                "Replace your notes: the [CURRENT ASSIGNMENT] section you keep for "
+                "your future self (current priorities, work in flight, pointers to "
+                "what your workers made). Pass the whole new text; it replaces the "
+                "old one, and an empty text clears it. Saved at once and shown on "
+                "your Notes tab."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "maxLength": _goals.NOTES_MAX_CHARS},
+                },
+                "required": ["text"],
                 "additionalProperties": False,
             },
         },
@@ -457,6 +518,7 @@ _PROPOSALS = {
     "set_goal": "goal",
     "set_key_results": "key_results",
     "set_check_ins": "check_ins",
+    "offer_dashboard_page": "dashboard_page",
 }
 
 
@@ -479,7 +541,7 @@ def _goal_call(name: str, args: dict[str, Any], sk: str) -> str:
     if name == "save_goal_report":
         d = _post(
             "/api/member/self/goals/report",
-            {k: args.get(k, "") for k in ("kind", "title", "markdown")},
+            {k: args.get(k, "") for k in ("kind", "title", "markdown", "html")},
             session_key=sk,
         )
         refused = _error_for(name, d)
@@ -509,6 +571,13 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         "save_goal_report",
     ):
         return _goal_call(name, args, sk)
+
+    if name == "save_notes":
+        d = _post("/api/member/self/notes", {"text": args.get("text", "")}, session_key=sk)
+        refused = _error_for(name, d)
+        if refused:
+            return f"{refused}\nYour notes were not saved; do not say they were."
+        return _render({**d, "next": "Saved; they open your next turn."})
 
     if name == "update_self":
         fields = {k: args[k] for k in ("display_name", "description", "avatar") if k in args}

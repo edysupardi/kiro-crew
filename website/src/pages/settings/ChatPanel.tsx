@@ -22,6 +22,9 @@ import { useChatPanelDashboard } from './useChatPanelDashboard'
 import { useChatPanelTypedFields } from './useChatPanelTypedFields'
 import { chatPanelConfigOpts, useChatPanelFallbackModels, useChatPanelModelDefaults } from './useChatPanelModels'
 import { AppModelsSection } from './AppModelsSection'
+import { FollowDefaultModelAction } from './FollowDefaultModelAction'
+import { KiroHarnessFallbackNote } from './KiroHarnessFallbackNote'
+import { DefaultSessionFolderSetting } from './DefaultSessionFolderSetting'
 import { usePlainDiff } from '../../hooks/usePlainDiff'
 import { useDiffSplit } from '../../hooks/useDiffSplit'
 import { EFFORT_LEVELS } from '../../lib/effort'
@@ -31,6 +34,8 @@ import { platformShortcut } from '../../utils/platform'
 import { capRoleOther, clampRoleOther } from '../../lib/userProfile'
 
 import { i18nT } from '../../i18n/t'
+import { useProvider } from '../../providers'
+import { useModelsAuthRequired } from '../../providers/modelListHealth'
 import ErrorNotice from '../../components/ErrorNotice'
 
 export type { LinkPatternRule, LinkPatternsDraft } from './ChatPanelLinkPatternsEditor'
@@ -38,6 +43,7 @@ export { LinkPatternsEditor } from './ChatPanelLinkPatternsEditor'
 
 export function ChatPanel({ basePath }: { basePath?: string } = {}) {
   const qc = useQueryClient()
+  const provider = useProvider()
   const [chatCfg, setChatCfg] = useState<ChatConfig>(loadChatConfig)
   const [saveError, rawSetSaveError] = useState('')
   // The failure banner is one shared slot written by every save on this panel,
@@ -128,9 +134,17 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
 
   // ── Session summaries (server-side; spends tokens per changed turn) ──
   const summaryEnabled = mcCfg?.session_summary?.enabled ?? false
+  // Pin Summary has no Summary to pin while they are off, so its row says so
+  // in view rather than only in its hint. Shown once the config read answers.
+  const pinSummaryNeedsSummaries = !!mcCfg && !summaryEnabled
   const summaryMut = useMutation({
     mutationFn: (v: boolean) => api.patchConfig('session_summary.enabled', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['kirocrewConfig'] })
+      // The side panel reads the flag from each chat's summary query (its +
+      // menu row and Pin Summary), which never goes stale on its own.
+      qc.invalidateQueries({ queryKey: ['session-summary'] })
+    },
     onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_session_summaries')),
   })
 
@@ -237,6 +251,8 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
     backgroundModelOpts, subagentModelOpts, fallbackOpts, refusalFallbackOpts, backgroundModelMut,
     subagentModelMut, shownBackgroundEffort, shownSubagentEffort, bgEffortSupported,
     subEffortSupported, effortLabels, backgroundEffortMut, subagentEffortMut,
+    memberEffortPinOverrides, showEffortPinNotice, resolvedEffortLabel, clearAgentEffortPinMut,
+    clearAgentEffortPinError,
   } = useChatPanelModelDefaults({
     qc, setPathSaveError, clearOwnPathError, overlay, dashCfg, mcCfg, optimisticConfigOpts,
     fallbackModel, shownFallbackModel, refusalFallbackModel, shownRefusalFallbackModel,
@@ -304,6 +320,16 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
   // Cross-cutting notices (a save failure, a config-load failure) render in the
   // SubNav banner slot so they stay visible in EVERY group — not only whichever
   // one happened to host them when the page was one scroll.
+  // When the model list is degraded because kiro-cli's login expired or is
+  // signed out, the MODEL-LIST banner's notice says the one thing that fixes it
+  // (run `kiro-cli login`) instead of the generic "Failed to load config." The
+  // flag is set where the /api/models error is formed (providers/adapters/acp.ts),
+  // so this reads one boolean rather than the refusal code; it feeds only the
+  // availableModelsQ banner, since the dashboard/roster reads do not carry it.
+  const kiroSignInRequired = useModelsAuthRequired(provider.id)
+  const configLoadMessage = kiroSignInRequired
+    ? i18nT('pages.settings.chatPanel.failed_to_load_config_kiro_signed_out')
+    : i18nT('pages.settings.chatPanel.failed_to_load_config')
   const banner = (
     <>
       {/* No hand-off: `localRoleOther`, `localBudget` and `localKeepChars` are
@@ -335,7 +361,10 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
           {/* No hand-off: same drafts as above share this panel. One row for
               the config, the agent roster and the resolved-model reads: they
               fail the same way to the user, so they share one notice and one
-              Retry, which re-asks whichever of them failed. */}
+              Retry, which re-asks whichever of them failed. Always the generic
+              message: the kiro-cli sign-in flag is set only by the model-list
+              fetch, so these reads must not borrow its remedy for a failure of
+              their own. */}
           <ErrorNotice
             className="flex-1 min-w-[16rem]"
             message={i18nT('pages.settings.chatPanel.failed_to_load_config')}
@@ -354,10 +383,13 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
       {(availableModelsQ.isError || availableModelsQ.isDegraded) && (
         <div className="mb-4 flex flex-wrap items-center gap-3">
           {/* No hand-off: the editable drafts in this panel stay mounted while
-              the catalog retry runs; navigating away could discard them. */}
+              the catalog retry runs; navigating away could discard them. This is
+              the one banner whose cause the sign-in flag describes, so it shows
+              the "run kiro-cli login" message when the model list is degraded by
+              an expired / signed-out login. */}
           <ErrorNotice
             className="flex-1 min-w-[16rem]"
-            message={i18nT('pages.settings.chatPanel.failed_to_load_config')}
+            message={configLoadMessage}
           />
           <Btn onClick={() => availableModelsQ.refetch()}>{i18nT('pages.settings.chatPanel.retry')}</Btn>
         </div>
@@ -442,6 +474,7 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
               )}
             </div>
           )}
+          <FollowDefaultModelAction />
           <SettingsMultiSelect
             label={i18nT('pages.settings.chatPanel.selectable_models')}
             hint={i18nT('pages.settings.chatPanel.selectable_models_description')}
@@ -485,6 +518,47 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
             onChange={v => defaultEffortMut.mutate(v)}
             disabled={!mcQ.isSuccess || !effortSupported}
           />
+          {/* Same row as the model pin notice above, for the effort the default
+              agent starts at instead of this setting. */}
+          {showEffortPinNotice && pinAgent && (
+            <div
+              className="mt-1 mb-3 flex flex-wrap items-center gap-3 text-[13px] text-warn"
+              role="status"
+              data-testid="agent-effort-pin-notice"
+            >
+              <span className="min-w-0 flex-1 break-words">
+                <Trans
+                  i18nKey={memberEffortPinOverrides
+                    ? 'pages.settings.chatPanel.agent_effort_pin_overrides_default'
+                    : 'pages.settings.chatPanel.agent_role_effort_overrides_default'}
+                  components={{
+                    agent: <span className="font-mono">{pinAgentName}</span>,
+                    // A translated level name, not an id, so not monospace.
+                    effort: <span className="font-medium">{resolvedEffortLabel}</span>,
+                  }}
+                />
+              </span>
+              {memberEffortPinOverrides && (
+                <>
+                  <Btn
+                    type="button"
+                    className="shrink-0"
+                    onClick={() => clearAgentEffortPinMut.mutate()}
+                    disabled={clearAgentEffortPinMut.isPending || pinReadsInFlight || pinReadsFailed || defaultEffortMut.isPending}
+                  >
+                    {i18nT('pages.settings.chatPanel.clear_agent_effort_pin')}
+                  </Btn>
+                  {/* No hand-off, for the same drafts as the model clear above. */}
+                  <ErrorNotice
+                    variant="inline"
+                    className="basis-full"
+                    message={clearAgentEffortPinError}
+                    testId="agent-effort-pin-clear-error"
+                  />
+                </>
+              )}
+            </div>
+          )}
         </SettingsCard>
         </div>
 
@@ -516,6 +590,11 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
         <div className="mb-8">
         <h4 className="text-base font-semibold text-text-strong">{i18nT('pages.settings.chatPanel.role_subagents')}</h4>
         <div className="text-[12px] text-muted mb-1">{i18nT('pages.settings.chatPanel.model_for_spawned_sub_agents')}</div>
+        {/* The memory cost of a pin, at the place the pin is chosen: a pinned
+            subagent cannot share its parent chat's runtime. */}
+        <div className="text-[12px] text-muted mb-1" data-testid="subagent-pin-runtime-cost">
+          {i18nT('pages.settings.chatPanel.subagent_pin_runtime_cost')}
+        </div>
         <SettingsCard index={2}>
           <SettingsSelect
             label={i18nT('pages.settings.chatPanel.subagent_model')}
@@ -538,8 +617,10 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
         </SettingsCard>
         </div>
 
+        <h4 className="text-base font-semibold text-text-strong mb-2">{i18nT('pages.settings.chatPanel.fallbacks')}</h4>
+        <KiroHarnessFallbackNote cfg={mcCfg} />
         <div className="mb-8">
-        <h4 className="text-base font-semibold text-text-strong">{i18nT('pages.settings.chatPanel.throttle_fallback')}</h4>
+        <h5 className="text-sm font-semibold text-text-strong">{i18nT('pages.settings.chatPanel.throttle_fallback')}</h5>
         <div className="text-[12px] text-muted mb-1">{i18nT('pages.settings.chatPanel.model_tried_when_your_current_model_stays_rate_li')}</div>
         <SettingsCard index={3}>
           <SettingsSelect
@@ -556,7 +637,7 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
         </div>
 
         <div>
-        <h4 className="text-base font-semibold text-text-strong">{i18nT('pages.settings.chatPanel.refusal_fallback')}</h4>
+        <h5 className="text-sm font-semibold text-text-strong">{i18nT('pages.settings.chatPanel.refusal_fallback')}</h5>
         <div className="text-[12px] text-muted mb-1">{i18nT('pages.settings.chatPanel.refusal_fallback_desc')}</div>
         <SettingsCard index={4}>
           <SettingsSelect
@@ -872,6 +953,8 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
         <SettingsCard>
           <SettingsToggle label={i18nT('pages.settings.chatPanel.mcp_apps_in_side_panel')} description={i18nT('pages.settings.chatPanel.render_interactive_mcp_apps_in_the_right_side_pa')} checked={dashCfg.mcp_app_panel} onChange={v => setDash({ mcp_app_panel: v })} disabled={dashDisabled} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.auto_open_git_panel')} hint={i18nT('pages.settings.chatPanel.expand_the_side_panel_to_the_git_tab_each_time_yo')} checked={dashCfg.auto_open_git_panel} onChange={v => setDash({ auto_open_git_panel: v })} disabled={dashDisabled} />
+          <SettingsToggle label={i18nT('pages.settings.chatPanel.side_panel_always_open')} hint={i18nT('pages.settings.chatPanel.side_panel_always_open_hint')} configKey="dashboard.side_panel_always_open" checked={dashCfg.side_panel_always_open ?? false} onChange={v => setDash({ side_panel_always_open: v })} disabled={dashDisabled} />
+          <SettingsToggle label={i18nT('pages.settings.chatPanel.side_panel_pin_summary')} description={pinSummaryNeedsSummaries ? i18nT('pages.settings.chatPanel.side_panel_pin_summary_needs_session_summaries') : undefined} hint={i18nT('pages.settings.chatPanel.side_panel_pin_summary_hint')} configKey="dashboard.side_panel_pin_summary" checked={dashCfg.side_panel_pin_summary ?? false} onChange={v => setDash({ side_panel_pin_summary: v })} disabled={dashDisabled} />
         </SettingsCard>
           )
 
@@ -950,6 +1033,7 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
           <SettingsToggle label={i18nT('pages.settings.chatPanel.dim_inactive_panes')} description={i18nT('pages.settings.chatPanel.dim_inactive_panes_desc')} checked={chatCfg.dimInactivePanes} onChange={v => setChat('dimInactivePanes', v)} disabled={dashDisabled || !dashCfg.session_grid} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.history_expanded')} hint={i18nT('pages.settings.chatPanel.expand_history_sidebar_by_default')} checked={chatCfg.historyExpanded} onChange={v => setChat('historyExpanded', v)} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.confirm_before_closing_session')} hint={i18nT('pages.settings.chatPanel.show_a_confirmation_dialog_when_closing_a_sessio')} checked={chatCfg.confirmCloseSession} onChange={v => setChat('confirmCloseSession', v)} />
+          <SettingsToggle label={i18nT('pages.settings.chatPanel.sidebar_click_opens_tab')} hint={i18nT('pages.settings.chatPanel.sidebar_click_opens_tab_desc')} checked={chatCfg.sidebarClickOpensTab} onChange={v => setChat('sidebarClickOpensTab', v)} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.compact_empty_folders')} hint={i18nT('pages.settings.chatPanel.a_folder_with_no_chats_takes_one_row_instead_of')} checked={chatCfg.hideEmptyFolderBody} onChange={v => setChat('hideEmptyFolderBody', v)} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.full_titles_on_scroll')} hint={i18nT('pages.settings.chatPanel.full_titles_on_scroll_description')} checked={chatCfg.fullTitlesOnScroll} onChange={v => setChat('fullTitlesOnScroll', v)} />
           <SettingsSelect
@@ -989,6 +1073,7 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
             }
             configKey="dashboard.session_folder_root"
           />
+          <DefaultSessionFolderSetting disabled={dashDisabled} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.tail_only_fork')} description={i18nT('pages.settings.chatPanel.fork_keeps_only_the_messages_after_the_chosen_po')} checked={dashCfg.tail_fork_enabled} onChange={v => setDash({ tail_fork_enabled: v })} disabled={dashDisabled} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.restore_sessions')} hint={i18nT('pages.settings.chatPanel.re_open_recently_active_sessions_on_startup')} checked={dashCfg.restore_sessions} onChange={v => setDash({ restore_sessions: v })} disabled={dashDisabled} />
           {dashCfg.restore_sessions && (

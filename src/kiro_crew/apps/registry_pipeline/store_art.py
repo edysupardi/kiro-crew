@@ -1113,7 +1113,26 @@ async def _fetch_owner_tier_store_assets(entry: dict[str, Any], registry_name: s
 
     tmp_root: str | None = None
     try:
-        tmp_root = await asyncio.to_thread(tempfile.mkdtemp, prefix="kirocrew-store-art-")
+        # The scratch dir is made off the loop, so a cancel can land while that
+        # thread is still creating it -- before ``tmp_root`` is bound, which would
+        # leave the ``finally`` nothing to remove. Shield the hop and, on a cancel,
+        # wait for the thread's path -- through any further cancel too -- so the
+        # ``finally`` still removes the dir.
+        mkdtemp_task = asyncio.ensure_future(
+            asyncio.to_thread(tempfile.mkdtemp, prefix="kirocrew-store-art-")
+        )
+        try:
+            tmp_root = await asyncio.shield(mkdtemp_task)
+        except asyncio.CancelledError:
+            while not mkdtemp_task.done():
+                try:
+                    await asyncio.wait({mkdtemp_task})
+                except asyncio.CancelledError:
+                    pass
+            # A failed mkdtemp made no dir; the cancel is what propagates either way.
+            if not mkdtemp_task.cancelled() and mkdtemp_task.exception() is None:
+                tmp_root = mkdtemp_task.result()
+            raise
         # Owner posture: the same pair the install path grants after
         # ``_owner_tier_confirmed`` -- owner credentials plus the context sandbox
         # mode -- and the same audit record, under this path's own operation name
@@ -1287,6 +1306,29 @@ _PREWARM_CLEANUP_BUDGET = float(2 * _KILL_GRACE_PERIOD)
 #: finishing after the request returned is safe, and a test can await this set to
 #: observe the finish.
 _PENDING_PREWARM_CLEANUPS: set[asyncio.Task[Any]] = set()
+
+
+def _retrieve_batch_cancellation(batch: asyncio.Future[Any]) -> None:
+    """Mark a cancelled prewarm batch's outcome as retrieved.
+
+    ``asyncio.gather`` records a requested cancellation with
+    ``set_exception(CancelledError())``, not ``cancel()``, so a batch the budget or an
+    outer cancel stopped finishes holding an exception nobody reads. At GC the loop
+    handler then logs ``_GatheringFuture exception was never retrieved`` and
+    ``crash_guard`` writes an ``ASYNCIO UNHANDLED`` record to ``crash.log`` for an
+    outcome this module expects and handles. That cancellation is consumed silently;
+    any other exception (only a programming error can
+    reach the gather, since ``_worker`` swallows per-row failures) is logged here,
+    because reading it to check its type clears the never-retrieved report. On the
+    in-budget path ``batch.result()`` re-raises the same error to the caller, so such
+    an error is reported twice; that is accepted, because only a programming error
+    reaches the gather and a cancel path has no other reader.
+    """
+    if batch.cancelled():
+        return
+    exc = batch.exception()
+    if exc is not None and not isinstance(exc, asyncio.CancelledError):
+        logger.error("store art prewarm batch failed: %r", exc, exc_info=exc)
 
 
 def _detach_prewarm_cleanup(unfinished: asyncio.Future[Any]) -> None:
@@ -1631,6 +1673,7 @@ async def _prewarm_owner_tier_store_assets(reg: Any, entries: list[dict[str, Any
     # finishing later is safe.
     workers = asyncio.gather(*(_worker() for _ in range(worker_count)))
     batch = asyncio.ensure_future(workers)
+    batch.add_done_callback(_retrieve_batch_cancellation)
     try:
         await asyncio.wait({batch}, timeout=_PREWARM_BATCH_BUDGET)
     except asyncio.CancelledError:

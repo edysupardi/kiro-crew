@@ -38,6 +38,7 @@ from kiro_crew.hooks import (
     is_unc_shape,
     safe_read_file_bytes,
     safe_read_file_bytes_nolink,
+    screen_windows_linked_ancestors,
     unc_probe_allowed,
 )
 
@@ -65,7 +66,7 @@ from kiro_crew.imaging import (  # noqa: F401 -- constants re-exported, see comm
     downscale_image_block,
 )
 from kiro_crew.messaging.raster import SNIFF_BYTES, sniff_raster_mime
-from kiro_crew.platform_compat import first_linked_ancestor, is_link_or_junction
+from kiro_crew.platform_compat import is_link_or_junction
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,10 @@ MAX_PROMPT_IMAGE_B64_BYTES = 12 * 1024 * 1024
 #: prompt, so neither the user nor the model takes the picture as seen.
 PROMPT_LIMIT_NOTE = "[image not attached: prompt image limit]"
 IMAGE_SIZE_NOTE = "[image not attached: image size limit]"
+#: Written after a readable picture's path when the agent did not advertise
+#: ``promptCapabilities.image``, so the picture is never sent and never taken
+#: as seen.
+IMAGE_UNSUPPORTED_NOTE = "[image not attached: this agent does not accept images]"
 
 #: A marker-shaped token the USER typed, in any case. Escaped before the builder
 #: writes its own, so only a marker this function produced reads as an
@@ -116,6 +121,7 @@ def build_prompt_blocks(
     message: str,
     *,
     allow_image: bool = True,
+    agent_accepts_image: bool = True,
     max_image_bytes: int = MAX_IMAGE_BYTES,
     max_image_edge: int = MAX_IMAGE_EDGE_PX,
     max_image_b64_bytes: int = MAX_IMAGE_B64_BYTES,
@@ -136,11 +142,14 @@ def build_prompt_blocks(
     blocks or ``max_prompt_image_b64_bytes`` of base64 in one prompt, a further
     picture stays a path in the text.
 
-    ``allow_image=False`` (the agent did not advertise
-    ``promptCapabilities.image``) leaves the path in the text untouched: the file
-    is still on disk, so a tool-capable agent can open it, which is a strictly
-    better fallback than dropping the reference. The result is always at least
-    one text block, so a caller can pass it straight to ``session/prompt``.
+    ``allow_image=False`` (the caller's text is ABOUT a session, not an
+    attachment) leaves the path in the text untouched. ``agent_accepts_image=False``
+    (the agent did not advertise ``promptCapabilities.image``) sends no image
+    block either, but follows each readable picture's path with
+    ``IMAGE_UNSUPPORTED_NOTE`` so the model knows it was not attached; the path
+    stays, so a tool-capable agent can still open the file. The result is always
+    at least one text block, so a caller can pass it straight to
+    ``session/prompt``.
 
     Inlined images are downscaled so their longest edge is at most
     ``max_image_edge`` px -- the server-side backstop for Anthropic's many-image
@@ -200,11 +209,16 @@ def build_prompt_blocks(
             # candidate is not itself UNC-shaped -- only the link's target is
             # -- and is_file()/stat() below resolve every ancestor, so the
             # probe itself would traverse the link and open the SMB
-            # connection. Windows-only for the same reason as the UNC gate:
-            # on POSIX stat-ing through a symlink is harmless. Reference
-            # wiring: dashboard/handlers/themes.py::_resolve_local_source.
-            if os.name == "nt" and first_linked_ancestor(path) is not None:
-                continue
+            # connection. The shared screen rewrites a local linked prefix to
+            # its vetted target and refuses UNC, device, drive-relative and
+            # `..`-climbing targets; every probe below runs on the REWRITTEN
+            # path. Windows-only for the same reason as the UNC gate: on
+            # POSIX stat-ing through a symlink is harmless.
+            if os.name == "nt":
+                screened = screen_windows_linked_ancestors(path)
+                if screened is None:
+                    continue
+                path = screened
             # The LEAF gets the junction-aware check the walk deliberately
             # excludes: is_file() below FOLLOWS a final-component link, so a
             # leaf symlink/junction targeting a UNC share is the same probe.
@@ -222,6 +236,12 @@ def build_prompt_blocks(
                 if not path.is_file():
                     continue
             except OSError:
+                continue
+            if not agent_accepts_image:
+                # Never inlined. A bounded sniff decides whether the note is
+                # true, so the whole file is never read just to refuse it.
+                if _sniffs_as_raster(path):
+                    notes[raw] = IMAGE_UNSUPPORTED_NOTE
                 continue
             try:
                 size = path.stat().st_size

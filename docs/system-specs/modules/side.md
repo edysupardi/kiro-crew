@@ -185,13 +185,14 @@ second time.
 
 | Endpoint | Method | Path | Effect |
 |----------|--------|------|--------|
+| state | GET | `/api/chat/slots/{slot}/side` | The side conversation the gateway holds in memory, `{open, created_at, last_run_id, running, messages, queue}`, which a reloaded panel restores from. Each row carries the `id` its frame announced and its `run_id`; every text is redacted as the frames redact it. Owner-only for every caller (`chat.side_state`), the audience the side frames reach, so an app is refused even on a slot it owns; an app on a slot it does not own gets the uniform 404 |
 | open | POST | `/api/chat/slots/{slot}/side/open` | Initialise sidecar (idempotent) |
 | turn | POST | `/api/chat/slots/{slot}/side/turn` | Submit question; starts a turn, steers the running one, or queues. A dashboard-user caller must be the owner (`chat.side_turn`); app tokens keep slot scoping |
 | queue cancel | DELETE | `/api/chat/slots/{slot}/side/queue/{queue_id}` | Drop a queued entry; echoes its text back for the composer |
 | queue edit | PATCH | `/api/chat/slots/{slot}/side/queue/{queue_id}` | Rewrite a queued entry in place |
 | close | POST | `/api/chat/slots/{slot}/side/close` | Drop buffer + queue + destroy LLM session |
 | stop | POST | `/api/chat/slots/{slot}/side/stop` | Cancel the in-flight side turn (hung-turn escape hatch); idempotent when none is running. Owner-gated like turn (`chat.side_stop`); 409 `side_not_open` when no sidecar is open |
-| tools | GET | `/api/chat/side/tools` | `{read_only_tools, claude_adapter_outdated, config_unavailable}`: whether a side turn runs read-only tools, from the same check the turn makes (`_side_read_only_tools`), whether an old claude adapter is the only reason it does not, and whether the config failed to load; the footer reads it |
+| tools | GET | `/api/chat/side/tools` | `{read_only_tools, claude_adapter_outdated, claude_adapter_min_version, claude_adapter_update_command, config_unavailable}`: whether a side turn runs read-only tools, from the same check the turn makes (`_side_read_only_tools`), whether an old claude adapter is the only reason it does not, that adapter's floor (`CLAUDE_ACP_SETTING_SOURCES_MIN_VERSION`) and `npm i -g` step (`claude_adapter_install_command`), and whether the config failed to load; the footer reads it |
 
 **Stop.** A stop raises `SideState.is_stopping`, which the busy gate treats as a
 turn in flight, cancels the provider turn and waits for it for at most 5 s
@@ -200,14 +201,74 @@ row. The queue is held, not drained, until the next submit. The panel's Stop
 control (`SideChat`) calls this route; `website/src/test/SideChat.stop.test.tsx`
 pins it.
 
+**Reload.** A page reload empties the panel, but the sidecar lives on the slot
+until it is closed or the gateway restarts, and the next question joins it. So
+the panel reads `GET .../side` once per page per slot, on mount, and merges the
+result in (`restoreSideConversation` in `store/chatSlice.ts`, which dispatches
+`sideRestore` from `store/chat/side.ts`). Every way of asking waits for that read
+before the turn is sent, the panel's send and the `/side` command alike, within
+the send's own deadline (`SEND_ABORT_MS`, `awaitSideRestore`); one read in flight
+serves them all. A read still outstanding at the deadline stops being shared, so
+the next question asks the gateway again; it still lands, and the first read to
+land is the one restored, which settles a question still waiting on its own read. A
+404 is nothing to restore (the slot is gone, or the gateway predates the route).
+Any other failure, or a read that outruns the deadline, sends nothing, because the
+question would join a conversation the panel cannot show: the panel hands the text
+back with a line saying the conversation has not loaded (not a connection error),
+and a failed read also shows a notice with **Retry**. `/side` is refused with
+composer wording that names no Retry button, since none is on screen there, and
+the command stays in the composer. `/side` gives up on its `/side/open` at the same
+deadline, with the composer's plain refusal.
+The draft stays in memory only (`sideChatDrafts`).
+The read and the frames travel separately, so either can be ahead:
+
+- A row the sidecar stored arrives under one id on both the read and its frame
+  (`message_id`), and is drawn once; a frame for a row the panel already holds
+  changes nothing, busy state included.
+- A row the sidecar never stores (an error notice) or had not stored yet (a later
+  turn) exists only in the tab, and is kept beside the rows of its run.
+- A turn running at the read: a tab that saw it begin keeps its streamed answer;
+  otherwise the deltas began part-way through, so the panel shows the turn as
+  thinking until the final frame, which carries the whole text
+  (`SideState.awaitingFinalRunId`).
+- A frame for a turn that has given way to a later one adds its row but leaves
+  the later turn's busy state alone.
+- A question asked while the read is in flight cannot be in it, because every
+  send waits for the read, so the panel keeps it as its own row until its queued
+  receipt, its user frame, or a receipt that hands the text back settles it.
+- The queue keeps the sidecar's order, with an entry the tab saw pushed to the front
+  ahead of it and other entries the tab saw pushed at the end; an entry the tab saw
+  leave stays out, even one it never had a card for. Restored entries are redacted,
+  so, like another tab's cards, they drain but cannot be edited or cancelled here.
+- A close in this tab marks the slot settled (`slotSideRestored`), so a read still
+  in flight cannot bring the closed conversation back.
+- The context banner of a restored conversation counts the parent turns newer
+  than its `created_at` (`SideState.countsTurnsSinceCreated`), at render, since the
+  parent transcript can load after the restore.
+- A queue frame or a send status can make an empty side state before any row, and
+  a read that finds nothing open leaves it so. The first row starts the
+  conversation there: its age begins at that row, and its banner counts the main
+  chat's turns newer than that row (`countsTurnsSinceCreated`), as for a restored
+  conversation, because the turns this tab holds then can be another slot's or
+  still loading. A question this tab sent dates it until the question's frame
+  lands, then the gateway's copy does, so its start and the main chat's turns
+  share a clock.
+
+An interrupted turn (`PromptBusyExhaustedError`) stores what streamed and then
+its notice, broadcasts the partial answer as its own final frame before the notice's
+final frame, and carries each stored row's id, so a restored panel draws it as the
+live one did. The other error notices a turn can end with are not stored, so after
+a reload such a turn shows its question without the notice, which is also what
+the model holds.
+
 ## Wire Protocol
 
 Event name: `chat.side_result`  
 Kind field: `"side"` (translated from upstream `"btw"`)
 
 Payload shape (broadcast per chunk and per final response, built by
-`dashboard/ws.py`, which owns the wire). `final` and `steer` are optional, and
-`is_error` is present only when true:
+`dashboard/ws.py`, which owns the wire). `final`, `steer` and `message_id` are
+optional, and `is_error` is present only when true:
 
 ```json
 {
@@ -221,10 +282,16 @@ Payload shape (broadcast per chunk and per final response, built by
     "ts": <unix-float | null>,
     "is_error": true,
     "final": true,
-    "steer": true
+    "steer": true,
+    "message_id": "<sidecar row id>"
   }
 }
 ```
+
+`message_id` names the `SideState.messages` row the frame announces: a question,
+a consumed steer, a final answer or the stop row. Streaming deltas, and the error
+notices the sidecar does not store, carry none. It is what lets a panel restored
+from `GET .../side` recognise a frame for a row it already holds.
 
 Run-ID isolation: the frontend routes `chat.side_result` frames to the chat
 state's `slotSide` map via a dedicated reducer (`sseSideResult`, owned by
@@ -251,10 +318,13 @@ a parent-slot turn.
 `binding` (the `(derived agent, cwd, spec digest)` the live session was created
 under), `task` (the running side turn's asyncio task handle, so `/side/stop` can
 cancel it; `None` when idle) and `is_stopping` (the stop-in-progress busy flag).
-Helpers: `append_user` (with a `steer` marker), `append_assistant`, `clear`,
-`queue_append` / `queue_insert_front` / `queue_pop` / `queue_remove` /
+Helpers: `append_user` (with a `steer` marker), `append_assistant` (with an
+`is_error` marker, set on the stop row so a restored panel draws it as a notice),
+`clear`, `queue_append` / `queue_insert_front` / `queue_pop` / `queue_remove` /
 `queue_edit`, `steer_can_accept`, and the ledger's `steer_register` /
-`steer_state` / `steer_mark` / `steer_pending` / `steer_settle`.
+`steer_state` / `steer_mark` / `steer_pending` / `steer_settle`. Both append
+helpers stamp the row with an `id`, and with the `run_id` they are given, and
+return the id for the frame that announces the row.
 
 ### `dashboard/steer_settle.py`
 
@@ -319,8 +389,8 @@ Four prompt constants, two lifted from the upstream protocol:
 
 ### `dashboard/handlers/side.py`
 
-Seven aiohttp route handlers (`api_side_open`, `api_side_turn`, `api_side_stop`,
-`api_side_queue_cancel`, `api_side_queue_edit`, `api_side_close`,
+Eight aiohttp route handlers (`api_side_state`, `api_side_open`, `api_side_turn`,
+`api_side_stop`, `api_side_queue_cancel`, `api_side_queue_edit`, `api_side_close`,
 `api_side_tools`) + the `_run_side_turn` background driver.
 `_run_side_turn` resolves the slot's agent, confines the side session for the
 selected harness — on kiro-cli it publishes the derived read-only spec (below)
@@ -384,12 +454,18 @@ request, and the gate judges all of them. kiro-cli trusts `fs_read` natively
 (observed on a live pod: an `fs_read` ran with no permission request and no host
 decision row, while `pwd` under `execute_bash` raised one the gate approved); a
 native read runs outside the gate, and the guarantee holds because it is a
-read. FAIL CLOSED: a turn whose spec cannot be derived or published is refused
-with a coded error (`ReadOnlySpecError.code`: `unsafe_name`,
-`base_spec_missing`, `base_spec_unreadable`, `derived_name_shadowed`,
-`derived_path_foreign`, `spec_write_failed`, `base_spec_malformed` — a
-`mcpServers`/`toolsSettings` value or entry that is neither an object nor
-`null`). The code is logged and SEL-audited (`chat.side_turn`, `denied`); the
+read. kiro-cli trusts it only inside the session cwd; a read outside it raises
+a permission request. So the derived spec also adds `deniedPaths` under
+`toolsSettings` `fs_read`, `read`, `grep` and `glob`, built from
+`security.sandbox_credential_targets()` (the list the claude side session
+denies), and kiro-cli refuses those reads itself even inside the cwd
+(`side_readonly_spec.credential_denied_paths`). FAIL CLOSED: a turn whose spec
+cannot be derived or published is refused with a coded error
+(`ReadOnlySpecError.code`: `unsafe_name`, `base_spec_missing`,
+`base_spec_unreadable`, `derived_name_shadowed`, `derived_path_foreign`,
+`spec_write_failed`, `base_spec_malformed` — a `mcpServers`/`toolsSettings`
+value or entry that is neither an object nor `null`,
+`credential_paths_unresolved`). The code is logged and SEL-audited (`chat.side_turn`, `denied`); the
 panel shows a generic message without it. The turn never runs under the base agent.
 
 **Orphaned derived specs are reaped.** kiro-cli lists every file in the
@@ -423,14 +499,14 @@ with `base_spec_missing` before a session exists.
 
 **The allowance is a harness capability, granted by positive membership.**
 Whether a side turn may execute read-only tools at all is
-`ACP_BACKENDS_SIDE_READONLY` (`agent_sdk/backends.py`, harness-parity H6):
-kiro-cli, KAS, claude and goose. A harness has its own pre-approval surface
+`ACP_BACKENDS_SIDE_READONLY` (`agent_sdk/backends_routing.py`, harness-parity H6):
+kiro-cli, KAS, claude, goose and deepseek. A harness has its own pre-approval surface
 (claude-agent-acp `permissions.allow` / `bypassPermissions`, KAS `permissions`
 rules from its own store, goose's `permission.yaml`) that the host gate cannot see: a call it pre-approves
 would run with no READ_ONLY decision and no SEL row. A member therefore starts
 the side session in a shape where that surface cannot reach a write — kiro-cli
 through the derived spec above, KAS through the same spec taken over the wire,
-claude and goose through the session shapes below. KAS receives `<agent>--readonly` as a
+claude and goose through the session shapes below, and deepseek through Crew's verified gate plugin. KAS receives `<agent>--readonly` as a
 projected custom agent (`acp/kas_agents` puts it in `customAgents`), and the
 derivation empties its `permissions` block with the other grants, so every KAS
 tool call raises `session/request_permission` (measured on kiro-cli 2.29.0,
@@ -450,7 +526,26 @@ read-only allowlist: `read_file` and `list_directory` (`fs_read`),
 `read_file` is refused: KAS stamps `_meta.kiro.serverName` on its tool_call
 frame, and a call with a server is never a host built-in. The sensitive-path
 deny runs before the proof, so a `read_file` of `~/.aws/credentials` is
-refused (`test_side_readonly_kas.py`). Off the set,
+refused (`test_side_readonly_kas.py`). deepseek joins without the derived
+spec doing any work: every deepseek session runs Crew's verified gate plugin,
+which turns each harness `allow` into `ask` and keeps only the harness's own
+denies, so every call raises `session/request_permission` (captured on dsh
+0.2.0-rc.2, `acp_frames/deepseek/side-read-only-live.jsonl`). Its tool_call
+frame names the dispatched tool in `title` with `kind: other`, and on a
+`READ_ONLY` turn alone `read`, `grep` and `glob` are read under `fs_read`,
+`grep` and `glob` (`acp/_dispatch.build_permission_event`,
+`deepseek_tool_name`), deny rules and ceilings bind both spellings, and the
+call must name what it reads as an absolute path. Every other name is refused.
+A name proves the tool only when stock dsh registered it. The gate plugin's
+load marker lists every enabled loader entry and each read-name owner, and the
+launch records the verdict (`tool_gate.deepseek_read_only_owner_issue`). Each
+entry must be a stock `@deepseek-ai/` package hosting no operator code, a
+loader built-in, or Crew's gate. Global `read`, `grep`, and `glob` must be held
+by running `dsh-tool-fs` or `dsh-tool-fs-search` tools, with no scoped layer
+shadowing them. A later per-agent scope stays covered by the stock-only rule.
+Any other composition, unknown owner, or shadow makes each DeepSeek side turn
+`REJECT_ALL` (`deepseek_read_only_issue`, refused in `llm_helpers`). Another
+harness may have its own pre-approval surface the host gate cannot see. Off the set,
 or with the harness unknown because the config never loaded, `_run_side_turn`
 keeps the pre-allowance posture — the base agent under `REJECT_ALL`, no
 derived spec — and the prompt (`SIDE_BOUNDARY_PROMPT_NO_TOOLS`), the
@@ -477,10 +572,12 @@ session confined (`AcpClient._claude_session_meta`):
   tool, `Bash` or subagent exists for an allow rule to pre-approve.
 - The `mcpServers` array is empty and `strictMcpConfig` keeps the user's, the
   project's and plugins' servers out. READ_ONLY refuses every MCP call anyway.
-- Inline settings add `permissions.ask` rules for `WebFetch` and `WebSearch`, so
-  a web call reaches the gate even where the user's own allow rule would
-  pre-approve it (an operator's `auto_deny_tools` on `web_fetch` / `web_search`
-  therefore binds), and set `disableAllHooks`, so settings and plugin hooks —
+- Inline settings add a `permissions.ask` rule for each read built-in (`Read`,
+  `Grep`, `Glob`, `WebFetch`, `WebSearch`;
+  `acp/client_claude_session._CLAUDE_SIDE_READ_ONLY_ASK_RULES`), so every read
+  reaches the gate even inside the work dir or where the user's own allow rule
+  would pre-approve it (an operator's `auto_deny_tools` on `web_fetch` /
+  `web_search` therefore binds), and set `disableAllHooks`, so settings and plugin hooks —
   shell commands claude runs unprompted, some fed the model's tool input — do
   not run. That matches the hooks the kiro-cli derived spec removes, and has
   the same cost: a user's own `PreToolUse` hook that denies a read does not run
@@ -500,15 +597,20 @@ session confined (`AcpClient._claude_session_meta`):
   moves a `bypassPermissions` or `auto` starting mode to `default` before the
   first prompt.
 
-Inside the work dir, or where the user's settings allow it, Claude Code runs Read,
-Grep and Glob without asking; such a native read runs outside the gate, as
-kiro-cli's `fs_read` does, and the deny rules above keep it off the sensitive
-paths. A call that does
-reach the gate is proven read-only by `harness_builtin_tool`: the kiro-cli
+In `default` mode Claude Code runs Read, Grep and Glob inside the work dir
+without asking; the `ask` rules above override that, so each such call reaches
+the gate and gets an SEL row (captured on claude-agent-acp 0.94.0,
+`test/fixtures/acp_frames/claude/side-read-ask-live.jsonl` and
+`side-read-no-ask-live.jsonl`). A call under a denied path is refused
+by claude before it asks. A call that reaches the gate is proven read-only by `harness_builtin_tool`: the kiro-cli
 built-in that the tool name claude-agent-acp stamped on the call's `tool_call`
 frame (`_meta.claudeCode.toolName`) maps to, never the title or the permission
 payload (`hook_runtime/tool_identity._is_harness_read_only_builtin`). The ACP
-kind still narrows, so a `search`-kind Grep outside the work dir is refused. The
+kind still narrows. claude states kind `search` for Grep and Glob, so for a
+Side Chat call whose stamped name is `Grep` or `Glob`, that `search` is read as
+`read` (`acp/_dispatch_parts/permission_requests`); any other non-read kind
+still refuses. The gate's sensitive-path tier still refuses such a call aimed
+at a credential path. The
 same mapped name is a deny target and a governance identity, so a deny rule or a
 ceiling's `tools` deny on `web_fetch` binds claude's WebFetch. Only a Side Chat
 session's permission events carry it (`build_permission_event(side_read_only=)`):
@@ -526,8 +628,11 @@ kiro-cli binding records the spec digest. The footer asks `GET
 the harness's membership, then on claude the adapter floor), so on an adapter
 below the floor it says tools are unavailable, as the turn's prompt does. The
 same answer's `claude_adapter_outdated` names the old adapter as the reason, and
-the footer then says to update claude-agent-acp
-(`pages.chat.sideChat.context_only_claude_adapter_outdated`).
+the footer then names claude-agent-acp, the floor and the `npm i -g` step, read
+from the same answer's `claude_adapter_min_version` and
+`claude_adapter_update_command`
+(`pages.chat.sideChat.context_only_claude_adapter_outdated`). Each footer starts
+with what works: "Read-only" when lookups run, "No lookups" when they do not.
 
 **On goose the confinement is a goose home of its own.** goose reads no kiro
 agent spec either, and its pre-approval store is `permission.yaml` in its
@@ -628,12 +733,16 @@ HOST-TRUSTED proof of read-only. Exactly two sources qualify:
   `hooks._HOST_READ_ONLY_BUILTIN_TOOLS` (`fs_read`, `glob`, `grep`,
   `web_fetch`, `web_search`), matched on the non-model-authored
   `_meta.kiro.toolName` identity with no `_meta.kiro.mcpServerName` behind it.
-  The stamped name is read through `hooks._HOST_READ_ONLY_BUILTIN_ALIASES`
-  first: kiro-cli stamps its file-read built-in as `read` (`fs_read` is the
-  spelling a spec may still use), and the allowlist carries the spec spelling.
-  The resolved spelling is also offered to the deny rules and to governance,
-  which run before this proof, so a rule written `fs_read` reaches a `read`
-  stamp and wins.
+  The stamped name is resolved through `hooks._host_builtin_alias`
+  (`platform.tool_names.KIRO_TOOL_ALIASES`: kiro-cli stamps `read`, `write` and
+  `shell` where a spec, a rule and the allowlist spell `fs_read`, `fs_write`
+  and `execute_bash`). The deny rules and governance, which run before this
+  proof, resolve the stamp through the same call: a deny rule written in the
+  spec spelling reaches the short stamp, and governance is asked a trusted
+  stamp's two spellings as one identity, so a deny on either refuses the call
+  and an allow set naming either admits it (an unverified stamp is asked on
+  its own name; its alias may only deny). What the proof may then admit is
+  decided by the allowlist alone, so `write` and `shell` stay unproven.
 
 The agent-influenced inputs — the ACP `kind` field (passed through verbatim
 from the agent) and the model-authored title — may narrow but never prove: a
@@ -705,7 +814,9 @@ MessageCircleQuestionMark}`. Renders `<SideChat slot={slot} />` when active.
 
 ### `SideChat.tsx`
 
-Reads from `state.chat.slotSide[slot]`. Calls `api.sideOpen` at submit time,
+Reads from `state.chat.slotSide[slot]`. On mount it restores the slot with
+`restoreSideConversation` (`GET .../side`) once per page (see **Reload**). Calls
+`api.sideOpen` at submit time,
 inside the send mutation (and from the `/side` interceptor), then `api.sideTurn`. Local optimistic buffer for pre-redux rendering — for
 a turn this submit STARTS only: a steer's bubble must land above the streaming
 answer and a queued one is a card, so both are placed by the server frame.
@@ -769,6 +880,18 @@ memo on the second pass and eats the user's punctuation).
 because the IME defect was in the WIRING and a hook test cannot see it. A
 source-level guard fails if this file re-grows a local copy of any of them.
 
+The transcript is the shared `app-sdk/ChatMessageList`, and `SideChat` takes two
+of the host's openers as props — `onFileOpen` and `onArtifactOpen`, the ones
+`SidePanel` already hands `ActivityViewer` for its Git and Artifacts tabs — and
+passes them straight through, so a path chip or an artifact link in a side reply
+opens a tab of the panel the side chat sits in, as the same chip and link do in
+the main transcript. Capability by omission, like every other host seam here: a
+host that passes neither gets `MarkdownRenderer`'s own fallbacks (a path chip
+reveals the file in the OS file manager, or copies the path on a remote
+dashboard; a path link stays a plain link; an artifact link navigates away).
+`website/src/test/SideChat.fileOpen.test.tsx` pins both the wired and the
+unwired behaviour.
+
 ### `store/chat/side.ts` — Side State
 
 `website/src/store/chat/side.ts` owns the side reducers; `chatSlice.ts` composes
@@ -782,7 +905,10 @@ action types stay `chat/<name>` and every consumer keeps importing them from
 - `sseSideResult` reducer: user frames append, assistant frames accumulate
   (delta-append within same run_id), error frames always start new entry, and a
   `steer` user frame is spliced in ABOVE a streaming assistant row of the same
-  run.
+  run. A frame whose `message_id` the panel already holds is dropped, and so is a
+  delta for a settled answer or for a run waiting on its final frame.
+- `sideRestore` reducer: merges `GET .../side` into the slot once per page (see
+  **Reload** above).
 - `sseSideQueue` reducer: `push` appends, or head-inserts on `front`
   (replay-safe — a redelivered id is ignored, never rewritten, so a redacted
   duplicate cannot overwrite the raw text), `edit` rewrites, `cancel`/`drain`
@@ -822,12 +948,12 @@ Backend invariants are covered by `test/test_side.py`:
 | Channel separation | `test_side_run_id_never_leaks_to_main_channels` |
 | Tool-rejection fallback | `test_empty_llm_output_produces_visible_fallback` |
 | READ_ONLY honours the classifier, never a grant | `test_read_only_policy_refuses_a_write_the_config_grant_matches`, `test_read_only_policy_refuses_an_app_own_server_grant`, `test_read_only_policy_classifies_a_read_the_grant_also_matches`, `test_read_only_policy_does_not_trust_a_read_kind_alone` (`test/test_llm_helpers_tool_gate.py`) |
-| READ_ONLY proof is host-trusted only | `test_read_only_policy_rejects_a_read_kind_on_a_mutating_tool`, `test_read_only_policy_rejects_a_read_kind_with_no_host_identity`, `test_read_only_policy_rejects_a_host_known_name_without_trusted_provenance`, `test_read_only_policy_rejects_a_read_looking_title_alone`, `test_read_only_policy_rejects_an_mcp_tool_with_a_read_kind`, `test_read_only_policy_rejects_a_host_known_read_tool_under_a_non_read_kind`, `test_read_only_policy_approves_a_host_known_read_tool`, `test_read_only_policy_approves_a_read_only_shell_command`, `test_hook_based_policy_still_approves_a_read_kind_tool` (`test/test_llm_helpers_tool_gate.py`); `TestClassifierOnlyHostTrustedProof` (`test/test_hooks.py`) |
-| Dashboard-bound profile governs a side turn | `test_dashboard_bound_profile_governs_a_side_turn` (`test/test_side.py`), `test_side_key_binds_the_dashboard_surface` (`test/test_governance_profiles.py`), `TestInferSource` (`test/test_sel.py`) |
-| claude side turns run read-only on a confined session | `test_side_turn_on_claude_runs_read_only_on_a_confined_session`, `test_side_turn_on_claude_with_an_unverified_adapter_runs_no_tools`, `test_dashboard_bound_profile_governs_a_claude_side_read`, `test_side_tools_answers_what_a_side_turn_runs`, `test_side_tools_is_false_when_the_config_does_not_load` (`test/test_side.py`); `test_a_side_read_only_session_starts_confined_and_pinned`, `test_a_side_read_only_session_keeps_the_exclusions_restrictions`, `test_a_handshake_below_the_floor_stops_a_side_read_only_session` (`test/test_acp_session_mcp.py`); `test_skips_pool_for_a_side_read_only_session` (`test/test_session_pool.py`) |
-| An inherited allow rule cannot open a sensitive path to a claude side read | `test_an_inherited_read_allow_does_not_open_a_sensitive_path`, `test_a_side_session_without_its_deny_rules_never_starts`, `test_a_target_is_written_as_a_root_anchored_rule` (`test/test_acp_session_mcp.py`) |
-| A claude read tool is proven by its adapter stamp | `test_read_only_policy_approves_a_claude_read_tool`, `test_read_only_policy_rejects_a_claude_search_kind`, `test_read_only_policy_rejects_a_claude_builtin_name_with_a_server`, `test_read_only_policy_denies_a_claude_web_tool_an_operator_denied` (`test/test_llm_helpers_tool_gate.py`); `test_a_claude_permission_event_names_the_read_builtin_its_frame_stamped`, `test_a_claude_frame_without_its_stamp_is_not_named_by_its_title`, `test_a_main_chat_claude_permission_event_names_no_builtin` (`test/test_harness_tool_names.py`); `test_only_a_side_read_only_session_names_a_claude_read_builtin` (`test/test_acp_session_mcp.py`) |
-| goose side turns run on their own goose home and prove only the builtin pair | `test_side_readonly_goose.py`; `test_side_turn_on_goose_runs_read_only_on_its_own_goose_home`, `test_side_tools_answers_what_a_side_turn_runs` (`test/test_side.py`); `test_a_goose_turn_runs_read_only_on_its_own_goose_home` (`test/test_chat_threads.py`) |
+| READ_ONLY proof is host-trusted only | `test_read_only_policy_rejects_a_read_kind_on_a_mutating_tool`, `test_read_only_policy_rejects_a_read_kind_with_no_host_identity`, `test_read_only_policy_rejects_a_host_known_name_without_trusted_provenance`, `test_read_only_policy_rejects_a_read_looking_title_alone`, `test_read_only_policy_rejects_an_mcp_tool_with_a_read_kind`, `test_read_only_policy_rejects_a_host_known_read_tool_under_a_non_read_kind`, `test_read_only_policy_approves_a_host_known_read_tool`, `test_read_only_policy_approves_a_read_only_shell_command`, `test_hook_based_policy_still_approves_a_read_kind_tool` (`test/test_llm_helpers_tool_gate.py`); `TestClassifierOnlyHostTrustedProof` (`test/test_hooks_trusted_identity.py`) |
+| Dashboard-bound profile governs a side turn | `test_dashboard_bound_profile_governs_a_side_turn` (`test/test_side_turn_confinement.py`), `test_side_key_binds_the_dashboard_surface` (`test/test_governance_profiles.py`), `TestInferSource` (`test/test_sel.py`) |
+| claude side turns run read-only on a confined session | `test_side_turn_on_claude_runs_read_only_on_a_confined_session`, `test_side_turn_on_claude_with_an_unverified_adapter_runs_no_tools`, `test_dashboard_bound_profile_governs_a_claude_side_read`, `test_side_tools_answers_what_a_side_turn_runs`, `test_side_tools_is_false_when_the_config_does_not_load` (`test/test_side_turn_confinement.py`); `test_a_side_read_only_session_starts_confined_and_pinned`, `test_a_side_read_only_session_keeps_the_exclusions_restrictions`, `test_a_handshake_below_the_floor_stops_a_side_read_only_session` (`test/test_acp_session_mcp_client_seam.py`); `test_skips_pool_for_a_side_read_only_session` (`test/test_session_pool.py`) |
+| An inherited allow rule cannot open a sensitive path to a claude side read | `test_an_inherited_read_allow_does_not_open_a_sensitive_path`, `test_a_side_session_without_its_deny_rules_never_starts`, `test_a_target_is_written_as_a_root_anchored_rule` (`test/test_acp_session_mcp_client_seam.py`) |
+| A claude read tool is proven by its adapter stamp | `test_read_only_policy_approves_a_claude_read_tool`, `test_read_only_policy_rejects_a_claude_search_kind`, `test_read_only_policy_rejects_a_claude_builtin_name_with_a_server`, `test_read_only_policy_denies_a_claude_web_tool_an_operator_denied` (`test/test_llm_helpers_tool_gate.py`); `test_a_claude_permission_event_names_the_read_builtin_its_frame_stamped`, `test_a_claude_frame_without_its_stamp_is_not_named_by_its_title`, `test_a_main_chat_claude_permission_event_names_no_builtin` (`test/test_harness_tool_names.py`); `test_only_a_side_read_only_session_names_a_claude_read_builtin` (`test/test_acp_session_mcp_client_seam.py`) |
+| goose side turns run on their own goose home and prove only the builtin pair | `test_side_readonly_goose.py`; `test_side_turn_on_goose_runs_read_only_on_its_own_goose_home`, `test_side_tools_answers_what_a_side_turn_runs` (`test/test_side_turn_confinement.py`); `test_a_goose_turn_runs_read_only_on_its_own_goose_home` (`test/test_chat_threads.py`) |
 
 Busy-send invariants live in `test/test_side_steer_queue.py`:
 
@@ -855,9 +981,18 @@ be dead at runtime while all of them stayed green.
 Frontend invariants are covered in KiroCrewWebsite under `src/test/`:
 `SideChat.close.test.tsx`, `SideChat.multiturn.test.tsx`,
 `SideChat.refresh.test.tsx`, `SideChat.thinking.test.tsx`,
-`SideChat.steerQueue.test.tsx`, `SideSlashCommand.test.tsx`,
+`SideChat.steerQueue.test.tsx`, `SideChat.restore.test.tsx` (the reload merge, a
+late frame drawn once, a joined turn held for its final frame, a read landing
+after a close, a resent question kept apart from the running turn it repeats, the
+banner count, the failed-read hold and Retry, a send that waits for a read in
+flight, a 404), `SideChat.restoreFailed.test.tsx` (what a send held back by the
+read tells the user), `SideSlashCommand.test.tsx` (including `/side`
+reading before it asks and holding the question when the read fails),
 `SideSlashCommand.steer.test.tsx` (command interception wins over mid-turn
 steer routing), and the `sseSideResult` block in `chatSlice.messages.test.ts`.
+The read route itself is pinned in `test/test_side_state_route.py` (rows under
+their frames' ids, the queue, `running`, an interrupted turn read back with its
+notice, redaction, owner-only).
 
 Nothing enforces invariant 2 (separate envelope) mechanically. It is a
 review-time rule, held by the backend and frontend suites above plus the

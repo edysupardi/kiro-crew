@@ -976,7 +976,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.default-model",
     "label": "Default Model",
     "labelKey": "pages.settings.chatPanel.default_model",
-    "description": "Which model new sessions start with when their agent pins none. Set a model per agent under Customize → Crewmates, or pick one inside a session to override it there.",
+    "description": "Which model new sessions start with when their agent pins none. Set a model per agent under Customize → Mates, or pick one inside a session to override it there.",
     "hint": "Agents with their own configured model ignore this setting. 'Default' uses the model from the agent configuration, or the system default when none is configured. Changing this does not affect sessions that are already open.",
     "tab": "chat",
     "type": "select",
@@ -996,6 +996,20 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "params": {
       "sub": "models"
     }
+  },
+  {
+    "id": "chat.default-sidebar-folder-for-new-chats",
+    "label": "Default Sidebar Folder for New Chats",
+    "labelKey": "pages.settings.chatPanel.default_session_folder",
+    "description": "The sidebar folder new chats are filed into when you start one without choosing a folder. It groups chats in the sidebar; it is not a folder on disk.",
+    "hint": "The chat uses the folder's linked project and agent, as New chat in folder does.",
+    "tab": "chat",
+    "type": "select",
+    "occurrence": 1,
+    "params": {
+      "sub": "sessions"
+    },
+    "configKey": "dashboard.default_session_folder"
   },
   {
     "id": "chat.describe-your-role",
@@ -1107,6 +1121,19 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "chat.keep-side-panel-open",
+    "label": "Keep Side Panel Open",
+    "labelKey": "pages.settings.chatPanel.side_panel_always_open",
+    "hint": "Opens the side panel in every chat, including new chats and after a reload. Closing it hides it until you switch chats. This setting does not apply on a phone.",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "sidepanel"
+    },
+    "configKey": "dashboard.side_panel_always_open"
+  },
+  {
     "id": "chat.link-previews",
     "label": "Link Previews",
     "labelKey": "pages.settings.chatPanel.link_previews",
@@ -1179,6 +1206,31 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
       "sub": "sessions"
     },
     "configKey": "dashboard.session_folder_root"
+  },
+  {
+    "id": "chat.open-sidebar-sessions-in-a-session-tab",
+    "label": "Open Sidebar Sessions in a Session Tab",
+    "labelKey": "pages.settings.chatPanel.sidebar_click_opens_tab",
+    "hint": "A click opens the session in its own session tab instead of replacing the active tab's session.",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "sessions"
+    }
+  },
+  {
+    "id": "chat.pin-summary-in-side-panel",
+    "label": "Pin Summary in Side Panel",
+    "labelKey": "pages.settings.chatPanel.side_panel_pin_summary",
+    "hint": "Shows Summary as the first side panel tab. Whenever the panel opens, it shows Summary. Opening a file or another item still shows that item. Needs Session summaries on.",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "sidepanel"
+    },
+    "configKey": "dashboard.side_panel_pin_summary"
   },
   {
     "id": "chat.pin-the-latest-turn",
@@ -1342,7 +1394,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.show-full-titles-while-scrolling",
     "label": "Show Full Titles While Scrolling",
     "labelKey": "pages.settings.chatPanel.full_titles_on_scroll",
-    "hint": "While you scroll the session list, titles cut off by the sidebar show in full over it; they hide when the pointer leaves or shortly after scrolling stops",
+    "hint": "While you scroll the session list, titles the sidebar cuts off show in full",
     "tab": "chat",
     "type": "toggle",
     "occurrence": 1,
@@ -1758,15 +1810,6 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1
   },
   {
-    "id": "developer.crewmates",
-    "label": "Crewmates",
-    "labelKey": "pages.developer.featurePreviewsTab.crew_members",
-    "hint": "The Crewmates page: every agent you have, each with its own thread. Still being built, so it is not offered until you turn this on.",
-    "tab": "developer",
-    "type": "toggle",
-    "occurrence": 1
-  },
-  {
     "id": "developer.decisions-jev",
     "label": "Decisions (Jev)",
     "labelKey": "pages.developer.featurePreviewsTab.decisions",
@@ -1812,6 +1855,15 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1
   },
   {
+    "id": "developer.mates",
+    "label": "Mates",
+    "labelKey": "pages.developer.featurePreviewsTab.crew_members",
+    "hint": "The Mates page: every agent you have, each with its own thread. Still being built, so it is not offered until you turn this on.",
+    "tab": "developer",
+    "type": "toggle",
+    "occurrence": 1
+  },
+  {
     "id": "developer.model-for-the-small-model-judge",
     "label": "Model for the small-model judge",
     "labelKey": "pages.developer.featurePreviewsTab.decisions_judge_model",
@@ -1821,10 +1873,10 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1
   },
   {
-    "id": "developer.reply-threads-on-crewmate-chat-messages",
-    "label": "Reply threads on crewmate chat messages",
+    "id": "developer.reply-threads-on-mate-chat-messages",
+    "label": "Reply threads on mate chat messages",
     "labelKey": "pages.settings.crewmatesSection.reply_threads",
-    "hint": "Let any message in a crewmate's chat carry its own reply thread, opened in the side panel while the chat stays visible. Off, the Reply in thread control is not offered and existing threads are hidden, not deleted.",
+    "hint": "Let any message in a mate's chat carry its own reply thread, opened in the side panel while the chat stays visible. Off, the Reply in thread control is not offered and existing threads are hidden, not deleted.",
     "tab": "developer",
     "type": "toggle",
     "occurrence": 1
@@ -1834,6 +1886,15 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "label": "Run a local gateway",
     "labelKey": "pages.settings.developerPanel.run_a_local_gateway",
     "description": "Start a gateway on this machine. Leave it on unless this app's port already reaches a crew on another machine, or the app cannot connect the next time it opens, which is when this takes effect. That needs the crew saved for this port with “Set Remote Host…” in the Connection menu, plus a tunnel: tick “Keep an SSH tunnel to this crew open” there (macOS and Linux) or keep your own SSH tunnel running. Settings → Remote Crew connections stop when this is off, so they do not count.",
+    "tab": "developer",
+    "type": "toggle",
+    "occurrence": 1
+  },
+  {
+    "id": "developer.run-kas-on-kiro-crew-s-own-engine",
+    "label": "Run KAS on Kiro Crew's own engine",
+    "labelKey": "pages.developer.kasBundleCard.toggle_label",
+    "description": "Uses the KAS engine version this Kiro Crew release was tested with, instead of the Kiro CLI. Applies to every new session on this Kiro Crew, not just this device. Signs in with your Kiro account from Settings → Agent Harness. Takes effect when Kiro Crew restarts.",
     "tab": "developer",
     "type": "toggle",
     "occurrence": 1
@@ -1941,6 +2002,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "params": {
       "sub": "zoom"
     }
+  },
+  {
+    "id": "display.external-terminal-app",
+    "label": "External terminal app",
+    "labelKey": "pages.settings.displayPanel.terminal_external_app",
+    "tab": "display",
+    "type": "select",
+    "occurrence": 1,
+    "params": {
+      "sub": "terminal"
+    },
+    "configKey": "dashboard.terminal.external_app"
   },
   {
     "id": "display.font",
@@ -2483,6 +2556,16 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "configKey": "skills.auto_create_from_sessions"
   },
   {
+    "id": "skills.extra-skill-paths",
+    "label": "Extra skill paths",
+    "labelKey": "pages.settings.skillsPanel.extra_skill_paths",
+    "description": "Folders to load extra skills from, one path per line. Spaces around a path and blank lines are ignored. Skills found there are read-only, and a skill in your own skills folder wins on a duplicate name. Changes apply without a restart.",
+    "tab": "skills",
+    "type": "input",
+    "occurrence": 1,
+    "configKey": "skills.extra_paths"
+  },
+  {
     "id": "skills.require-approval-before-generated-skills-go-live",
     "label": "Require approval before generated skills go live",
     "labelKey": "pages.settings.skillsPanel.require_approval_before_generated_skills_go_live",
@@ -2568,6 +2651,16 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "configKey": "stt.transcribe_vocabulary"
   },
   {
+    "id": "voice.decode-threads",
+    "label": "Decode threads",
+    "labelKey": "pages.settings.sttSettings.decode_threads",
+    "hint": "CPU threads the local model uses to recognise speech. Auto uses half of this machine's cores, at most 16. On a large machine with cores to spare, more threads finish each dictation sooner. A change applies at the next dictation, which reloads the model once.",
+    "tab": "voice",
+    "type": "select",
+    "occurrence": 1,
+    "configKey": "stt.threads"
+  },
+  {
     "id": "voice.dictation-panel",
     "label": "Dictation panel",
     "labelKey": "pages.settings.sttSettings.dictation_panel",
@@ -2624,6 +2717,16 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "configKey": "stt.language_code"
   },
   {
+    "id": "voice.language-2",
+    "label": "Language",
+    "labelKey": "pages.settings.voicePanel.language",
+    "hint": "Language for spoken replies",
+    "tab": "voice",
+    "type": "select",
+    "occurrence": 2,
+    "settingId": "voice.language-2"
+  },
+  {
     "id": "voice.microphone",
     "label": "Microphone",
     "labelKey": "pages.settings.sttSettings.microphone",
@@ -2653,28 +2756,10 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "configKey": "stt.model"
   },
   {
-    "id": "voice.piper-binary",
-    "label": "Piper Binary",
-    "labelKey": "pages.settings.voicePanel.piper_binary",
-    "description": "Path to the piper executable. Leave blank to auto-detect on PATH or in a ~/piper-venv install",
-    "tab": "voice",
-    "type": "input",
-    "occurrence": 1
-  },
-  {
-    "id": "voice.piper-model",
-    "label": "Piper Model",
-    "labelKey": "pages.settings.voicePanel.piper_model",
-    "description": "Path to the Piper voice model (.onnx). Required — download from huggingface.co/rhasspy/piper-voices",
-    "tab": "voice",
-    "type": "input",
-    "occurrence": 1
-  },
-  {
     "id": "voice.provider",
     "label": "Provider",
     "labelKey": "pages.settings.sttSettings.provider",
-    "hint": "Local speech recognition runs on this machine and sends nothing anywhere. Transcribe uploads your audio to AWS.",
+    "hint": "Local speech recognition runs on this machine and sends nothing anywhere. Transcribe streams your audio to AWS.",
     "tab": "voice",
     "type": "select",
     "occurrence": 1,
@@ -2684,11 +2769,21 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "voice.provider-2",
     "label": "Provider",
     "labelKey": "pages.settings.voicePanel.provider",
-    "description": "The built-in engine needs no setup; Piper is offline with better quality; Amazon Polly uses AWS credentials + network",
+    "description": "The built-in engine needs no setup; Amazon Polly uses AWS credentials + network",
     "tab": "voice",
     "type": "select",
     "occurrence": 2,
     "settingId": "voice.provider-2"
+  },
+  {
+    "id": "voice.send-when-i-stop-recording",
+    "label": "Send when I stop recording",
+    "labelKey": "pages.settings.sttSettings.submit_on_release",
+    "hint": "Stopping sends the message. Shift-click the mic, or slide sideways on the phone, to keep a draft.",
+    "tab": "voice",
+    "type": "toggle",
+    "occurrence": 1,
+    "configKey": "stt.submit_on_release"
   },
   {
     "id": "voice.shortcut-key",
@@ -2715,15 +2810,6 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "tab": "voice",
     "type": "select",
     "occurrence": 2
-  },
-  {
-    "id": "voice.speed-3",
-    "label": "Speed",
-    "labelKey": "pages.settings.voicePanel.speed",
-    "hint": "Piper speech speed (length scale)",
-    "tab": "voice",
-    "type": "select",
-    "occurrence": 3
   },
   {
     "id": "voice.streaming",

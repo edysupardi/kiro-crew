@@ -24,6 +24,7 @@ SLIM_SERVERS: dict[str, tuple[str, str]] = {
     "mcp-core": ("kiro_crew.mcp_core", "run_mcp_core_server"),
     "mcp-cron": ("kiro_crew.mcp_cron", "run_mcp_server"),
     "mcp-guide": ("kiro_crew.mcp_guide", "run_mcp_server"),
+    "mcp-mate": ("kiro_crew.mcp_mate", "run_mcp_server"),
     "mcp-panel": ("kiro_crew.mcp_panel", "run_mcp_server"),
     "mcp-dashboard": ("kiro_crew.mcp_dashboard", "run_mcp_server"),
     # The same dispatch in cli.main, and the same light import (no aiohttp,
@@ -137,6 +138,9 @@ def slim_server(argv: list[str]) -> Callable[[], None] | None:
     ensure_data_home()
     if _stderr_is(config_dir() / "gateway.log"):
         return None  # detached: the full CLI owns that logging shape
+    from kiro_crew.config.validation import prime_extension_config_keys
+
+    prime_extension_config_keys()
     _setup_logging(config_dir())
 
     from kiro_crew.config import KiroCrewConfig

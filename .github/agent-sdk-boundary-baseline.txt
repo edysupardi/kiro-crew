@@ -32,14 +32,12 @@
 3 src/kiro_crew/cli_chat.py
 3 src/kiro_crew/cli_doctor.py
 1 src/kiro_crew/cli_setup.py
-1 src/kiro_crew/config/loader.py
 1 src/kiro_crew/connections/mint.py
 3 src/kiro_crew/dashboard/chat_handlers.py
 3 src/kiro_crew/dashboard/chat_runner.py
 1 src/kiro_crew/dashboard/chat_summary.py
 1 src/kiro_crew/dashboard/chat_utils.py
 1 src/kiro_crew/dashboard/handlers/agents.py
-2 src/kiro_crew/dashboard/handlers/core.py
 1 src/kiro_crew/dashboard/handlers/hooks.py
 1 src/kiro_crew/dashboard/handlers/optimizer.py
 2 src/kiro_crew/dashboard/handlers/sessions.py
@@ -54,7 +52,6 @@
 1 src/kiro_crew/eval/judge.py
 2 src/kiro_crew/eval/runner.py
 1 src/kiro_crew/knowledge/llm_pool.py
-5 src/kiro_crew/llm_helpers.py
 1 src/kiro_crew/messaging/auto_title.py
 1 src/kiro_crew/messaging/dispatch.py
 1 src/kiro_crew/messaging/driver.py
@@ -69,7 +66,7 @@
 3 src/kiro_crew/slack/gateway.py
 3 src/kiro_crew/slack/handler.py
 1 src/kiro_crew/slack/transport_dispatch.py
-7 src/kiro_crew/subagent.py
+6 src/kiro_crew/subagent.py
 2 src/kiro_crew/subagent_persistence.py
 2 src/kiro_crew/task_executor.py
 1 src/kiro_crew/task_planner.py

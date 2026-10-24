@@ -95,9 +95,8 @@ export const UI_CONDITIONS = {
   job_enabled: 'the open job is active (not paused)',
   job_paused: 'the open job is paused',
   // Crewmates
-  crewmate_place_pane_open: "the crewmate editor shows its Workspace · Memory section (choose it in the editor's section list)",
-  crewmate_model_pane_open: "the crewmate editor shows its Model section (choose it in the editor's section list)",
-  crewmate_memory_manageable: 'the crewmate keeps a private memory of its own, or is the default crewmate, whose memory is the shared global one (with any other binding there is nothing to manage here)',
+  crewmate_place_pane_open: "the crewmate editor shows its Memory section (choose it in the editor's section list)",
+  crewmate_model_pane_open: "the crewmate editor shows its General section, which holds the model (choose it in the editor's section list)",
   // Artifacts
   artifact_open: "an artifact's own page is open (click the artifact in the library)",
   // Shell: the docked terminal panel (BottomTerminalPanel)
@@ -122,6 +121,8 @@ export const UI_REVEAL_STATES = {
   crewmate_roster_folded: 'a crewmate chat is open on a wide screen, which folds the roster column away',
   crewmate_chat_open_phone: 'a crewmate chat fills the phone screen, so the roster is behind it',
   crewmate_profile_closed: "the crewmate's profile card is closed (pressing the crewmate's name in the chat header opens it)",
+  crewmate_profile_tab_closed: "the crewmate's profile card is on another tab (the card opens on Sessions; its Profile tab is the last one on the rail)",
+  crewmate_settings_closed: "the crewmate's Settings page is closed (the Settings row on its profile card's Profile tab opens it)",
 } as const
 
 export type UiRevealState = keyof typeof UI_REVEAL_STATES
@@ -148,6 +149,8 @@ export const UI_REVEAL_SCOPES = {
   'members.roster': 'crewmate_roster_folded',
   'members.roster-phone': 'crewmate_chat_open_phone',
   'members.profile': 'crewmate_profile_closed',
+  'members.profile-tab': 'crewmate_profile_tab_closed',
+  'members.settings': 'crewmate_settings_closed',
 } as const satisfies Record<string, UiRevealState>
 
 export type UiRevealScopeId = keyof typeof UI_REVEAL_SCOPES
@@ -169,7 +172,6 @@ export const UI_RUNTIME_PREDICATES = [
   'crewmate_danger_zone_open',
   'crewmate_place_pane_open',
   'crewmate_model_pane_open',
-  'crewmate_memory_manageable',
   'no_response_running',
   'mouse_input',
   'phone_connect_available',
@@ -185,7 +187,7 @@ export type UiRuntimePredicateId = typeof UI_RUNTIME_PREDICATES[number]
  * one on a location onto its opener's step, and the guide does not point at
  * that opener while it is unmet: it says there is nothing to stop instead of
  * opening an empty panel. Mirrors `OPENER_FACT_PREDICATES` in
- * `scripts/lib/ui-index.mjs`.
+ * `scripts/lib/ui-index-guide.mjs`.
  */
 export const UI_OPENER_FACT_PREDICATES = ['goal_loop_running', 'monitor_running'] as const satisfies readonly UiRuntimePredicateId[]
 

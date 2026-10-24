@@ -207,7 +207,7 @@ def _is_access_control_xattr(attr: str) -> bool:
 #: ``"raise"`` refuses to write a secret it cannot protect. ``"warn"`` logs and
 #: writes anyway. Both are deliberate, established conventions in this codebase,
 #: which is why this is a parameter and not a fixed policy: ``webhooks.py`` and
-#: ``dashboard/token_auth.py`` let the OSError propagate, while ``sel.py`` and
+#: ``dashboard/token_auth_tokens.py`` let the OSError propagate, while ``sel.py`` and
 #: ``dashboard/refresh_tokens.py`` catch it and continue, because a read-only
 #: filesystem must not brick SecurityEventLog init or stop refresh-token state
 #: from being persisted. Losing reuse-detection state is a worse outcome there
@@ -388,7 +388,7 @@ def on_event_loop() -> bool:
     itself never sleeps.
 
     Public because it decides more than this module's own retries.
-    ``config/loader.py``'s ``write_config_atomically`` asks it before applying the
+    ``config/loader_document.py``'s ``write_config_atomically`` asks it before applying the
     Windows owner-only DACL, whose cost on a network-homed data home is bounded
     only by SMB. Both uses turn on the same property: the answer is about the
     CALLING THREAD, so it holds no matter how many synchronous helpers sit between
@@ -832,7 +832,7 @@ def _link_trust_anchor(parent: Path) -> tuple[Path, tuple[str, ...]] | None:
     The anchor is where "a link here is not ours" starts being true. At or ABOVE
     it a link is the operator's own deployment choice and must keep working: a
     symlinked ``$HOME`` (``/home/u -> /local/home/u``) or a data home relocated
-    onto another disk are both supported, and ``config/loader.py`` documents a
+    onto another disk are both supported, and ``config/loader_document.py`` documents a
     symlinked ``config.json`` as a normal setup. BELOW the anchor every
     directory is created by Kiro Crew's own ``mkdir`` calls, so a link there was
     planted by something else.

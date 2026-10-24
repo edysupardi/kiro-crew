@@ -24,6 +24,7 @@ value is not evidence the file lands inside the install directory.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import re
@@ -535,12 +536,19 @@ def test_both_art_paths_screen_on_the_SAME_extension_set() -> None:
     set on purpose -- it admits ``.json``, which is precisely why this route does
     not reuse it -- so it must NOT be folded in here.
     """
-    source = Path(app_routes.__file__).read_text(encoding="utf-8")
+    # the owner that serves both art paths: the installed-art route and the blob proxy
+    owner = importlib.import_module(app_routes.handle_app_art_file.__module__)
+    assert owner.handle_blob_proxy is app_routes.handle_blob_proxy
+    source = Path(owner.__file__).read_text(encoding="utf-8")
     art = app_routes._ART_IMAGE_EXTENSIONS
+    family = "".join(
+        Path(importlib.import_module(module).__file__).read_text(encoding="utf-8")
+        for module in (app_routes.__name__, *app_routes._OWNERS)
+    )
     duplicates = [
         name
         for name, body in re.findall(
-            r"^(_[A-Za-z_]+)\s*=\s*frozenset\(\{([^}]*)\}\)", source, re.MULTILINE
+            r"^(_[A-Za-z_]+)\s*=\s*frozenset\(\{([^}]*)\}\)", family, re.MULTILINE
         )
         if name != "_ART_IMAGE_EXTENSIONS"
         and {p.strip().strip("\"'") for p in body.split(",") if p.strip()} == set(art)

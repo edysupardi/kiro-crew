@@ -82,13 +82,14 @@ export interface MemberRosterRow {
 }
 
 /** One entry of GET /api/members/{slug}/activity — a recorded engagement.
- *  `via` distinguishes a session the user opened with the member ('chat')
- *  from an orchestrator routing decision ('select_crew'); the latter records
- *  intent, not a run. */
+ *  `via` distinguishes a session the user opened with the member ('chat'),
+ *  an orchestrator routing decision ('select_crew', intent, not a run), a
+ *  delegated `spawn_run(crew=...)` run ('spawn') and an auto-improvement
+ *  run ('auto-improvement'). */
 export interface MemberActivityEntry {
   /** Epoch seconds (UTC) the engagement was recorded. */
   ts: number
-  via: 'chat' | 'select_crew' | string
+  via: 'chat' | 'select_crew' | 'spawn' | 'auto-improvement' | string
   project?: string
 }
 
@@ -131,7 +132,8 @@ export interface MemberGoal {
   updated_by: 'user' | 'crewmate' | null
 }
 
-/** The check-in switches and their shared timing. weekday: 0 = Sunday. */
+/** The check-in switches and their shared timing. weekday: 0 = Sunday.
+ *  The heartbeat runs every `interval` minutes (30, 60, 120 or 240; 60 by default), not at `time`. */
 export interface GoalSchedules {
   time: string
   timezone: string
@@ -140,6 +142,8 @@ export interface GoalSchedules {
   weekday: number
   monthly: boolean
   month_day: number
+  heartbeat: boolean
+  interval: number
 }
 
 /** A saved weekly report or monthly review (an artifact). */
@@ -287,7 +291,16 @@ export function createAgentsEndpoints({ post, put, del, j, jfetch: fetch, sessio
     agentCatalog: (sessionKey?: string) =>
       fetch('/api/agents/catalog', {
         headers: sessionKey ? { 'X-Session-Key': sessionKey } : { ..._sk },
-      }).then(j) as Promise<{ agents: KiroCrewAgent[]; default_agent: string }>,
+      }).then(j) as Promise<{
+        agents: KiroCrewAgent[]
+        default_agent: string
+        /** The harness this chat (no key: a new session) runs, config spelling. */
+        session_backend?: string
+        /** The harnesses that refuse a markdown-only agent. */
+        markdown_refused_backends?: string[]
+        /** The harnesses that load a markdown agent spec. */
+        markdown_spec_backends?: string[]
+      }>,
     /** `extra` carries per-request headers (a guided create's `X-Guide-*`);
      *  it rides THIS request only, never the shared transport. */
     createKirocrewAgent: (body: object, extra?: Record<string, string>) =>

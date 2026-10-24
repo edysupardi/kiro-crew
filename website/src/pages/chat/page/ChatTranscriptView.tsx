@@ -203,7 +203,7 @@ export default function ChatTranscriptView({
           scrollerEl={() => scrollerRef.current}
         />
         {/* Footer */}
-        <ChatFooter running={slotRunning} stopping={slotStopping} state={slotState} lastRole={lastRole} streamTick={streamTick} regenerating={regenerating} stopState={currentSlot?.stop_state} sendUnconfirmed={sendUnconfirmed} />
+        <ChatFooter running={slotRunning || !!currentSlot?.preparing} stopping={slotStopping} state={slotState} lastRole={lastRole} streamTick={streamTick} regenerating={regenerating} stopState={currentSlot?.stop_state} sendUnconfirmed={sendUnconfirmed} />
         {activeSlot && !slotLoading && !embedded && !popout && slotSwitchTarget !== activeSlot && (
           <div className="px-4 mx-auto w-full" style={{ maxWidth: 'var(--mc-content-width, 900px)' }}>
             <SessionPulseSurveyCard
@@ -270,7 +270,7 @@ export default function ChatTranscriptView({
           const pinnedStandin = !!(pinned && (pinned.ts != null
             ? (item.kind === 'single' && item.msg.ts === pinned.ts)
             : pinned.idx === displayIdx))
-          return <div key={vi.key} ref={virt.measureRef(vi.index)} data-display-index={displayIdx} className={`px-4 mx-auto w-full py-1`} data-pinned-standin={pinnedStandin ? (pinned?.stripUncovered ? 'folding' : '') : undefined} style={{
+          return <div key={vi.key} ref={virt.measureRef(vi.index)} data-display-index={displayIdx} className={`px-4 mx-auto w-full py-1 empty:hidden`} data-pinned-standin={pinnedStandin ? (pinned?.stripUncovered ? 'folding' : '') : undefined} style={{
             maxWidth: 'var(--mc-content-width, 900px)',
             // The pinned banner is styled as this row's own bubble and sits
             // at the exact position and width the bubble had when its top

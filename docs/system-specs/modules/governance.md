@@ -1,7 +1,8 @@
 # Governance Model (two-level Policy ∩ Profile)
 
-The `kiro_crew.platform.governance` + `kiro_crew.platform.governance_profiles`
-modules implement Kiro Crew's **two-level security governance model**. Governance
+The `kiro_crew.platform.governance` (with its `governance_parts` owners) +
+`kiro_crew.platform.governance_profiles` modules implement Kiro Crew's **two-level
+security governance model**. Governance
 is resolved by a single rule — *the tightest boundary wins*:
 
 - **Level 1 — POLICY** (`GovernanceCeiling`): the enterprise security ceiling,
@@ -84,6 +85,30 @@ can reorder strictness or redefine matching):
   guard for trust-root / credential dirs, and operators must not rely on an
   allow-mode prefix to confine writes in a directory containing untrusted
   symlinks.
+
+  **Path matcher — remote-workspace targets.** A remote workspace's file tools
+  act on a Linux guest, so their targets are matched as the guest's POSIX paths
+  on every gateway OS, a Windows one included. The flavour is chosen per call,
+  never globally: `build_permission_event` tags the call's arguments with the
+  `GuestPathParams` type (`platform/guest_paths.py`) only on a runtime whose own
+  remote-workspace binding (`set_remote_workspace`) attached the workspace
+  server, for a trusted identity; any tagged object arriving another way is
+  stripped back to a plain dict, and a type cannot be forged from JSON. Each
+  target becomes a `GuestPath` that `_match_path` normalizes with `guest_norm`:
+  a relative path is anchored at the guest workdir (never this gateway's CWD),
+  `..` and a leading `//` collapse, and nothing is expanded with this gateway's
+  `~` or environment (the guest tool server expands neither). A target carrying
+  a `$`, a `~` segment or a backslash is judged as the literal path the guest
+  opens and also emits a never-permittable item, so an allow-mode confinement
+  refuses it. Patterns are expanded as before, with this gateway's `~` and
+  environment, so a `~/.ssh/**` or `$HOME/...` rule names the gateway's home
+  and does not bind the guest's: write a rule for guest files with the guest's
+  absolute path (the guest home spelled out, not `~`). A call on a remote session the
+  builder cannot place for certain (an untrusted identity, or a `workspace` tool
+  it does not know) is tagged `also_local` and must pass every rule under both
+  the guest's and the gateway's reading. A remote diff-block path is anchored by
+  `posixpath.isabs` (`edit_target_candidates`). A local call keeps the gateway's
+  own `os.path` reading unchanged.
 
 `SCOPE_CATALOG` is the single place a scope name binds to its archetype +
 matcher. `register_scope` / `register_matcher` are append-only extension seams;
@@ -1311,8 +1336,8 @@ must not be published: a malformed document reaches the text through a parser er
 `json`'s errors quote the offending bytes — so an endpoint echoing back the request's
 `Authorization` header (its own request reflected, a proxy error page) would carry that
 credential to both surfaces. Those bytes are not ours, which is why
-`platform/policy_distribution.py` is a registered `_REDACTION_SINKS` entry rather than an
-allowlisted non-egress use.
+`platform/policy_distribution_boot.py`, where `_sanitize_detail` lives, is a registered
+`_REDACTION_SINKS` entry rather than an allowlisted non-egress use.
 
 `refresh_now()` **never raises**; it returns a `RefreshOutcome` whose `status` is one
 of `not_configured` / `unchanged` / `applied` / `rejected` / `unreachable`. Named
@@ -1602,6 +1627,8 @@ unfenced is `echo x > ~/.kiro/agents/kirocrew.json`:
 documented design choice — so the shell route rests on the OS sandbox, which seals
 the agents dir and not yet the registry leaf.
 
+**Every other harness's own permission files sit on the same write-only tier**, listed per harness in `agent_sdk.native_allow_stores.NATIVE_ALLOW_STORES`: claude `~/.claude/settings*.json`, goose `permission.yaml` and `config.yaml`, opencode's global config, codex `config.toml`, pi `settings.json` and `extensions/`, each also at its harness's own home variable (`GOOSE_PATH_ROOT`, `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR` / `CLAUDE_HOME`, `CODEX_HOME`, `PI_CODING_AGENT_DIR`) and through a symlinked config dir, plus a project's `.claude/settings*.json` in any directory. `agent.env` refuses each of those home variables, so a store cannot move for the harness child alone. Only the agent's file-edit tools are refused; a shell write to these files is not fenced yet. `test/test_native_allow_stores.py` fails when a harness has neither a row nor a stated reason.
+
 That residual matters for the same reason the whole gap did. Since
 `hooks.on_tool_call` runs **only** from the `EVENT_PERMISSION_REQUEST` branch (the
 `EVENT_TOOL_CALL` branch is documented informational-only — "the tool is already
@@ -1711,7 +1738,7 @@ disposition:
   nothing. `fail_closed=True` is the same disposition the authorization/admission
   chokepoints use (e.g. `capabilities.publish` in `publish_governance.py`,
   `capabilities.theme_install` in `handlers/themes.py`, `capabilities.theme_persona`
-  in `chat_runner.py`) where a wrong permit lets bytes leave the box or ingests
+  in `chat_turn/prompt_assembly.py`) where a wrong permit lets bytes leave the box or ingests
   untrusted content. The ALLOW audit is disposition-split: a **governed** allow
   (a policy/profile governs `channels`, detected as the Decision's
   `layer ∈ {policy, profile, both}`) is **audit-or-deny** — written
@@ -1731,8 +1758,9 @@ disposition:
   evaluates the `channels` scope on the host surface with `fail_closed=True` (its
   audit row names the direction, `outbound:<channel>`), writes a governed allow
   `critical=True`, and fails closed. Discord re-checks it in
-  `discord/client.py` after each REST wait and in `discord/transport_dispatch.py`
-  before the approval-verdict edit, so a policy installed during a send stops it.
+  `discord/client_recheck.py` after each REST wait and in
+  `discord/transport_dispatch_interactions.py` before the approval-verdict edit, so a
+  policy installed during a send stops it.
   Detail: [messaging.md](messaging.md).
 - **Slack workspace admission (`slack.enterprise`)** audits via `log_api_access`
   (not `log_governance_decision`) and its posture probe fails **closed** (returns
@@ -2262,7 +2290,7 @@ upgrade for a policy that loads today.
 `on_tool_call(..., tool_kind=, raw_params=)` carries these from the ACP event
 (`AcpEvent.tool_kind` / `.raw_tool_params`); the call sites thread them
 (`llm_helpers`, `subagent`, `task_executor`, `task_planner`, dashboard
-`chat_runner`, slack `handler`). **The `EVENT_PERMISSION_REQUEST` event the gate
+`chat_turn/tool_approval.py`, slack `handler`). **The `EVENT_PERMISSION_REQUEST` event the gate
 runs on must carry `raw_tool_params`** — `acp/client_tool_events.py` caches the structured
 rawInput at the ToolCall notification (`_tool_call_params`, keyed by
 `toolCallId`) and `acp/client_permissions.py` attaches it to the later permission event, because that
@@ -2371,7 +2399,7 @@ ALLOWED turn in the channel could otherwise pull it into agent context), the
 exemption** — a denied channel must still be able to halt a runaway session it
 previously started; `!restart` is NOT cancellation and stays gated.
 
-The exemption is **channel-neutral**, not Slack-only. `messaging/dispatch.py`'s
+The exemption is **channel-neutral**, not Slack-only. `messaging/dispatch_admission.py`'s
 `inbound_permitted(channel_type, *, text, has_attachments)` carries it for every
 channel on the shared pipeline, via `is_pure_cancel()`. Two properties make it
 safe to state that broadly. The match is whole-message, so `/stop the presses`
@@ -2412,7 +2440,7 @@ as denied (prompt refusal) rather than returning without resolving.
 
 ### Governance policy viewer (`GET /api/governance/policy`)
 
-`GET /api/governance/policy` (`handlers/security.build_governance_policy_snapshot`,
+`GET /api/governance/policy` (`handlers/security_governance_policy.build_governance_policy_snapshot`,
 registered in `dashboard/routes/system.py`, same dashboard-token auth) returns the
 effective ceiling across ALL scopes on the **host surface**, for the read-only
 Settings → Security viewer. It iterates `SCOPE_CATALOG` (so it auto-covers any
@@ -2531,8 +2559,9 @@ denials leave the same forensic trail.
   copy-pasteable fleet-ban policy below); a deny-mode `commands` pattern also
   becomes an un-opt-out-able force-pin via `resolve_pinned_commands`.
 - **The web terminal PTY is an ungoverned plane today.**
-  `dashboard/handlers/terminal.py` spawns a real PTY and contains **no**
-  `is_denied` / `is_sensitive_bash_command` / governance call, so
+  `dashboard/handlers/terminal.py` spawns a real PTY, and neither it nor its
+  `terminal_*` owners contain any `is_denied` / `is_sensitive_bash_command` /
+  governance call, so
   `screencapture` typed into it is bounded by neither the `commands` scope nor
   any `computer_use.*` scope. It is an operator-only surface. Routing PTY input
   through the same effective-deny floor as `on_tool_call` is tracked as its own
@@ -2582,7 +2611,7 @@ denials leave the same forensic trail.
 - **Windows has no machine-policy managed tier today, so the central ceiling is
   advisory against a local account.** There is no machine-scoped policy pin on
   Windows, so `resolve_distribution`
-  ([`src/kiro_crew/platform/policy_distribution.py`](../../../src/kiro_crew/platform/policy_distribution.py))
+  ([`src/kiro_crew/platform/policy_distribution_source.py`](../../../src/kiro_crew/platform/policy_distribution_source.py))
   lets a per-setting environment override stand: a standard user can set the
   `KIROCREW_POLICY_URL` environment variable to a document of their own and
   replace the whole central rung. Read the Windows guidance accordingly —
@@ -2770,8 +2799,8 @@ second surface cannot grow a drifting copy):
 
 | Surface | Destination id | On deny |
 |---|---|---|
-| `api_artifact_publish` + its sharing/review siblings (`handlers/artifacts.py`, via the module-local `_publish_governance_denied` alias) | the requested/effective `publication.provider` | 403 |
-| `GET /api/publish-providers` (`apps/routes.py`) | `deploy-web-aws` | the row is omitted, so the button never renders |
+| `api_artifact_publish` + its sharing/review siblings (`handlers/artifacts_parts/`: `publish_sharing.py`, with the comment, remote and update routes in `artifact_comments.py`, `remote_artifacts.py` and `create_update.py`, via the `_publish_governance_denied` alias in `handlers/artifacts_parts/route_plumbing.py`) | the requested/effective `publication.provider` | 403 |
+| `GET /api/publish-providers` (`apps/routes_listing.py`) | `deploy-web-aws` | the row is omitted, so the button never renders |
 | `POST /api/deploy/deploy` (`deploy/handlers.py`) | `deploy-web-aws` | 403, audited `deploy/denied` |
 | `POST /api/deploy/pending/{id}/confirm` | `deploy-web-aws` | 403 BEFORE `claim_pending`, so a denied confirm does not consume the entry |
 
@@ -2810,8 +2839,8 @@ the scope this row enforces today. (It does NOT gate L2 asset serving —
 overlays/topbar/audio keep working under a denying policy; if wholesale L2
 disablement is wanted it will be its own row or an extension of this one,
 tracked with kirodotdev/KiroCrew#312.) The decision is consulted at the
-injection site
-(`chat_runner.py`, via `governance_permits("capabilities.theme_persona",
+injection site (`_turn_build_prompt` in `chat_turn/prompt_assembly.py`,
+via `governance_permits("capabilities.theme_persona",
 "", session_key=...)`); a denying policy skips injection silently (info log).
 It is a **data row only** — `CONTRACT_VERSION` is unchanged and the evaluator
 (`resolve`/`gate_decision`/`load_security_policy`) is untouched, per this
@@ -2891,7 +2920,7 @@ Consulted at **four** chokepoints — the send gate plus EVERY write path to
 | Chokepoint | Pinned-off behavior |
 |---|---|
 | `beacon.telemetry_permitted()` | Refuses both heartbeat and receipt egress. Ranked **above** the config flag so the reported reason names the policy, not the (now irrelevant) local value |
-| `PATCH /api/config/kirocrew` (`handlers/core.py`) | **403** on `telemetry.beacon_enabled=true` |
+| `PATCH /api/config/kirocrew` (`handlers/core_config_patch.py`) | **403** on `telemetry.beacon_enabled=true` |
 | `kirocrew telemetry enable` (`cli_commands.py`) | Exits **1** without writing config.json |
 | `kirocrew config set [--local] …` (`cli_config.py`) | Exits **1** without writing. The *generic* setter reaches the same key, and `--local` writes the overlay that takes PRECEDENCE over the base file |
 
@@ -2987,7 +3016,7 @@ half-control:
 |---|---|
 | `tailnet.resolve_tailnet_host()` | Contributes no origin **and does not spawn the CLI**, so the pin closes both halves an administrator objects to. Checked ahead of the daemon call |
 | `tailnet_serve.publish()` | Refuses to run `tailscale serve`, so the dashboard is never put on the tailnet in the first place. Checked before the spawn — refusing after publishing would be theatre |
-| `PATCH /api/config/kirocrew` (`handlers/core.py`) | **403** on `dashboard.tailscale.enabled=true` |
+| `PATCH /api/config/kirocrew` (`handlers/core_config_patch.py`) | **403** on `dashboard.tailscale.enabled=true` |
 | `kirocrew config set [--local] …` (`cli_config.py`) | Exits **1** without writing. The generic setter reaches the same key, and `--local` writes the overlay that takes PRECEDENCE over the base file |
 
 `tailnet_serve.unpublish()` is deliberately **not** gated, and the asymmetry is
@@ -3386,7 +3415,7 @@ its own — `resolve_selected_backend` degrades a now-denied persisted value to 
 floor with a logged reason on the next load, and the `PATCH
 /api/config/kirocrew` allowlist, `GET /api/config/schema`, `GET /api/acp-backends`
 and the provider factory all read the one derivation
-(`handlers/core.py::_selectable_acp_backends`). `bootstrap_context` additionally
+(`handlers/core_config_schema.py::_selectable_acp_backends`). `bootstrap_context` additionally
 re-runs that SAME gate over the config instance it is holding — that instance was
 normalised before the narrowing — rather than adding a second gate anywhere.
 
@@ -3597,7 +3626,7 @@ policy. A fleet that needs any of those should not enable the feature. The
 `mcp` scope still works as a blunt instrument: denying `@kirocrew-computer` removes
 the tools entirely, which is the one governance lever that remains.
 
-**If it is ever re-governed**, the rows belong back in this file's `SCOPE_CATALOG`
+**If it is ever re-governed**, the rows belong back in `SCOPE_CATALOG` (`platform/governance_parts/catalog.py`)
 inline (never `register_scope()`d from the feature package): `load_security_policy()`
 runs at boot before any feature import, and a policy naming an unregistered scope
 raises "unknown governed key … (fail-closed)" — so a lazy registration would abort
@@ -3641,33 +3670,67 @@ carve-out stay as code. It expects `CONTRACT_VERSION == 1` (pinned pre-launch).
 
 ## Files
 
-- `platform/governance.py` — archetypes, catalog, loader, evaluator
-  (`resolve`, `resolve_ordinal`, `gate_decision`, `assert_governance_floor`,
-  `compose_profiles`, `resolve_pinned_commands` + `COMMANDS_SCOPE` force-pins,
-  `policy_signing_payload` + the `identity.signature` verification path), the
-  tier ladder (`TIER_CENTRAL` … `TIER_HOME`, `_intersect_ceilings`,
-  `_audit_policy_tier`), the single precedence fold `compose_tier_ladder` with its
-  refresh entry point `compose_installed_ceiling` (+ `_TierProcessState`, the
-  per-process tier state: the remembered bundled tier and the two once-per-process
-  latches).
+- `platform/governance.py` — the governance model's import path and patch surface:
+  every name below is imported, and patched, as `kiro_crew.platform.governance.<name>`,
+  and its mirror (`_facade_mirror`) carries a patch to every owner holding the name.
+  It keeps the auto-approve surface it decides itself (`may_skip_gate` with
+  `BUILTIN_TOOL_SCOPES` / `BUILTIN_TOOL_CAPABILITIES`, `strip_ungoverned_auto_approve`,
+  the `hooks.confirm_tools` gate, `may_skip_gate_now`, `withheld_by_confirm_tools`,
+  `sanitize_agent_config_governance`) and the two boot checks,
+  `assert_governance_floor` and `assert_governance_paths_protected`. Its owners, one
+  responsibility each, lowest layer first; new work goes to the owner it belongs to:
+  - `platform/governance_parts/matching.py` — the enforcer-owned registries `_MATCHERS` /
+    `_ORDINAL_SCALES`, `register_matcher`, `_norm_item`, `_url_host`.
+  - `platform/governance_parts/tool_calls.py` — the computer-use action classes
+    (`_CU_ACTION_CLASSES`, `computer_use_action_classes`), `classify_tool_title`,
+    `classify_tool_args`, `mcp_title_to_ref`.
+  - `platform/governance_parts/archetypes.py` — `Decision`, the four archetypes and
+    `_compose_controls`.
+  - `platform/governance_parts/catalog.py` — `SCOPE_CATALOG` (with the CAPABILITY-DEFAULT
+    CONTRACT), `ScopeSpec`, `register_scope`, `COMMANDS_SCOPE`, `_SCOPE_ALIASES`.
+  - `platform/governance_parts/carriers.py` — `GovernanceCeiling`, `Profile`, `BootControls`,
+    `UpdatePins` (`active_update_pins`), `PolicyDistribution`
+    (`active_policy_distribution`), the `capabilities.agentcore` posture,
+    `deny_all_profile`, `compose_profiles`.
+  - `platform/governance_parts/parsing.py` — `parse_policy`, `parse_profile`, `_parse_controls`.
+  - `platform/governance_parts/signature.py` — `policy_signing_payload` + the
+    `identity.signature` verification path, `assert_policy_signature_satisfied`.
+  - `platform/governance_parts/tiers.py` — the tier ladder (`TIER_CENTRAL` … `TIER_HOME`,
+    `_intersect_ceilings`, `_audit_policy_tier`), the single precedence fold
+    `compose_tier_ladder` with its refresh entry point `compose_installed_ceiling`
+    (+ `_TierProcessState`, the per-process tier state: the remembered bundled tier
+    and the two once-per-process latches), and `load_security_policy`.
+  - `platform/governance_parts/evaluator.py` — `resolve`, `resolve_ordinal`, `gate_decision`,
+    `resolve_pinned_commands` + `COMMANDS_SCOPE` force-pins.
 - `platform/admission.py` — `canonical_signing_bytes` / `hmac_signature` (shared
   by both trust roots), `ed25519_verify` (policy issuers only),
   `require_policy_signature` / `trust_keys` / `trust_public_keys`, and
   `read_policy_trust_root` (the side-effect-free trust-root reader).
 - `platform/update_governance.py` — the shared update seam (`resolve_remote_url`,
   `update_blocked_reason`, `update_required`, `min_version`) called by
-  `dashboard/handlers/updates.py`, `cli_server.py` and the gateway's update owners
+  the update handler owners (`dashboard/handlers/updates_verdict.py`, `updates_check.py`,
+  `updates_apply.py`), `cli_server_update.py` and the gateway's update owners
   (`slack/gateway_runtime/update_schedule.py`, `slack/gateway_runtime/update_apply.py`).
 - `platform/policy_distribution.py` — central distribution: source resolution
   (env ∘ the policy's `distribution` block), the append-only
   `register_policy_fetcher` transport seam, the last-known-good cache, the
   `refresh_now` / `validate_ceiling` / `apply_ceiling` / `start_refresher`
-  live-refresh path.
+  live-refresh path. It stays the import path and patch surface, a mirror facade
+  (`_facade_mirror`) that keeps the live-refresh path, the refresher thread and
+  `distribution_posture`, over three owners:
+  - `platform/policy_distribution_source.py` — the `KIROCREW_POLICY_*` settings,
+    the fetch records, `register_policy_fetcher` and the built-in transports, and
+    `resolve_distribution`;
+  - `platform/policy_distribution_cache.py` — the last-known-good cache and the
+    tier's process state, with `reset_process_state`;
+  - `platform/policy_distribution_boot.py` — `parse_distributed_policy`,
+    `load_distributed_policy`, `fetch_once`, `validate_ceiling` and the
+    `_sanitize_detail` redaction sink.
 - `platform/governance_profiles.py` — `ProfileStore` (hot-reload),
   `resolve_active_scope`, `governance_permits`, `governance_floor_ordinal`,
   `GOVERNANCE_ERROR_REASON` (the eval-error marker consumers match on),
   `vet_and_audit`.
-- `security/paths.py` — `_SENSITIVE_HOME_DIRS` keystone entries.
+- `security/paths_lists.py` — `_SENSITIVE_HOME_DIRS` keystone entries.
 - `security/denied_rules.py` — `pinned_builtin_command_ids` and `pinned_builtin_command_ids_for_snapshot`.
 - `agent_backend_governance.py` — the `agent_backend` scope: `SCOPE`,
   `narrow_selectable_backends` (the registry recompute, plus its host-bound,
@@ -3689,19 +3752,21 @@ carve-out stay as code. It expects `CONTRACT_VERSION == 1` (pinned pre-launch).
 - `executors.py` — `governance_executor` (`mc-gov`), the bounded pool the
   externally-paced governance checks run on.
 - `dashboard/handlers_system.py` — `GET /api/governance/channels`.
-- `dashboard/handlers/security.py` — `GET /api/governance/policy` (posture-only
-  serialization).
-- chokepoints: `sandbox.py`, `mcp_cron.py`, `subagent_parts/agent_policy.py`, `mcp_core.py`,
+- `dashboard/handlers/security_governance_policy.py` — `GET /api/governance/policy`
+  (posture-only serialization), served through `dashboard/handlers/security.py`.
+- chokepoints: `sandbox.py`, `mcp_cron_vet.py`, `subagent_parts/agent_policy.py`, `mcp_core.py`,
   plus the audit-only seam `computer_use/gate.py` (not a governance chokepoint:
   `require_computer_use` always proceeds and audits, and `apply_observation_ceiling`
   passes the payload through).
-- `cli.py` / `cli_commands.py` — the `policy` command.
+- `cli_parser_admin.py` (its arguments), `cli.py` (dispatch) / `cli_commands_security.py` — the `policy` command.
 
 ## Tests
 
 `test_governance_policy.py` (archetypes + loader + evaluator + E1–E13 vectors +
-extensibility + the `identity.signature` states, the opt-in fail-closed gate, and
-the `policy show` provenance reporting),
+extensibility), `test_governance_policy_signatures.py` (the `identity.signature`
+states, the opt-in fail-closed gate, and the `policy show` provenance reporting),
+`test_governance_policy_decisions.py` (an unnamed capability is ungoverned, `policy
+validate` names the ungoverned rows, and an alias group is one gate question),
 `test_governance_tier_ladder.py` (the tier ladder: that the central document
 outranks every local one, that a lower tier can only tighten it, that the reserved
 sandbox boot flags compose across tiers, that an env document beneath an authority
@@ -3712,18 +3777,22 @@ is announced once, and that a tier intersect is audited once per pair),
 `test_governance_self_protection.py` (keystone), `test_governance_profiles.py`
 (resolution + binding + hot-reload + fail-closed reload dispositions),
 `test_governance_gate.py` (Plane A enforcement + audit),
-`test_governance_chokepoints.py` (sandbox/cron/spawn/helpers + egress-reserved +
-the per-transport inbound gates), `test_governance_channels_endpoint.py`
+`test_governance_chokepoints_scope_gates.py` (sandbox/cron/spawn/helpers + the
+per-transport inbound gates + the capability, app and publish chokepoints),
+`test_governance_chokepoints.py` (filesystem/egress at the host gate + the
+degraded and fail-closed chokepoints), `test_governance_channels_endpoint.py`
 (`/api/governance/channels`, incl. the eval-error→`null` distinction),
 `test_governance_policy_viewer.py` (`/api/governance/policy` posture-only, incl.
 `test_detail_never_leaks_rule_contents` and `TestScopeAttribution` — that a
 host-profile pin is reported as surface-scoped, not install-wide),
-`test_governance_distribution.py` (the `distribution` block, the fetcher seam and
+`test_governance_distribution.py` and its `test_governance_distribution_*.py`
+siblings `_fetch_checks`, `_redaction`, `_publish`, `_cache_trust` and `_ladder`
+(the `distribution` block, the fetcher seam and
 its transport refusals, the cache and its repoint/staleness rules, the
 unavailable dispositions, the live-refresh reject-and-keep path — and the three
-controls on the cache itself — `TestAnExposedCacheIsStillReadOnly`,
-`TestTheCachePairIsWrittenUnderOneLock` and
-`TestAnUnverifiableSourceIsTreatedAsWritable`),
+controls on the cache itself — `TestAnExposedCacheIsStillReadOnly` and
+`TestTheCachePairIsWrittenUnderOneLock` in `_cache_trust`, and
+`TestAnUnverifiableSourceIsTreatedAsWritable` in `_fetch_checks`),
 `test_sandbox_mount_checked.py` (that all six launcher mounts, including the
 read-only bind and its sealing remount, refuse the spawn when they fail),
 `test_governance_updates.py` (the
@@ -3733,5 +3802,8 @@ tracked-remote resolution), `test_agent_backend_governance.py` (the
 and its restore-on-loosening behaviour, the gateway-start binding contract and that
 a runtime ceiling install deliberately does not re-derive the set, the
 host-session binding, the both-directions audit, the fail-closed disposition, and
-that no second gate exists), and `test_computer_use_gate.py` (that the
-computer-use gate is audit-only and permits — see the section above).
+that no second gate exists), `test_computer_use_gate.py` (that the
+computer-use gate is audit-only and permits — see the section above), and
+`test_governance_parts_facade.py` (that a patch through the facade reaches every
+owner holding the name, the owner layering, the surface the facade keeps, its one
+logger and the trust-root literal of its boot check).

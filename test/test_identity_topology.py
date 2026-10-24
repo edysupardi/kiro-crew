@@ -384,7 +384,7 @@ def shared_topo(tmp_path: Path) -> ProcessTopology:
     t.add(KIRO_CLI, SESSION_HOST)
     t.add(MCP_SERVER, KIRO_CLI)
     # The founder published; the co-tenant did not (a shared subagent session
-    # deliberately does not overwrite the mapping — subagent_manager/run.py
+    # deliberately does not overwrite the mapping — subagent_manager/run_turn.py
     # guards the publish on ``not use_session_sharing``). So line 1 stays the
     # founder's key for every reader that predates the tenant section, and the
     # section is what records the second session.
@@ -1239,7 +1239,11 @@ _REGISTERED_CALL_SITES: dict[str, str] = {
         "session_pid_sig.verify_session_pid (HMAC-verified, direct "
         "KIROCREW_HOST_PID lookup, no walk)"
     ),
-    "mcp_gateway/stub.py": "reader via CallerContext.from_env; register-time caller block — assumes HOST pids",
+    "mcp_gateway/stub.py": (
+        "warm-pool caller repair: polls until the claimed session's key resolves, then "
+        "re-sends the caller block stub_register builds — assumes HOST pids"
+    ),
+    "mcp_gateway/stub_register.py": "reader via CallerContext.from_env; register-time caller block — assumes HOST pids",
     "peer_resolve.py": (
         "reader: the SERVER-side /proc ancestry walk (extracted from "
         "mcp_gateway/gatewayd._resolve_peer_identity, which now delegates "
@@ -1248,10 +1252,10 @@ _REGISTERED_CALL_SITES: dict[str, str] = {
         "plus the host ancestor chain (gatewayd indexes the chain for "
         "claim-push matching); .txt reads via "
         "session_pid_sig.read_session_pid_txt (hardened, unsigned). Consumed "
-        "by gatewayd (stub register) and dashboard/token_auth (unix-socket "
+        "by gatewayd (stub register) and dashboard/token_auth_callers (unix-socket "
         "peer verification)"
     ),
-    "dashboard/token_auth.py": (
+    "dashboard/token_auth_callers.py": (
         "reader (via peer_resolve.resolve_peer_identity, no inline walk): "
         "kernel-attests internal-API requests arriving on the dashboard's "
         "AF_UNIX socket — SO_PEERCRED peer pid → host-namespace ancestry walk "
@@ -1272,6 +1276,10 @@ _REGISTERED_CALL_SITES: dict[str, str] = {
         "in a home the real gateway never writes"
     ),
     "session_pid.py": (
+        "docstring and comment reference only (no code reads): the startup sweep "
+        "names the session_pid_mappings prune it runs as its third pass"
+    ),
+    "session_pid_mappings.py": (
         "stale-file cleanup: globs session_pid_*.txt (+ .sig sidecars) for dead "
         "processes, and (age-bounded) session_token_*.sig mappings, whose "
         "token-hash filenames name no pid to probe"

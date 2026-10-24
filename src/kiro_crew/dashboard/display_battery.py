@@ -11,8 +11,9 @@ What is NOT in the list, and why that is safe:
 
 * the exempt-host sources (``platform/*``, companion policy, per-workspace
   allowed hosts): their OUTPUT, the host set, is part of every verdict tag;
-* ``kiro_crew.sel`` and ``security.denied_rules``: imported by ``exfil`` for the
-  SEL audit and the bash audit, which the battery never calls;
+* ``kiro_crew.sel`` and ``security.denied_rules``: imported by ``exfil``'s owners
+  ``exfil_oauth`` for the SEL audit and ``exfil_bash`` for the bash audit, which
+  the battery never calls; ``exfil_bash`` itself, for the same reason;
 * everything else in the package: the battery does not execute it.
 
 ``test_display_battery_rules_version.py`` traces the battery and fails when it
@@ -40,19 +41,28 @@ from kiro_crew.security.redaction import redact_credentials
 RULE_SOURCES: tuple[str, ...] = (
     "dashboard/display_battery.py",
     "security/redaction.py",
+    "security/pem_scan.py",
     "security/redaction_switch.py",
     "security/exfil.py",
     "credential_patterns.py",
     "slack_manifest.py",
     "slack-manifest.yaml",
+    "security/redaction_patterns.py",
+    "security/redaction_entropy.py",
+    "security/exfil_url_rules.py",
+    "security/exfil_oauth.py",
 )
 
 _PKG_ROOT = Path(__file__).resolve().parent.parent
 
 
-def display_battery(text: str) -> str:
-    """Every display redactor, in order."""
-    out, _ = redact_exfiltration_urls(text)
+def display_battery(text: str, *, exempt_hosts: frozenset[str] | None = None) -> str:
+    """Every display redactor, in order.
+
+    ``exempt_hosts`` is the caller's snapshot of the exempt-host set (see
+    ``redact_exfiltration_urls``); ``None`` is the live read.
+    """
+    out, _ = redact_exfiltration_urls(text, exempt_hosts=exempt_hosts)
     out, _ = redact_credentials(out)
     return out
 

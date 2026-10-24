@@ -10,7 +10,7 @@ added to a real table leaves these goldens alone.
 
 * The launcher's golden is the PLAN DATA it carries -- its one substitution -- for a
   spawn that passes every kind of extra path and identity. The program text around it
-  is the ``kiro_crew.sandbox_launcher_program`` module itself, which
+  is the ``kiro_crew.sandbox_launcher_program`` module and its parts, which
   ``test_sandbox_launcher_program.py`` drives stage by stage.
 * The profile's golden is its full text for a spawn with private windows.
 * Every host reader and table the live host plans from is read off
@@ -34,9 +34,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_sandbox_launcher_program import rendered_payload
+from test_sandbox_launcher_program import program_on_disk, rendered_payload
 
-from kiro_crew import sandbox, sandbox_launcher, sandbox_launcher_program, sandbox_plan
+from kiro_crew import sandbox, sandbox_launcher, sandbox_plan
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
@@ -307,6 +307,7 @@ _LAUNCHER_PLAN_GOLDEN: dict[str, Any] = {
         "<ROOT>/podhome/.aws/credentials",
         "<ROOT>/crew/apps",
     ],
+    "seal_windowless_masks": [],
     "sensitive_dir_ids": {"<ROOT>/crew/apps": [13, 14]},
     "private_dirs": ["<ROOT>/crew/apps/alpha/data"],
     "private_dir_ids": {"<ROOT>/crew/apps/alpha/data": [11, 12]},
@@ -387,6 +388,7 @@ _LAUNCHER_PLAN_GOLDEN: dict[str, Any] = {
     ],
     "fail_closed_file_masks": [["<ROOT>/op/.npmrc", 3, 4]],
     "alias_credential_ids": [[7, 99], [8, 1]],
+    "exec_cwd": "",
     "required_mask_targets": ["<ROOT>/outside"],
     "mask_occupants": {"<ROOT>/crew/apps": [21, 22, 0], "<ROOT>/op/.aws": [23, 24, 1, 1, 25, 26]},
     "crew_home_aliases": [["<ROOT>/op/.kiro/crew", "<ROOT>/crew", 31, 32]],
@@ -667,9 +669,9 @@ def test_the_launcher_carries_the_golden_plan(
 
 
 def test_the_launcher_is_the_program_module_plus_the_plan(host: _Host) -> None:
-    """One substitution: the program module's own source, with the plan's data in it."""
+    """One substitution: the program module's source and its parts', with the plan's data in it."""
     plan = sandbox._spawn_plan(sandbox_plan.BACKEND_NAMESPACE, "strict", **_everything(host))
-    source = Path(sandbox_launcher_program.__file__).read_text(encoding="utf-8")
+    source = program_on_disk()
     line = "_PLAN = %s\n" % json.dumps(sandbox_plan.namespace_payload(plan))
     assert sandbox_launcher.render_namespace_launcher(plan) == source.replace(
         sandbox_launcher.PLAN_PLACEHOLDER, line

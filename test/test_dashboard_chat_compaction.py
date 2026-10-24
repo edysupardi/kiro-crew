@@ -188,7 +188,7 @@ class TestBroadcastCompactionResultBackoff:
         assert tagged and all((m.get("meta") or {}).get("kind") == "compaction" for m in tagged)
 
     def test_state_notice_glyphs_pin_the_frontend_status_regex(self):
-        """The other half of the same contract: ``state.py`` writes three more
+        """The other half of the same contract: ``state_parts/session_events.py`` writes three more
         ``kind="compaction"`` shapes whose LEAD GLYPH the frontend strips
         (``STATUS_LEAD_RE`` in ``CompactionCard.tsx``: 🔄 U+1F504, ♻ U+267B,
         ⏳ U+23F3) and one ⚠-led failure it routes to the error surface. A glyph
@@ -203,11 +203,11 @@ class TestBroadcastCompactionResultBackoff:
 
 
 class TestRunChatCompactDeferredWait:
-    """The deferred-compaction wait at the end of _run_chat is a kiro-cli-only
-    protocol step. claude-agent-acp performs /compact synchronously inside
-    session/prompt and never emits ``_kiro.dev/compaction/status``, so the
-    handler must skip ``wait_for_compaction`` for that backend or it sits
-    blocked for 30 minutes and finally surfaces "Compaction timed out."
+    """The deferred-compaction wait in ``_turn_compact_command`` (slash_commands) is a
+    kiro-cli-only protocol step. claude-agent-acp performs /compact synchronously inside
+    session/prompt and never emits ``_kiro.dev/compaction/status``, so the handler must
+    skip ``wait_for_compaction`` for that backend or it sits blocked for 30 minutes and
+    finally surfaces "Compaction timed out."
     """
 
     @staticmethod
@@ -252,8 +252,8 @@ class TestRunChatCompactDeferredWait:
         client = self._make_mock_client(events)
         # The claude backend finishes compaction inside the prompt turn, so the
         # double carries that backend's capability record. Set on the client, not
-        # patched at module scope: ``capabilities_of`` serves three call sites in
-        # ``_run_chat`` and patching it would answer for all three.
+        # patched at module scope: ``capabilities_of`` serves several call sites in the turn
+        # (``_on_complete``, ``_turn_compact_command``), and patching it would answer for all.
         client.capabilities = capabilities_for(ACP_BACKEND_CLAUDE)
         state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
 

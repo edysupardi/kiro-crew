@@ -16,6 +16,7 @@ import pytest
 import yaml
 from ai_review_workflows_helpers import (
     FORK_REVIEW_LANES,
+    REDACTOR_PATH,
     WORKFLOWS,
     _bash,
     _flat,
@@ -300,10 +301,10 @@ class TestForkLaneRedactsCredentialValues:
         self, tmp_path: Path, workflow: str, step: str, out: str, body: str, cred: str
     ):
         bash = _bash()
-        if bash is None or shutil.which("perl") is None or shutil.which("jq") is None:
-            pytest.skip("redaction test requires Bash, perl and jq")
+        if bash is None or shutil.which("jq") is None:
+            pytest.skip("redaction test requires Bash and jq")
         if os.name == "nt":
-            pytest.skip("the lanes' perl -i redaction is exercised on POSIX runners")
+            pytest.skip("the lanes' redaction step is exercised on POSIX runners")
 
         cwd = tmp_path / "ws"
         cwd.mkdir()
@@ -317,7 +318,7 @@ class TestForkLaneRedactsCredentialValues:
         script_file.write_text(
             _step_script(_workflow(workflow), step), encoding="utf-8", newline="\n"
         )
-        env = {**os.environ, "EXEC_FILE": str(exec_file)}
+        env = {**os.environ, "EXEC_FILE": str(exec_file), "REDACTOR": REDACTOR_PATH}
         # Absent means "not configured", which must be a no-op rather than an
         # empty pattern -- so the caller can ask for the unset case explicitly.
         for name in ("AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_ACCESS_KEY_ID"):
@@ -358,12 +359,12 @@ class TestForkLaneRedactsCredentialValues:
         assert text.strip() == body.strip()
 
 
-def _fork_gpt_cli_config(tmp_path: Path) -> dict:
-    """Run the fork GPT lane's config step and parse the file it writes.
+def _gpt_cli_config(tmp_path: Path, workflow: str) -> dict:
+    """Run a GPT lane's config step and parse the file it writes.
 
     PARSE, never grep: a heredoc emitting invalid TOML would still satisfy a
-    substring assertion while codex discards the whole file -- taking the shell
-    environment policy and the sandbox mode with it.
+    substring assertion while codex discards the whole file -- taking every key
+    the lane pins with it.
     """
     import tomllib
 
@@ -374,9 +375,7 @@ def _fork_gpt_cli_config(tmp_path: Path) -> dict:
     home.mkdir()
     script_file = tmp_path / "step.sh"
     script_file.write_text(
-        _step_script(
-            _workflow("fork-gpt-review.yml"), "Configure the review CLI for Amazon Bedrock"
-        ),
+        _step_script(_workflow(workflow), "Configure the review CLI for Amazon Bedrock"),
         encoding="utf-8",
         newline="\n",
     )
@@ -409,7 +408,7 @@ class TestForkGptLaneKeepsCredentialsOutOfTheModelShell:
     STEP = "Configure the review CLI for Amazon Bedrock"
 
     def _config(self, tmp_path: Path) -> dict:
-        return _fork_gpt_cli_config(tmp_path)
+        return _gpt_cli_config(tmp_path, "fork-gpt-review.yml")
 
     def test_the_bedrock_provider_still_resolves(self, tmp_path: Path) -> None:
         # The credentials live outside the codex PROCESS environment. codex is
@@ -493,12 +492,33 @@ class TestForkGptLaneSandboxModeLivesInTheConfigFile:
             )
 
     def test_the_staged_config_pins_the_mode_explicitly(self, tmp_path: Path) -> None:
-        config = _fork_gpt_cli_config(tmp_path)
+        config = _gpt_cli_config(tmp_path, self.WORKFLOW)
         assert config.get("sandbox_mode") == "read-only", (
             'the staged config.toml does not pin sandbox_mode = "read-only". With '
             "no --sandbox argument on the command line, `codex exec` resolves the "
             "mode from this file, so an absent or widened key hands the model's "
             "shell more of the runner than reading the diff needs"
+        )
+
+
+class TestGptLanesOfferTheModelNoWebSearch:
+    """The GPT lanes' Bedrock identity is not allowed to use codex's web search.
+
+    codex resolves an absent top-level `web_search` key to `cached`, a mode it
+    allows for every provider, so the model is offered a web-search tool. When
+    the reviewer calls it, the identity is refused, the stream ends, and the
+    required check fails with no verdict. `disabled` is the one mode that
+    offers no tool at all.
+    """
+
+    @pytest.mark.parametrize("workflow", ["codex-review.yml", "fork-gpt-review.yml"])
+    def test_the_staged_config_disables_web_search(self, tmp_path: Path, workflow: str) -> None:
+        config = _gpt_cli_config(tmp_path, workflow)
+        assert config.get("web_search") == "disabled", (
+            f'{workflow} does not stage web_search = "disabled" at the top level of '
+            "config.toml. An absent key, another mode, or the key inside a table "
+            "leaves codex offering the model a web-search tool this lane's Bedrock "
+            "identity cannot call, and the refused call fails the pass with no verdict"
         )
 
 

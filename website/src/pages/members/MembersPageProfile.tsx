@@ -18,14 +18,22 @@
  */
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type Dispatch, type SetStateAction, type RefObject } from 'react'
 import { type NavigateFunction } from 'react-router-dom'
-import { ChevronRight, Circle } from 'lucide-react'
+import { ArrowRight, ChevronRight, Circle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+// Brand mascot art for the Sessions tab's empty state: a plain <img> URL import,
+// never inline path data, which is what `use-lucide-icons` requires of a
+// mascot (GhostPoses.tsx explains the exemption).
+import workersLeadPose from '../../assets/ghost-poses/pose-7.svg'
+import workerPoseA from '../../assets/ghost-poses/pose-4.svg'
+import workerPoseB from '../../assets/ghost-poses/pose-6.svg'
 import { api, type MemberRosterRow } from '../../api/client'
 import { crewDisplayName } from '../../components/AgentSelector'
 import { useQuery } from '@tanstack/react-query'
 import { timeAgo } from '../../utils/timeAgo'
+import { sessionDisplayTitle } from '../../utils/sessionDisplayTitle'
 import CrewProfilePanel, { type ProfileTab } from './CrewProfilePanel'
 import CrewGoalsPane, { useMemberGoals } from './CrewGoals'
+import CrewHeartbeatRow from './CrewHeartbeat'
 import { sendTurn } from '../../chat-core/transport/sendTurn'
 import { createPortal } from 'react-dom'
 import { useConfirm } from '../../components/ConfirmDialog'
@@ -39,7 +47,7 @@ import { lastActivityEpoch } from '../chat/sessionOrder'
 import { type MembersPageRosterView } from './MembersPageRoster'
 import { type MembersPageSidePanelState } from './MembersPageSidePanel'
 import { type MembersPageThreadState } from './MembersPageThread'
-import { DRIVING_VISIBLE, memberMemoryDisplay, PROFILE_MEMORY_KEYS, type ProfileCardOpen, type TFn } from './membersPageModel'
+import { memberMemoryDisplay, PROFILE_MEMORY_KEYS, type ProfileCardOpen, type TFn } from './membersPageModel'
 import { type MembersPageCrewEditing } from './useMembersPageCrewEditor'
 import { type MembersPageLayout } from './useMembersPageLayout'
 import { type MembersPageRosterSignals } from './useMembersPageRoster'
@@ -58,7 +66,7 @@ const PROJECT_SEPARATOR = ' \u00b7 '
  *  rounded `overflow-hidden` shell, its scrolling body and the width-revealing
  *  aside until it is already inside them, and the pill's face is painted under
  *  the thread and the closing card, both later siblings of the header (#18236).
- *  So the flight is its own copy, portaled to `document.body` above every
+ *  So the flight is its own copy, portaled to the body-level overlay root above every
  *  surface, while both real faces hold their place unpainted. `from` is the
  *  departing face measured before it went; `to` is read live each frame because
  *  the landing face moves while the card's column reveals or folds. */
@@ -487,8 +495,7 @@ export function MembersPageProfileCard({
   const { isRunning, activeView } = rosterView
   const { activeSlot, freshStart, askFreshStart, confirmedSlot } = thread
   const {
-    profileCardW, activeMemberKey, openCrewView, openSessionGuarded, drivingSessions, setDrivingExpandedFor,
-    drivingExpanded, visibleDriving,
+    profileCardW, openCrewView, openSessionGuarded, drivingSessions,
   } = sidePanel
   const {
     schedAgentField, profileGoalsQuery, schedulesCountQuery, schedulesForActive, setSchedDraftDirty,
@@ -575,17 +582,30 @@ export function MembersPageProfileCard({
           <div className="h-12 rounded-2xl bg-bg-hover animate-pulse" />
         </div>
       ) : drivingSessions.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-border-strong bg-bg px-4 py-8 text-center text-[13px] text-muted" data-testid="crew-profile-sessions-empty">
-          {t('pages.membersPage.driving_none')}
+        // A first-time reader has no model for why a crewmate would open
+        // sessions at all, so the empty box explains the mechanism in plain
+        // words (workers), with the crewmate's own face and two
+        // faded ghost poses standing in for the workers that are not here
+        // yet. The poses are the fixed-palette brand assets, so the fade is
+        // an opacity on the <img>, never a recolour (see GhostPoses.tsx).
+        <div className="rounded-2xl border border-dashed border-border-strong bg-bg px-4 py-7 text-center text-[13px] text-muted leading-relaxed" data-testid="crew-profile-sessions-empty">
+          <div className="flex items-center justify-center gap-2.5 mb-4" aria-hidden="true">
+            <img src={workersLeadPose} alt="" draggable={false} className="h-16 w-16 object-contain select-none" />
+            <ArrowRight size={18} className="text-accent shrink-0" />
+            <img src={workerPoseA} alt="" draggable={false} className="h-[60px] w-[52px] object-contain select-none opacity-30 translate-y-1" />
+            <img src={workerPoseB} alt="" draggable={false} className="h-12 w-11 object-contain select-none opacity-30 translate-y-2.5 -ml-1" />
+          </div>
+          <p className="m-0 font-semibold text-text">{t('pages.membersPage.driving_empty_lead', { name: crewDisplayName(active) })}</p>
+          <p className="m-0 mt-0.5">{t('pages.membersPage.driving_empty_body')}</p>
         </div>
       ) : (
         <ul className="list-none m-0 p-0 rounded-2xl border border-border bg-bg overflow-hidden" data-testid="crew-profile-driving">
-          {visibleDriving.map((s) => {
+          {drivingSessions.map((s) => {
             const kind = tabStatus(s, [], s.key)
             const status = DRIVING_STATUS[kind]
             const label = t(status.label)
             const activityTs = lastActivityEpoch(s)
-            const title = s.title || s.key
+            const title = sessionDisplayTitle(s)
             return (
               <li key={s.key} className="border-t border-border first:border-t-0">
                 <button
@@ -610,37 +630,34 @@ export function MembersPageProfileCard({
           })}
         </ul>
       )}
-      {drivingSessions.length > DRIVING_VISIBLE && (
-        <button
-          type="button"
-          onClick={() => setDrivingExpandedFor(drivingExpanded ? '' : activeMemberKey)}
-          className="self-start text-[12.5px] font-semibold text-accent cursor-pointer"
-          aria-expanded={drivingExpanded}
-        >
-          {drivingExpanded
-            ? t('pages.membersPage.driving_show_less')
-            : t('pages.membersPage.driving_show_all', { count: drivingSessions.length })}
-        </button>
-      )}
     </div>
   )
   const requestProfileBack = (proceed: () => void) => {
     if (!schedAtStakeRef.current()) { proceed(); return }
     void schedGuardRef.current().then((ok) => { if (ok) proceed() })
   }
+  // The Schedules tab's Heartbeat row publishes its in-flight write into the
+  // same guard the Goals pane uses (the two are never mounted together: one
+  // tab body at a time), so close and navigation refuse until it settles; the
+  // tab rail reads `heartbeatBusy` for the same refusal.
+  const [heartbeatBusy, setHeartbeatBusy] = useState(false)
+  const onHeartbeatBusyChange = useCallback((dirty: boolean, busy: boolean) => {
+    onGoalsDraftChange(dirty, busy)
+    setHeartbeatBusy(busy)
+  }, [onGoalsDraftChange])
   // The profile card (crewmate-panel IA): the pill's surface. Notes,
   // Schedules and the work log are ITS tabs/pages now, so the three
   // bodies above mount here instead of on the side panel's strip.
-  // The Goals tab's "Track something in chat": the user's own message in
+  // The Goals tab's New goal modal: the opening message as the user's own in
   // this crewmate's thread, through the ordinary send path, so it shows in
   // the transcript like anything they typed. A card floating over the
   // thread closes so the reply is in view; a docked column stays.
-  const trackInChat = async (message: string) => {
+  const sendToChat = async (message: string) => {
     if (!confirmedSlot) return 'refused' as const
     return (await sendTurn({ slot: confirmedSlot, message })).status
   }
-  const onTracked = () => {
-    // CrewGoals clears its delivered draft and busy flag before this exit.
+  const onSent = () => {
+    // CrewGoals closes its modal and clears its busy flag before this exit.
     if (!profileDocked) requestCloseProfile()
   }
   const profilePanel = activeView && profile ? (
@@ -669,6 +686,9 @@ export function MembersPageProfileCard({
       onOpenSchedule={() => { const destination = '/schedule'; leave(() => navigate(destination), destination) }}
       onOpenScheduleJob={(id) => { const destination = `/schedule?job=${encodeURIComponent(id)}`; leave(() => navigate(destination), destination) }}
       newScheduleBody={schedulesBody}
+      heartbeatBody={activeSlug && activeMemberName ? <CrewHeartbeatRow slug={activeSlug} member={activeMemberName} onBusyChange={onHeartbeatBusyChange} /> : null}
+      heartbeatOn={!!profileGoalsQuery.data?.schedules?.heartbeat}
+      heartbeatBusy={heartbeatBusy}
       sessionsBody={sessionsBody}
       notesBody={notesBody}
       goalsBody={activeSlug && activeMemberName ? (
@@ -676,8 +696,8 @@ export function MembersPageProfileCard({
           slug={activeSlug}
           member={activeMemberName}
           name={crewDisplayName(activeView ?? active)}
-          onTrackInChat={confirmedSlot ? trackInChat : undefined}
-          onTracked={onTracked}
+          onSendToChat={confirmedSlot ? sendToChat : undefined}
+          onSent={onSent}
           onDraftStateChange={onGoalsDraftChange}
           onRequestLeave={requestProfileBack}
         />

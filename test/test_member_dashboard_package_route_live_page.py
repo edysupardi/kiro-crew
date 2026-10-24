@@ -148,10 +148,34 @@ async def test_the_persons_lock_outranks_the_crewmates_package(
     assert "package_served" not in served
     assert PAGE not in (
         body.get("rendered_html") or ""
-    ), "the crewmate's own page was served over the page the person locked"
+    ), "the mate's own page was served over the page the person locked"
     assert (
         body.get("structure_locked") is True
     ), "the body does not tell the tab the layout is locked"
+
+
+@pytest.mark.asyncio
+async def test_a_locked_pinned_package_tells_the_tab_it_is_locked(wired: Any) -> None:
+    """A pinned package page carries the person's lock, as a template page does.
+
+    The Profile switch and the Dashboard's lock badge read ``structure_locked`` from
+    this body; a package page that left it out read as unlocked after a refetch.
+    """
+    from kiro_crew.dashboard_templates import instance as instance_mod
+
+    instance_mod.apply_package(
+        SLUG,
+        package_slug=PACKAGE_SLUG,
+        package_version=APPLIED_VERSION,
+        content=dp.dump_package(_package()),
+    )
+    instance_mod.set_structure_lock(SLUG, True)
+
+    status, body = await _call(md.api_member_dashboard, _request(wired.app, "GET", PATH))
+
+    assert status == 200, body
+    assert PAGE in body["rendered_html"], "the pinned package is the page in force"
+    assert body.get("structure_locked") is True
 
 
 @pytest.mark.asyncio
@@ -161,6 +185,60 @@ async def test_an_unlocked_crewmate_still_gets_its_package(wired: Any) -> None:
     status, body = await _call(md.api_member_dashboard, _request(wired.app, "GET", PATH))
     assert status == 200
     assert PAGE in body["rendered_html"]
+
+
+def _page_at_the_ceiling() -> str:
+    """A page of exactly the frame's ceiling: :data:`PAGE` plus an inlined script."""
+    from kiro_crew import dashboard_frame
+
+    head, tail = PAGE + "<script>", "</script>"
+    return head + "x" * (dashboard_frame.MAX_PAGE_BYTES - len(head) - len(tail)) + tail
+
+
+def _store_page(wired: Any, page: str) -> None:
+    """Make *page* the applied package's page, through the package's own validator."""
+    raw = json.loads(dp.dump_package(_package()))
+    raw["view"] = {"html": page}
+    wired.store.content = dp.dump_package(dp.validate_package(raw))
+
+
+@pytest.mark.asyncio
+async def test_a_page_at_the_frames_ceiling_is_served_through_the_frame(wired: Any) -> None:
+    """The biggest page a package may hold is drawn, not refused at the frame."""
+    page = _page_at_the_ceiling()
+    _store_page(wired, page)
+    status, body = await _call(md.api_member_dashboard, _request(wired.app, "GET", PATH))
+    assert status == 200, body
+    assert body["html"] == page
+    assert page in body["rendered_html"]
+
+
+@pytest.mark.asyncio
+async def test_the_page_is_scrubbed_and_framed_off_the_event_loop(
+    wired: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both steps read the whole page, which takes hundreds of milliseconds near the
+    ceiling: on the loop, that pause lands on every other session's chat."""
+    import threading
+
+    loop_thread = threading.current_thread()
+    calls: list[tuple[str, bool]] = []
+    scrub, frame = md._template_text_safe, mdf.render_package_page
+
+    def _scrub(text: str) -> str:
+        calls.append(("scrub", threading.current_thread() is loop_thread))
+        return scrub(text)
+
+    def _frame(*args: Any, **kwargs: Any) -> str:
+        calls.append(("frame", threading.current_thread() is loop_thread))
+        return frame(*args, **kwargs)
+
+    monkeypatch.setattr(md, "_template_text_safe", _scrub)
+    monkeypatch.setattr(mdf, "render_package_page", _frame)
+    status, _body = await _call(md.api_member_dashboard, _request(wired.app, "GET", PATH))
+    assert status == 200
+    assert {name for name, _ in calls} == {"scrub", "frame"}
+    assert not [name for name, on_loop in calls if on_loop], calls
 
 
 @pytest.mark.asyncio
@@ -343,7 +421,14 @@ class TestTheWorkerIsRefusedAtTheRealWritePath:
         """The gate is only a gate if the route asks it. Pinned on the SOURCE of the
         three write paths, because a route that stopped asking would leave every test
         above passing."""
-        source = Path(artifacts_handler.__file__).read_text(encoding="utf-8")
+        # The routes and the gate live in the facade's owner modules. The gate's own
+        # module is read last, so every other module's text sits in the head below.
+        facade = Path(artifacts_handler.__file__)
+        parts = [facade] + sorted(
+            (facade.parent / "artifacts_parts").glob("*.py"),
+            key=lambda path: path.stem == "dashboard_package_gate",
+        )
+        source = "".join(path.read_text(encoding="utf-8") for path in parts)
         # Counted as CALLS, excluding the accessor's own definition line, because one
         # call wraps its arguments across lines and a single-spelling count misses it.
         calls = source.count("_package_write_refusal(") - source.count(
@@ -688,7 +773,10 @@ def test_the_tab_ignores_a_message_from_any_other_window() -> None:
     # The DECLARATION, not the file's prose. The file explains at length that it
     # withholds same-origin access, so a text search for that token matches the
     # explanation and passes whatever the sandbox actually grants.
-    assert "export const CREW_DASHBOARD_SANDBOX = 'allow-scripts'" in text, (
+    # The grant is defined once, in lib/crewDashboardSandbox.ts, and the tab imports it.
+    grant = (tab.parents[2] / "lib" / "crewDashboardSandbox.ts").read_text(encoding="utf-8")
+    assert "import { CREW_DASHBOARD_SANDBOX } from '../../lib/crewDashboardSandbox'" in text
+    assert "export const CREW_DASHBOARD_SANDBOX = 'allow-scripts'" in grant, (
         "the frame's sandbox is no longer exactly allow-scripts; same-origin access "
         "would give the page the dashboard's own storage and cookies, and a non-opaque "
         "origin would also make the wildcard postMessage target a real choice"

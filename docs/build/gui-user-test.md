@@ -23,7 +23,7 @@ while the code holding credentials is not. `pr-readiness.yml` does not read this
 |---|---|
 | `.github/workflows/gui-user-test.yml` | Triggers, boot, run, artifact, run summary, nightly issue, lane status. |
 | `scripts/gui-user-test/boot.sh` | Xvfb -> `seed_home.py` -> `python -m kiro_crew gateway --test-mode --approval yolo --no-crons` on the packaged fake ACP backend -> Chromium at the dashboard URL. Writes `target.env` (origin + one-time token, mode 0600) and `pids`. Also stages the sample notes folder and the sample project at a fixed path (see "Seeds" below). |
-| `scripts/gui-user-test/seed_home.py` | Copies a fixture into `$KIROCREW_HOME` through `kiro_crew.seed`, marks the install onboarded (including `dashboard.crewmates_onboarded`), writes `config.agents.default` and then `config.agents.<slug>` for each `--member` so the Crewmates page has a roster, and with `--project` gives the pinned starter session (`dashboard_starter.jsonl`) the staged sample project. |
+| `scripts/gui-user-test/seed_home.py` | Copies a fixture into `$KIROCREW_HOME` through `kiro_crew.seed`, marks the install onboarded (including `dashboard.crewmates_onboarded`), writes `config.agents.default` and then `config.agents.<slug>` for each `--member` so the Mates page has a roster, and with `--project` gives the pinned starter session (`dashboard_starter.jsonl`) the staged sample project. |
 | `scripts/gui-user-test/teardown.sh` | Kills the three process groups and removes the scratch home, the browser profile and the staged sample folders. |
 | `test/gui_user/harness.py` | The screenshot -> Bedrock Messages API -> action loop with the step, time and budget gates. |
 | `test/gui_user/x11.py` | Screenshots (Pillow `ImageGrab`) and input (`xdotool`); coordinate scaling, key aliases and argv building are pure and unit-tested. |
@@ -112,6 +112,7 @@ preconditions:
   seed: rich                # KIROCREW_HOME fixture (kirocrew gateway --seed NAME)
   members: []               # crew member slugs boot.sh adds to config.agents
   start_url: /settings      # path the harness navigates to first (no query string)
+  fresh_target: false       # optional; true = reads the target as boot left it (see Seeds)
 steps:
   - You are on the Settings page. Take note of the current background colour.
   - Find the theme control and pick a different theme than the one selected.
@@ -167,7 +168,7 @@ sorts the same way the report groups.
 A step that names a control by its exact label goes stale when the label changes.
 When a surface is mid-transition, describe it by what does not change, or name every
 reading a build can show: the rail item, the sidebar entry and the Feature Previews
-card read "Crewmates", and `members-dm-hello` asks for the preview "whose title starts
+card read "Mates", and `members-dm-hello` asks for the preview "whose title starts
 with `Crewmates`" while naming the older "Crew Members" readings, so it reads the same
 on either build. When a scenario does need to move with the product, change the YAML
 in the same PR as the UI and re-run it on demand (below) before merging.
@@ -177,6 +178,13 @@ in the same PR as the UI and re-run it on demand (below) before merging.
 `boot.sh` seeds one home per run from `GUI_SEED` (default `rich`) with `GUI_MEMBERS`
 (default `nova-sky`); a scenario's `preconditions.seed` / `members` document what it
 needs and must agree with that boot, because the target is booted once per run.
+
+Nothing resets the target between scenarios, so a scenario sees whatever earlier
+ones wrote: a mate chat posts a notification and a create scenario adds a
+mate. A scenario that reads the boot state (an empty inbox, a one-card roster)
+sets `preconditions.fresh_target: true` and must not write anything itself.
+`scenarios.select` runs every such scenario first, before the rest in file-name
+order, and the harness refuses a run order that puts one after any other scenario.
 
 Because one seed serves every scenario, a surface that needs content gets it from the
 `rich` fixture itself rather than from a second seed: `rich` ships the three saved
@@ -217,8 +225,14 @@ runs on), and the other seeded chats stay project-less on purpose, so
 the whole root, sample project included.
 
 One boot also means one roster: every scenario meets the members `GUI_MEMBERS` seeded
-plus whatever an earlier scenario created, so a flow that exists only for an EMPTY
-roster -- the empty Crewmates page's hero, shown while `config.agents` holds
+plus whatever an earlier scenario created. A seeded member has an empty DM thread, and
+the Mates page lists a mate unasked only once its thread holds a message or the
+user starred it (`docs/request-for-change/rfc-session-template-vs-crewmate.md`, rule 3);
+until then the roster search is the one door to it. A scenario that opens a seeded
+member's card therefore tells the tester to type its name into the search box first,
+exactly as a person reaches an unused mate; the seed does not pretend the user
+already chatted with it. So a flow that exists only for an EMPTY
+roster -- the empty Mates page's hero, shown while `config.agents` holds
 nothing beyond `default` -- cannot be reached in this lane and has no scenario;
 `seed_home.py` also sets the legacy `dashboard.crewmates_onboarded` flag, which
 nothing reads any more. Giving
@@ -246,7 +260,7 @@ navigation lands on the browser's "Leave site?" prompt over that form. The same 
 profile, so a per-device switch (Developer Mode, Show Timestamps, a feature preview)
 that a scenario flips is still flipped when the next scenario starts. A scenario that
 flips one either puts it back before it ends or leaves a state nothing later depends on
-(the members scenarios leave the Crewmates preview on), and it words each switch step
+(the members scenarios leave the Mates preview on), and it words each switch step
 as the position to leave the switch in ("make sure it is ON -- click it once if it is
 off") rather than as a click, so a retry that starts from a half-finished attempt
 converges instead of inverting it.

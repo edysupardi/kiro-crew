@@ -1,11 +1,13 @@
 import { useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAppDispatch, useAppStore } from '../../store'
-import { createSlot, appendSlotMessage, startLocalTurn, endLocalTurn } from '../../store/chatSlice'
+import { appendSlotMessage, startLocalTurn, endLocalTurn } from '../../store/chatSlice'
+import { createChatForView, showCreatedChat } from '../../lib/createdChatView'
 import { mintSendId } from '../../utils/sendDelivery'
 import { sendTurn } from '../../chat-core/transport/sendTurn'
 import { api } from '../../api/client'
-import { FEATURE_REQUEST_PROMPT_FALLBACK, FEATURE_REQUEST_ROW_META_KEY } from '../../prompts/featureRequest'
+import { FEATURE_REQUEST_ROW_META_KEY } from '../../prompts/featureRequest'
+import { feedbackTracker } from '../../feedbackTracker'
 import { i18nT } from '../../i18n/t'
 
 /** The top bar's "Request a Feature": a new session that files the request as an agent turn. */
@@ -16,8 +18,8 @@ export function useRequestFeature(colorTheme: string) {
   // the module-level singleton would bypass a test-injected store.
   const appStore = useAppStore()
   const requestFeature = useCallback(async () => {
-    const result = await dispatch(createSlot({ sessionFolder: false })).unwrap()
-    const slot = result.key
+    const view = await createChatForView(dispatch, appStore.getState, { sessionFolder: false })
+    const slot = view.slot.key
     // This flow is an agent turn by design (the skill drafts and files the
     // request), so it consumes metered inference and a spent plan allowance
     // refuses it. The transcript can offer the non-inference route -- the
@@ -33,7 +35,9 @@ export function useRequestFeature(colorTheme: string) {
     const sendId = mintSendId()
     const meta = { sendId, [FEATURE_REQUEST_ROW_META_KEY]: true }
     const visibleMessage = i18nT('app.i_d_like_to_request_a_feature')
-    navigate('/chat')
+    // The request is filed in its own session either way; only a user still
+    // where they asked is brought to it.
+    showCreatedChat(view, navigate)
     // Both optimistic writes are addressed to the slot this flow CREATED, not
     // the active one: createSlot.fulfilled has a switched-away guard, so when
     // the user changes session while the create round-trip is in flight the
@@ -88,8 +92,10 @@ export function useRequestFeature(colorTheme: string) {
       // maxAge bounds the seed's lifetime: if the visible send below fails,
       // the queued instructions expire server-side (drain_pending_context
       // discards expired entries) instead of silently attaching the
-      // feature-request workflow to a later, unrelated message.
-      await api.chatSlotContext(slot, FEATURE_REQUEST_PROMPT_FALLBACK, { source: 'feature-request', maxAge: 60 })
+      // feature-request workflow to a later, unrelated message. The prompt is
+      // the tracker's own (`feedbackTracker`): the public one files on GitHub
+      // with `gh`; an edition's names its tracker and its filing steps.
+      await api.chatSlotContext(slot, feedbackTracker().prompt, { source: 'feature-request', maxAge: 60 })
     } catch { /* Send the visible request even if hidden context is unavailable. */ }
     // The chat-core transport owns the receipt contract (`?ws=1` JSON receipt,
     // HTTP 4xx/5xx RESOLVE rather than reject, deadline) and never rejects.

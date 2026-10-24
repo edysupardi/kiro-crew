@@ -4,9 +4,11 @@ import { useTouchPushToTalk } from '../../hooks/useTouchPushToTalk'
 import { useAppSelector } from '../../store'
 import { safeSetItem } from '../../utils/safeStorage'
 import { isTouchDevice } from '../../utils/isTouchDevice'
+import { sessionDisplayTitle } from '../../utils/sessionDisplayTitle'
 import { i18nT } from '../../i18n/t'
 import type { ComposerVoiceInputProps } from '../../chat-core/composer/Composer'
 import type { ComposerControl } from '../composerControl'
+import { anotherEscapeOwnerIsOpen } from './escapeOwners'
 
 /* Dictation as the composer sees it. The Composer root's Voice atom
    (`chat-core/composer/useComposerVoice.ts`) owns capture, the one-mic mutex
@@ -164,13 +166,15 @@ export function useDictationControls({ composerControl, value, autoFocusKey, any
   // hand-rolled pickers that close on Escape WITHOUT preventing default, so
   // they cannot be detected that way.
   //
-  // The `[role="dialog"]` probe is the precedence rule: Escape belongs to the
-  // TOPMOST dismissible surface, and the composer is not it while a dialog is
-  // up. Modal, CommandPalette and SnipOverlay all bind Escape on `window` and
-  // all carry role="dialog", so one presence check defers to every one of them
-  // rather than enumerating them. Without it this handler would steal Escape
-  // from each — those surfaces own Escape, so intercepting it here would be a
-  // regression, not a trade.
+  // The `anotherEscapeOwnerIsOpen()` probe is the precedence rule: Escape
+  // belongs to the TOPMOST dismissible surface, and the composer is not it
+  // while another surface owns Escape. Shared with the stop-key gate
+  // (escapeOwners.ts) so the two cannot drift: it covers role="dialog"
+  // surfaces (Modal, CommandPalette, SnipOverlay — minus the read-only
+  // live-desktop opt-out) AND the non-dialog document-level owners (the
+  // embedded file preview, the message-search bar). Without it this handler
+  // would steal Escape from each — those surfaces own Escape, so intercepting
+  // it here would be a regression, not a trade.
   //
   // stopPropagation() only once we have decided the key is OURS. document
   // bubbles on to `window`, and those window handlers do not check
@@ -184,7 +188,7 @@ export function useDictationControls({ composerControl, value, autoFocusKey, any
     const handler = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.isComposing || e.defaultPrevented) return
       if (anyPickerOpenRef.current) return
-      if (document.querySelector('[role="dialog"]')) return
+      if (anotherEscapeOwnerIsOpen()) return
       e.preventDefault()
       e.stopPropagation()
       cancel()
@@ -199,7 +203,7 @@ export function useDictationControls({ composerControl, value, autoFocusKey, any
 /** Hold-to-talk: on a touch device the mic switches the composer between the
  *  keyboard and a press-and-hold target, and every label on those controls
  *  says what the next press actually does. */
-export function useHoldToTalk({ onVoiceStart, onVoiceStop, onVoiceCancel, voiceCaptureActive, voiceRecording, voiceTranscribeActive, voiceTranscribing, voiceDownload, voiceBusyElsewhere, voiceBusyElsewhereSession, composerHasDraft, disabled, optimizing, placeholder, showDictation }: {
+export function useHoldToTalk({ onVoiceStart, onVoiceStop, onVoiceCancel, voiceCaptureActive, voiceRecording, voiceTranscribeActive, voiceTranscribing, voiceDownload, voiceSubmitOnRelease = false, voiceBusyElsewhere, voiceBusyElsewhereSession, composerHasDraft, disabled, optimizing, placeholder, showDictation }: {
   onVoiceStart: VoiceInput['onVoiceStart']
   onVoiceStop: VoiceInput['onVoiceStop']
   onVoiceCancel: VoiceInput['onVoiceCancel']
@@ -208,6 +212,9 @@ export function useHoldToTalk({ onVoiceStart, onVoiceStop, onVoiceCancel, voiceC
   voiceTranscribeActive: VoiceInput['voiceTranscribeActive']
   voiceTranscribing: boolean
   voiceDownload: VoiceInput['voiceDownload']
+  /** `stt.submit_on_release`: a deliberate finish sends, so the labels say so
+   *  and the hold bar offers its sideways keep-as-draft zone. */
+  voiceSubmitOnRelease?: boolean
   voiceBusyElsewhere: boolean
   voiceBusyElsewhereSession: VoiceInput['voiceBusyElsewhereSession']
   /** The composer holds text or files a send would carry (session refs excluded). */
@@ -268,8 +275,12 @@ export function useHoldToTalk({ onVoiceStart, onVoiceStop, onVoiceCancel, voiceC
   // Name the chat that holds the mic when the slot list knows it. In a lone DM
   // thread nothing else on screen shows which chat is capturing, so without a
   // name the user cannot go and end it.
-  const micOwnerTitle = useAppSelector(s =>
-    voiceBusyElsewhereSession ? s.dashboard.slots.find(x => x.key === voiceBusyElsewhereSession)?.title ?? null : null)
+  // An untitled chat (its stored title can be the raw slot key) is named
+  // "Untitled session", so the label and the jump action never show the key.
+  const micOwnerTitle = useAppSelector(s => {
+    const owner = voiceBusyElsewhereSession ? s.dashboard.slots.find(x => x.key === voiceBusyElsewhereSession) : undefined
+    return owner ? sessionDisplayTitle(owner) : null
+  })
   const micHeldElsewhereLabel = micOwnerTitle
     ? i18nT('components.chatInput.mic_in_use_in', { chat: micOwnerTitle })
     : i18nT('components.chatInput.mic_in_use_elsewhere')
@@ -298,6 +309,7 @@ export function useHoldToTalk({ onVoiceStart, onVoiceStop, onVoiceCancel, voiceC
   const touchPtt = useTouchPushToTalk(touchVoice, {
     target: holdTarget,
     disabled: disabled || micBlocked || optimizing,
+    draftZone: voiceSubmitOnRelease,
   })
   /*
    * A draft suspends hold mode, EXCEPT while the touch gesture's own capture is
@@ -400,7 +412,13 @@ export function useHoldToTalk({ onVoiceStart, onVoiceStop, onVoiceCancel, voiceC
         ? micHeldElsewhereLabel
       // Not a switch: it records. Same two labels the desktop mic has always had.
       : voiceRecording
-        ? i18nT('components.chatInput.stop_recording')
+        // With submit-on-release the click sends, so the label says so and
+        // names the Shift-click way out. On touch the label is read by a screen
+        // reader only; Shift does not exist there, and the hold bar's draft
+        // zone is the touch equivalent.
+        ? voiceSubmitOnRelease
+          ? i18nT('components.chatInput.stop_and_send')
+          : i18nT('components.chatInput.stop_recording')
         : i18nT('components.chatInput.voice_input')
   /**
    * What the hold bar says, which must describe what the NEXT press or release
@@ -408,12 +426,14 @@ export function useHoldToTalk({ onVoiceStart, onVoiceStop, onVoiceCancel, voiceC
    * gesture this copies sends on release, and the labels borrowed its promises
    * without borrowing its behaviour:
    *
-   * - Releasing does NOT send. `stopVoice` sets `sttEndpointDisarmedRef` on
-   *   purpose, so a manual stop cannot become an unrequested send; the transcript
-   *   arrives as a composer draft. A user trusting "Release to send" would release,
-   *   pocket the phone, and never notice the message was still sitting there — a
-   *   silent failure on a chat surface's core action. It says `Release to
-   *   transcribe`, which is what release does.
+   * - By default releasing does NOT send. `stopVoice` sets `sttEndpointDisarmedRef`
+   *   on purpose, so a manual stop cannot become an unrequested send; the
+   *   transcript arrives as a composer draft. A user trusting "Release to send"
+   *   would release, pocket the phone, and never notice the message was still
+   *   sitting there — a silent failure on a chat surface's core action. It says
+   *   `Release to transcribe`, which is what release does. Only with
+   *   `stt.submit_on_release` on does release send, and only then does the bar
+   *   say `Release to send`; sliding sideways then reads `Release to keep as draft`.
    * - While transcribing, the bar is disabled and used to still read "Hold to
    *   talk", so the dead control explained nothing.
    */
@@ -426,11 +446,15 @@ export function useHoldToTalk({ onVoiceStart, onVoiceStop, onVoiceCancel, voiceC
       ? i18nT('components.chatInput.finishing')
       : touchPtt.bar === 'armed-cancel'
         ? i18nT('components.chatInput.release_to_cancel')
-        : touchPtt.bar === 'holding'
-          ? i18nT('components.chatInput.release_to_transcribe')
-          : touchPtt.bar === 'tap-too-short'
-            ? i18nT('components.chatInput.keep_holding_to_record')
-            : i18nT('components.chatInput.hold_to_talk')
+        : touchPtt.bar === 'armed-draft'
+          ? i18nT('components.chatInput.release_to_keep_draft')
+          : touchPtt.bar === 'holding'
+            ? voiceSubmitOnRelease
+              ? i18nT('components.chatInput.release_to_send')
+              : i18nT('components.chatInput.release_to_transcribe')
+            : touchPtt.bar === 'tap-too-short'
+              ? i18nT('components.chatInput.keep_holding_to_record')
+              : i18nT('components.chatInput.hold_to_talk')
   /**
    * Discovery hint for the mic switch, shown only where the switch exists and
    * only while it is reachable.

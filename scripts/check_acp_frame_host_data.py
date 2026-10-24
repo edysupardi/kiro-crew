@@ -77,19 +77,6 @@ PATTERNS: Tuple[Tuple[str, str], ...] = (
 #: re-recording that fixture through the capture script with the field pruned, then
 #: deleting its line -- and the gate will then hold it clean.
 BASELINE: dict = {
-    "test/fixtures/acp_frames/claude/session.expected.json": (
-        "a scratch run id",
-        "a run or request uuid",
-    ),
-    "test/fixtures/acp_frames/claude/session.jsonl": (
-        "a scratch run id",
-        "a run or request uuid",
-    ),
-    "test/fixtures/acp_frames/codex/session-live.expected.json": ("a run or request uuid",),
-    "test/fixtures/acp_frames/codex/session-live.jsonl": (
-        "a run or request uuid",
-        "the harness's own command inventory",
-    ),
     "test/fixtures/acp_frames/kas/session.expected.json": ("a run or request uuid",),
     "test/fixtures/acp_frames/kas/session.jsonl": (
         "a scratch run id",
@@ -97,18 +84,6 @@ BASELINE: dict = {
     ),
     "test/fixtures/acp_frames/kiro/session.expected.json": ("a run or request uuid",),
     "test/fixtures/acp_frames/kiro/session.jsonl": ("a run or request uuid",),
-    "test/fixtures/acp_frames/opencode/permission-request-live.expected.json": (
-        "a scratch run id",
-    ),
-    "test/fixtures/acp_frames/opencode/permission-request-live.jsonl": ("a scratch run id",),
-    "test/fixtures/acp_frames/opencode/session-live.jsonl": (
-        "the harness's own command inventory",
-    ),
-    "test/fixtures/acp_frames/opencode/session-load-live.jsonl": (
-        "the harness's own command inventory",
-    ),
-    "test/fixtures/acp_frames/opencode/tool-call-live.expected.json": ("a scratch run id",),
-    "test/fixtures/acp_frames/opencode/tool-call-live.jsonl": ("a scratch run id",),
     "test/fixtures/acp_frames/pi/permission-request-live.expected.json": ("a run or request uuid",),
     "test/fixtures/acp_frames/pi/permission-request-live.jsonl": (
         "a run or request uuid",

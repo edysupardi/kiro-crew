@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 
@@ -71,12 +71,15 @@ SELF_PROPOSALS: dict[str, str] = {
     "key_results": "crewmate.key_results",
     # Which check-ins run and when (``set_check_ins``), once the user confirms.
     "check_ins": "crewmate.check_ins",
+    # The crewmate's one offer to write its own Dashboard page
+    # (``offer_dashboard_page``): the yes wakes it to write the page.
+    "dashboard_page": "crewmate.dashboard_page",
 }
 
 #: The requests a crewmate may make in its own thread from a turn the user did
 #: not send (``handlers.guide.REQ_OWN_GOAL_TURN``): its own goal, milestones
 #: and check-ins, each still a card the user decides.
-OWN_GOAL_PROPOSALS = frozenset({"goal", "key_results", "check_ins"})
+OWN_GOAL_PROPOSALS = frozenset({"goal", "key_results", "check_ins", "dashboard_page"})
 
 
 def _caller_member(request: web.Request, slot_key: str) -> tuple[str, str] | None:
@@ -97,9 +100,7 @@ def _not_writable(sk: str, operation: str) -> web.Response:
     # The crewmate's row cannot be published from here, e.g. one declared only
     # in ``config.local.json``: a refusal the model can say, never a 500.
     _audit(sk, operation, "denied", "member_not_writable")
-    return _deny(
-        409, "member_not_writable", "this crewmate's settings cannot be changed from the chat"
-    )
+    return _deny(409, "member_not_writable", "this mate's settings cannot be changed from the chat")
 
 
 async def api_member_self_update(request: web.Request) -> web.Response:
@@ -228,8 +229,22 @@ async def api_member_self_propose(request: web.Request) -> web.Response:
             _audit(sk, OP_PROPOSE_SELF, "denied", "invalid_params")
             return _deny(400, "invalid_params", "'key_results' takes only items")
         params = {"member": member, "items": raw.get("items")}
+    elif name == "dashboard_page":
+        if raw:
+            _audit(sk, OP_PROPOSE_SELF, "denied", "invalid_params")
+            return _deny(400, "invalid_params", "'dashboard_page' takes no params")
+        params = {"member": member}
     elif name == "check_ins":
-        allowed_ci = {"daily", "weekly", "monthly", "weekday", "month_day", "time"}
+        allowed_ci = {
+            "daily",
+            "weekly",
+            "monthly",
+            "heartbeat",
+            "weekday",
+            "month_day",
+            "time",
+            "interval",
+        }
         if not raw or set(raw) - allowed_ci:
             _audit(sk, OP_PROPOSE_SELF, "denied", "invalid_params")
             return _deny(
@@ -245,9 +260,60 @@ async def api_member_self_propose(request: web.Request) -> web.Response:
                 400, "invalid_params", f"'{name}' takes only " + ", ".join(sorted(allowed))
             )
         params = {"name": member, "fields": fields}
+    extra = {"claim": _page_offer_claim(member)} if name == "dashboard_page" else {}
     return await propose_for_caller(
-        request, slot_key, sk, kind=kind, params=params, reason=body.get("reason")
+        request, slot_key, sk, kind=kind, params=params, reason=body.get("reason"), **extra
     )
+
+
+def _page_offer_claim(member: str) -> Callable[[], Awaitable[Callable[[], Awaitable[None]]]]:
+    """The asked-once write for *member*'s page offer, run before its card is shown.
+
+    Asked-once counts from here: a yes, a no and an expiry all leave this record, so no
+    later wake asks again (``dashboard.page_offer``). A crewmate asked before is
+    refused here (``already_asked``), on the raise only, so a re-preview of the card
+    that wrote the record still works. A record that cannot be written refuses the
+    card, and a card that is then not published takes the record back.
+    """
+    from kiro_crew import dashboard_agentic
+    from kiro_crew.dashboard import page_offer
+    from kiro_crew.dashboard.change_cards import CardError
+
+    async def claim() -> Callable[[], Awaitable[None]]:
+        try:
+            slug = await asyncio.to_thread(members_mod.member_slug, member)
+            asked = await asyncio.to_thread(page_offer.was_asked, slug)
+        except Exception:
+            logger.warning("page offer for %s could not be read", member, exc_info=True)
+            raise CardError(
+                503, "page_offer_write_failed", "the page offer could not be recorded"
+            ) from None
+        if asked:
+            raise CardError(
+                409,
+                "already_asked",
+                "you already offered your Dashboard page once; it is not asked again",
+            )
+        try:
+            target = await asyncio.to_thread(dashboard_agentic.page_offer_target, slug) or {}
+            await asyncio.to_thread(
+                page_offer.record_asked,
+                slug,
+                str(target.get("replaces") or ""),
+                str(target.get("template_id") or ""),
+            )
+        except Exception:
+            logger.warning("page offer for %s could not be recorded", member, exc_info=True)
+            raise CardError(
+                503, "page_offer_write_failed", "the page offer could not be recorded"
+            ) from None
+
+        async def undo() -> None:
+            await asyncio.to_thread(page_offer.forget_asked, slug)
+
+        return undo
+
+    return claim
 
 
 async def api_member_self_undo(request: web.Request) -> web.Response:
@@ -303,7 +369,7 @@ async def api_member_self_undo(request: web.Request) -> web.Response:
         status = 403 if exc.code == "not_a_crewmate" else 409
         return _deny(status, exc.code, str(exc))
     except (UnknownMemoryStore, MemberAlreadyExists, MemberApprovalConflict):
-        return _deny(409, "member_not_writable", "this crewmate's settings cannot be changed here")
+        return _deny(409, "member_not_writable", "this mate's settings cannot be changed here")
     undone = member_self_changes.mark_undone(change_id) or {**rec, "status": "undone"}
     state = request.app["state"]
     await chat_cards.load_conversation_window(state, undone)

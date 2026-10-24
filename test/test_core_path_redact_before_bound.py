@@ -182,7 +182,15 @@ _SCANNED_PACKAGES = {
     # The owners composed into the Slack gateway facade, slack/gateway.py.
     "src/kiro_crew/slack/gateway_runtime": 5,
     # The owners composed into the dashboard chat runner, dashboard/chat_runner.py.
-    "src/kiro_crew/dashboard/chat_turn": 7,
+    "src/kiro_crew/dashboard/chat_turn": 24,
+    # The owners mirrored beside the session control tools, mcp_tools/control.py.
+    "src/kiro_crew/mcp_tools/control_parts": 1,
+    # The owners mirrored beside the spawn tools, mcp_tools/spawn.py.
+    "src/kiro_crew/mcp_tools/spawn_parts": 2,
+    # The owners of the ACP dispatch facade, acp/_dispatch.py.
+    "src/kiro_crew/acp/_dispatch_parts": 5,
+    # The owners behind the dashboard artifact routes' facade, dashboard/handlers/artifacts.py.
+    "src/kiro_crew/dashboard/handlers/artifacts_parts": 10,
 }
 
 # Every module the issue names, then every module of the packages scanned whole,
@@ -201,6 +209,7 @@ _SCANNED_MODULES = [
     # test_acp_client_tool_call_updates.py::test_credential_straddling_the_bound_is_still_redacted.
     "src/kiro_crew/acp/client.py",
     # The client's owner modules.
+    "src/kiro_crew/acp/client_class.py",
     "src/kiro_crew/acp/client_claude_seed.py",
     "src/kiro_crew/acp/client_claude_session.py",
     "src/kiro_crew/acp/client_lifecycle.py",
@@ -209,9 +218,11 @@ _SCANNED_MODULES = [
     "src/kiro_crew/acp/client_permissions.py",
     "src/kiro_crew/acp/client_seed_ownership.py",
     "src/kiro_crew/acp/client_spawn_env.py",
+    "src/kiro_crew/acp/client_start.py",
     "src/kiro_crew/acp/client_timeouts.py",
     "src/kiro_crew/acp/client_tool_events.py",
     "src/kiro_crew/acp/client_transport.py",
+    "src/kiro_crew/acp/client_turn.py",
     "src/kiro_crew/acp/client_turn_control.py",
     "src/kiro_crew/acp/client_usage.py",
     # The client's error formatter and classifiers, with their redactor calls.
@@ -221,9 +232,21 @@ _SCANNED_MODULES = [
     "src/kiro_crew/mcp_tools/control.py",
     "src/kiro_crew/mcp_tools/spawn.py",
     "src/kiro_crew/vector_memory.py",
+    # The owners bound into the vector memory store beside its facade.
+    "src/kiro_crew/vector_memory_inventory.py",
+    "src/kiro_crew/vector_memory_lifecycle.py",
+    "src/kiro_crew/vector_memory_member.py",
+    "src/kiro_crew/vector_memory_semantic_write.py",
     "src/kiro_crew/knowledge/agent_fetch.py",
     "src/kiro_crew/slack/gateway.py",
     "src/kiro_crew/telegram/renderer.py",
+    # The owners the Telegram renderer is composed from, beside its facade.
+    "src/kiro_crew/telegram/renderer_approval.py",
+    "src/kiro_crew/telegram/renderer_display.py",
+    "src/kiro_crew/telegram/renderer_live.py",
+    "src/kiro_crew/telegram/renderer_status.py",
+    "src/kiro_crew/telegram/renderer_tables.py",
+    "src/kiro_crew/telegram/renderer_uploads.py",
     "src/kiro_crew/subagent_manager/continuation.py",
     *(rel for package in _SCANNED_PACKAGES for rel in _package_modules(package)),
 ]

@@ -16,6 +16,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { readMembersPage } from './membersPageFamily'
+import { readIndexCss } from './indexCssSource'
 
 const read = (...p: string[]) => readFileSync(join(__dirname, '..', ...p), 'utf8')
 
@@ -38,11 +39,11 @@ function sidebarOwnerSources(): string[] {
 const surface = (file: string[]) =>
   file.join('/') === 'pages/ChatSidebar.tsx' ? [read(...file), ...sidebarOwnerSources()].join('\n')
     : file[1] === 'members' ? readMembersPage() : read(...file)
-const css = read('index.css')
+const css = readIndexCss()
 
 /** hook class -> the source that must render it, and the regex proving it does */
 const HOOKS: Record<string, { file: string[]; carries: RegExp }> = {
-  'focus-chrome-rail': { file: ['App.tsx'], carries: /className="focus-chrome-rail / },
+  'focus-chrome-rail': { file: ['shell', 'nav', 'navRail.tsx'], carries: /className="focus-chrome-rail / },
   // Carried by the shared list-shell recipe, which both the sessions sidebar and
   // the members roster mount (pinned below) — one string, two cards.
   'sidebar-inner': { file: ['components', 'listShell.ts'], carries: /export const LIST_SHELL_CLS = 'sidebar sidebar-inner / },

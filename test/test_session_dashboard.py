@@ -264,7 +264,12 @@ async def test_a_root_session_writes_its_own_page():
         assert staged.status == 200, await staged.text()
         link = (await staged.json())["preview"]["preview_url"]
         assert link == f"/api/chat/slots/{ROOT}/dashboard?preview=1"
-        applied = await client.post("/api/agent-panel/dashboard/apply", headers=_as(ROOT))
+        # Applied by its id: no staged step sits between a page and the tab.
+        applied = await client.post(
+            "/api/agent-panel/dashboard/apply",
+            json={"template_id": "fixture-board"},
+            headers=_as(ROOT),
+        )
         assert applied.status == 200, await applied.text()
         # Landed on the caller's own store key, and the side panel's read sees it.
         assert instance.read(instance.session_instance_key(ROOT)).template_id == "fixture-board"
@@ -390,7 +395,7 @@ def test_project_report_words_its_heading_for_a_session():
     page = real.read_text("utf-8")
     assert 'id="pr-eyebrow"' in page
     assert "'What this session is doing'" in page
-    assert "'What this crewmate is doing'" in page
+    assert "'What this mate is doing'" in page
     assert ".subject === 'session'" in page
 
 

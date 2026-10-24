@@ -19,6 +19,8 @@ import {
   isolateFrameTarget, isolatePreviewHost, normalizeUrl,
 } from './webPreviewPanelUrl'
 import { useWebPreviewPanelAnnotate } from './useWebPreviewPanelAnnotate'
+import { useFrameNavigationBlock } from './useFrameNavigationBlock'
+import { useRelayCookieRefusal } from './useRelayCookieRefusal'
 import WebPreviewPanelNativeSurface from './WebPreviewPanelNativeSurface'
 
 import { i18nT } from '../i18n/t'
@@ -721,6 +723,13 @@ export default function WebPreviewPanel({ sessionKey, active = true }: { session
     !!viewUrl && !viewIsRelay && viewRunning && showBrowserView && active,
     viewProbeKey,
   )
+  // The relay path's own failure: a cookie-checking front door refuses the
+  // opaque-origin frame's asset fetches, so the view never boots (#23180).
+  const viewCookieRefused = useRelayCookieRefusal(
+    viewUrl || '',
+    viewIsRelay && viewRunning && showBrowserView && active,
+    viewProbeKey,
+  )
 
   /**
    * True exactly when the body renders the preview iframe — the one state in
@@ -740,6 +749,21 @@ export default function WebPreviewPanel({ sessionKey, active = true }: { session
    * replaces the frame with the launcher card, so the hint must not show.
    */
   const framing = !!url && !launch && !pending && !embedRefusal && !selfOrigin && !unreachable
+
+  // A navigation inside the frame that the dashboard's own `frame-src` refused
+  // (an OAuth redirect to a sign-in page, most often). The frame is left blank
+  // and the app's button spins, so a notice above it names the refused origin
+  // and the way out. Cleared by a new URL, a reload or its dismiss.
+  const frameRef = useRef<HTMLIFrameElement>(null)
+  // `framing` is in the reset key because a frame that left the screen (an
+  // unreachable server, the launcher card) remounts on a fresh load; `active`
+  // is not, because a tab switch keeps the same blank frame mounted.
+  const frameOrigin = useMemo(() => {
+    try { return url ? new URL(url).origin : '' } catch { return '' }
+  }, [url])
+  const [frameBlocked, dismissFrameBlocked] = useFrameNavigationBlock(
+    framing && active, frameRef, `${reloadKey}:${url}:${framing}`, frameOrigin,
+  )
 
   const iconBtn = 'flex items-center justify-center w-7 h-7 rounded-md text-muted hover:text-text '
     + 'hover:bg-bg-hover transition-colors bg-transparent border-none cursor-pointer shrink-0 '
@@ -764,8 +788,8 @@ export default function WebPreviewPanel({ sessionKey, active = true }: { session
             it does not — a green dot beside an "unreachable" card contradicted it. */}
         {viewRunning && (
           <span
-            className={`inline-block w-1.5 h-1.5 rounded-full ${viewUnreachable ? '' : 'animate-pulse'}`}
-            style={{ backgroundColor: viewUnreachable ? 'var(--danger)' : 'var(--ok)' }}
+            className={`inline-block w-1.5 h-1.5 rounded-full ${viewUnreachable || viewCookieRefused ? '' : 'animate-pulse'}`}
+            style={{ backgroundColor: viewUnreachable || viewCookieRefused ? 'var(--danger)' : 'var(--ok)' }}
             data-testid="web-preview-view-dot"
             aria-hidden
           />
@@ -839,6 +863,7 @@ export default function WebPreviewPanel({ sessionKey, active = true }: { session
         && launchedAttached !== false
         && viewRunning
         && !viewUnreachable
+        && !viewCookieRefused
         && !padlockHintDismissed && (
         <div
           className="flex items-center gap-2 px-3 py-1 border-b border-border shrink-0 text-[11px] text-muted leading-snug"
@@ -893,6 +918,27 @@ export default function WebPreviewPanel({ sessionKey, active = true }: { session
             {/* The pin lives in config.json; the chip links to the setting where
                 the UI edits it, or shows the CLI command where it does not. */}
             <SettingRef configKey="dashboard.browser_view_port" />
+            <button
+              type="button"
+              onClick={() => setViewProbeKey(k => k + 1)}
+              className="inline-flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-md border border-border text-text hover:bg-bg-hover transition-colors cursor-pointer bg-transparent"
+            >
+              <RotateCw size={13} /> {i18nT('components.webPreviewPanel.try_again')}
+            </button>
+          </div>
+        ) : viewRunning && viewCookieRefused ? (
+          // Something in front of the dashboard wants a cookie the sandboxed
+          // frame cannot send, so the frame would stay blank: say so, and name
+          // the way that works (a direct forward with no such front door).
+          <div className="flex flex-col items-center justify-center h-full gap-3 px-6 text-center bg-bg">
+            <Monitor size={22} className="text-muted" />
+            <ErrorNotice
+              title={i18nT('components.webPreviewPanel.browser_view_can_t_load_its_files_here')}
+              message={i18nT('components.webPreviewPanel.a_sign_in_proxy_refuses_the_view_s_files')}
+              className="max-w-[420px] text-left"
+              testId="web-preview-view-cookie-refused"
+              askAgent
+            />
             <button
               type="button"
               onClick={() => setViewProbeKey(k => k + 1)}
@@ -1129,7 +1175,44 @@ export default function WebPreviewPanel({ sessionKey, active = true }: { session
           because a glyph carries a convention only to a reader who
           already knows it, while an unlabelled line of muted text above a frame
           reads as a warning that has not cleared. */}
-      {framing && (
+      {/* A navigation inside the frame the dashboard's own `frame-src` refused.
+          Said ABOVE the frame and never instead of it: the report cannot always
+          be tied to this frame (see useFrameNavigationBlock), so a wrong guess
+          must cost one dismissable line, never the previewed app's state.
+          Sign-in providers refuse framing by their own policy too, so the way
+          out is the app itself in a real tab, where sign-in runs top-level. */}
+      {framing && frameBlocked !== null && (
+        <div className="px-3 py-2 border-b border-border shrink-0" data-testid="web-preview-frame-blocked">
+          {/* No hand-off: the address bar above this notice holds an unsaved
+              draft URL, and the agent cannot lift a sign-in provider's own
+              refusal to be framed anyway. */}
+          <ErrorNotice
+            title={i18nT('components.webPreviewPanel.frame_navigation_blocked_title')}
+            message={i18nT('components.webPreviewPanel.frame_navigation_blocked_body')}
+            messagePlacement="below"
+            onDismiss={dismissFrameBlocked}
+            testId="web-preview-frame-blocked-notice"
+            footer={(
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-0.5 text-[12px]">
+                {frameBlocked && (
+                  <span className="min-w-0 break-all" data-testid="web-preview-frame-blocked-origin">
+                    {i18nT('components.webPreviewPanel.frame_navigation_blocked_origin', { origin: frameBlocked })}
+                  </span>
+                )}
+                <a
+                  href={url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 shrink-0 font-medium text-danger-text underline"
+                >
+                  <ExternalLink size={12} aria-hidden /> {i18nT('components.webPreviewPanel.open_in_browser')}
+                </a>
+              </div>
+            )}
+          />
+        </div>
+      )}
+      {framing && frameBlocked === null && (
         <div
           className="flex items-center gap-2 px-3 py-1 border-b border-border shrink-0 text-[11px] text-muted leading-snug"
           data-testid="web-preview-frame-hint"
@@ -1361,6 +1444,7 @@ export default function WebPreviewPanel({ sessionKey, active = true }: { session
           // Fixed device size — center the frame in a scrollable, muted backdrop.
           <div className="absolute inset-0 overflow-auto bg-bg-elevated flex items-start justify-center p-4">
             <iframe
+              ref={frameRef}
               key={reloadKey}
               src={frameSrc}
               title={i18nT('components.webPreviewPanel.web_preview')}
@@ -1371,6 +1455,7 @@ export default function WebPreviewPanel({ sessionKey, active = true }: { session
           </div>
         ) : (
           <iframe
+            ref={frameRef}
             key={reloadKey}
             src={frameSrc}
             title={i18nT('components.webPreviewPanel.web_preview')}

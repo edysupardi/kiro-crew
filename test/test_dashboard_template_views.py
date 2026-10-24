@@ -353,7 +353,7 @@ def test_an_empty_board_and_an_undrawable_one_say_different_things(
     """Both end in no bars and they are not the same fact: one means there is no crew,
     the other means the crew's work carries no usable stamps."""
     _, page = pages["timeline"]
-    assert "No board has reached this crewmate" in page
+    assert "No board has reached this mate" in page
     assert "No task carries a start stamp" in page
 
 
@@ -946,7 +946,7 @@ def test_a_re_render_gives_focus_back_to_the_rebuilt_fold_button(
         0 <= source.find("document.activeElement") < clear
     ), "render does not read which fold button has focus before clearing the graph"
     assert "foldButtons = {}" in source, "render keeps the previous render's buttons"
-    draw = source.index("drawNode(g.roots[i], graph, now)")
+    draw = source.index("drawNode(roots[i], graph, now)")
     assert (
         source.find("foldButtons[focusKey].focus(") > draw
     ), "render does not focus the rebuilt button after drawing the graph"

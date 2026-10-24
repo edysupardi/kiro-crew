@@ -7,6 +7,7 @@ import type { PasteBlock } from '../../utils/pasteTokens'
 import type { FileKind } from '../FilePickerMenu'
 import type { PromptHistoryItem } from '../composerPromptHistory'
 import type { ApprovalModeRemote } from '../ApprovalModePicker'
+import type { MemorySource } from '../../lib/agentMemorySource'
 
 /* The composer's public prop contract. `components/ChatInput.tsx` takes it
    and re-exports `ComposerBusyMode`; the owners under this directory take the
@@ -167,6 +168,11 @@ export interface ChatInputProps {
    * marker alone reads as opaque (#8770 UX review). Only the inherited case
    * gets it; a pinned chip has nothing to explain. */
   agentIsInheritedDefault?: boolean
+  /**
+   * The memory the session's agent runs on, set only when a crewmate and a
+   * custom agent share its name (`sessionMemoryTag`, #19472). The chip then
+   * marks its label and spoken name with it. Null or unset: no mark. */
+  agentMemory?: MemorySource | null
   agentSource?: string
   modelName?: string
   /**
@@ -326,10 +332,10 @@ export interface ChatInputProps {
    *  Absent: mentions delete one character at a time, as before.
    *  KEYBOARD BACKSPACE/DELETE ONLY: it runs on the keydown, so a mention
    *  erased through the value-change seam — cut, typing over a selection, or
-   *  pasting over one — is NOT caught here (tracked in the #14675 follow-up).
+   *  pasting over one — is NOT caught here (handled by `mentionEditRange`).
    *  TEXTAREA ONLY: the plain-textarea composer passes the key here; the
    *  Lexical composer (`inlineMarkdown` on) edits a node model and does not
-   *  call this (also tracked in the #14675 follow-up). */
+   *  call this (tracked in #18186). */
   onMentionKey?: (text: string, selStart: number, selEnd: number, key: string, mods: MentionKeyMods) => { value: string; caret: number } | null
   /** The host's file-mention guard for "Optimize prompt", taken with the
    *  draft when the optimize starts. The check it returns says whether a
@@ -338,6 +344,25 @@ export interface ChatInputProps {
    *  file mention is protected. Folder mentions need no host guard: their
    *  chips derive from the text, so the optimizer checks them itself. */
   optimizerMentionGuard?: (draft: string) => (rewrite: string) => boolean
+  /** The value-change companion to `onMentionKey` (#18263), structural. A cut,
+   *  type-over, paste-over or drop erases part of a staged `@mention` through
+   *  the textarea's value-change seam, not a keydown. Given the pre-edit text
+   *  and the selection [s, e) the browser is about to replace, this returns
+   *  that range EXPANDED to cover the whole of every staged mention it cuts
+   *  into, or null when it touches none. The composer then replaces the
+   *  expanded range with the edit's own inserted data via the controlled value,
+   *  so a half-reference is never produced and no after-the-fact text diff is
+   *  needed. Read at two seams: the native `beforeinput` listener (for the
+   *  browser's own edits), and the JS clipboard interceptors (`usePasteTokens`),
+   *  whose paste collapse/trailing-blank branches and the `handleCut` branch
+   *  `preventDefault` and splice the value themselves so no `insertFromPaste` /
+   *  `deleteByCut` `beforeinput` fires. The
+   *  `beforeinput` seam also owns SELECTION-deletes (and the keydown-miss
+   *  collapsed delete the gated `onMentionKey` path lets through), so a delete
+   *  that reaches it still removes the whole mention rather than a fragment.
+   *  TEXTAREA ONLY, like `onMentionKey`; the Lexical composer is tracked in
+   *  #18186. */
+  mentionEditRange?: (text: string, selStart: number, selEnd: number) => { start: number; end: number } | null
   onFileOpen?: (path: string) => void
   project?: string
   /** The session runs on another machine (the crew window). `project` is
@@ -371,7 +396,7 @@ export interface ChatInputProps {
    *  Composer preference; pass it only to override that (e.g. mobile). */
   sendOnEnter?: SendMode
   /** Follow-up options from assistant message */
-  followUpOptions?: string[]
+  followUpOptions?: readonly string[]
   /** Options the user has picked (visual highlight in FollowUpBar) */
   followUpPicked?: Set<string>
   /** Select a follow-up option — handler toggles text in input (see ChatPage wiring).

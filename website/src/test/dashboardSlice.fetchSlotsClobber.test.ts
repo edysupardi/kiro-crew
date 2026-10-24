@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import reducer, {
   sseSlots,
+  sseSlotsPartial,
   sseConnected,
+  markSlotUnread,
   sseSlotTitle,
   sseSlotColor,
   sseTodoUpdate,
@@ -14,6 +16,8 @@ import reducer, {
   patchSlotSourceLinks,
   fetchSlots,
   addSlotOptimistic,
+  sseSlotListHolds,
+  selectUnreadByMode,
 } from '../store/dashboardSlice'
 import type { ChatSlot } from '../types'
 
@@ -339,20 +343,21 @@ describe('a fetchSlots reply cannot drop a slot whose creation raced it', () => 
     expect(stampOfMember(created, 'b')).toBeGreaterThan(0)
   })
 
-  it('does not re-add a slot an authoritative live frame removed', () => {
+  it('does not re-add a slot a list read newer than the create removed', () => {
     // Only a reply that OUTRAN the create resurrects it. A live `slots` frame
-    // dispatched after the create is authoritative on membership: if it drops
-    // the key, the key is gone, and its stamp is pruned so no later reply
-    // revives it.
+    // that omits the key may itself predate the create, so it keeps the row
+    // and asks for a read (see dashboardSlice.staleSlotsFrame.test.ts). That
+    // read leaves after the create: if it drops the key, the key is gone, and
+    // its stamp is pruned so the older reply still in flight cannot revive it.
     const inFlight = reducer(loaded(mk('a')), started('r1'))
     const created = reducer(inFlight, createdSlot(mk('b')))
     const live = reducer(created, sseSlots(wire(mk('a'))))
-    expect(rowOf(live, 'b')).toBeUndefined()
-    expect(stampOfMember(live, 'b')).toBeUndefined()
-    // A later reply that also omits `b` leaves it gone — the create no longer
-    // outranks anything.
+    expect(rowOf(live, 'b')).toBeDefined()
     const settled = reducer(reducer(live, started('r2')), reply([mk('a')], 'r2'))
     expect(rowOf(settled, 'b')).toBeUndefined()
+    expect(stampOfMember(settled, 'b')).toBeUndefined()
+    const late = reducer(settled, reply([mk('a')], 'r1'))
+    expect(rowOf(late, 'b')).toBeUndefined()
   })
 
   it('lets a reply dispatched after the create omit it authoritatively', () => {
@@ -478,5 +483,114 @@ describe('a fetchSlots reply cannot drop a slot whose creation raced it', () => 
     const renamed = reducer(added, sseSlotTitle({ key: 'a', title: 'renamed' }))
     const settled = reducer(renamed, reply([mk('a', { title: 'old' }), mk('b')], 'r1'))
     expect(rowOf(settled, 'a')?.title).toBe('renamed')
+  })
+})
+
+describe('fetchSlots unread hold supersession', () => {
+  const reconnectWithUnread = () => {
+    localStorage.clear()
+    let state = reducer(loaded(mk('a'), mk('b')), sseSlotsPartial(false))
+    state = reducer(state, markSlotUnread({ slot: 'a', ts: '2026-01-01T00:00:00Z' }))
+    return reducer(state, sseConnected())
+  }
+
+  it('keeps the held GET from draining when no complete frame arrived', () => {
+    let state = reducer(reconnectWithUnread(), started('held'))
+
+    state = reducer(state, reply([mk('b')], 'held'))
+
+    expect(state.unreadSlots).toEqual(['a'])
+    expect(state.unreadSince.a).toBe('2026-01-01T00:00:00Z')
+    expect(JSON.parse(localStorage.getItem('mc-unread-shared') ?? '{}')).toHaveProperty('a')
+  })
+
+  it('drains a deleted session once a complete empty frame has arrived since dispatch', () => {
+    // A reconnect to a gateway that has no sessions left: the connect-time GET
+    // was dispatched under the connect hold, the complete `[]` frame cannot apply
+    // itself before the first snapshot (`sseSlots` returns early), and the HTTP
+    // reply carries no label. The reply is the only drain left, and the frame
+    // it defers to lists nothing, so the deleted session's dot goes.
+    let state = reducer(reconnectWithUnread(), started('empty'))
+    state = reducer(state, sseSlotsPartial(false))
+    state = reducer(state, sseSlots([]))
+    expect(state.unreadSlots).toEqual(['a'])
+
+    state = reducer(state, reply([], 'empty'))
+
+    expect(state.unreadSlots).toEqual([])
+    expect(state.unreadSince.a).toBeUndefined()
+    expect(JSON.parse(localStorage.getItem('mc-unread-shared') ?? '{}')).not.toHaveProperty('a')
+    expect(selectUnreadByMode('')({ dashboard: state } as unknown as Parameters<ReturnType<typeof selectUnreadByMode>>[0])).toBe(0)
+    expect(state.slotFetchWriteMark.empty).toBeUndefined()
+  })
+
+  it('keeps the hold when only a partial frame arrived since dispatch', () => {
+    let state = reducer(reconnectWithUnread(), started('still-partial'))
+    state = reducer(state, sseSlotsPartial(true))
+    state = reducer(state, sseSlots([mk('b')]))
+
+    state = reducer(state, reply([mk('b')], 'still-partial'))
+
+    expect(state.unreadSlots).toEqual(['a'])
+    expect(state.unreadSince.a).toBe('2026-01-01T00:00:00Z')
+    expect(JSON.parse(localStorage.getItem('mc-unread-shared') ?? '{}')).toHaveProperty('a')
+  })
+
+  it('keeps a session the complete frame lists when an older reply omits it', () => {
+    // The reply was serialized while the gateway was still rebuilding, then
+    // delivered after the complete frame that restored the session.
+    let state = reducer(reconnectWithUnread(), started('stale'))
+    state = reducer(state, sseSlotsPartial(false))
+    state = reducer(state, sseSlots([mk('a'), mk('b')]))
+
+    state = reducer(state, reply([mk('b')], 'stale'))
+
+    expect(state.unreadSlots).toEqual(['a'])
+    expect(state.unreadSince.a).toBe('2026-01-01T00:00:00Z')
+  })
+
+  it('keeps a session a later complete frame lists when a GET dispatched while complete omits it', () => {
+    // The request-time hold is already released, so only the union with the
+    // newer complete frame keeps A.
+    let state = reducer(reconnectWithUnread(), sseSlotsPartial(false))
+    state = reducer(state, sseSlots([mk('a'), mk('b')]))
+    state = reducer(state, started('union'))
+    state = reducer(state, sseSlots([mk('a'), mk('b'), mk('c')]))
+
+    state = reducer(state, reply([mk('b')], 'union'))
+
+    expect(state.unreadSlots).toEqual(['a'])
+    expect(state.unreadSince.a).toBe('2026-01-01T00:00:00Z')
+  })
+
+  it('keeps request-time held keys after a live frame releases the hold', () => {
+    let state = reducer(reconnectWithUnread(), sseSlotsPartial(false))
+    state = reducer(state, sseSlotListHolds({ heldKeys: ['a'], holdChannels: false }))
+    state = reducer(state, started('held-key'))
+
+    // The live frame restores A and releases its hold before the older GET lands.
+    state = reducer(state, sseSlotListHolds({ heldKeys: [], holdChannels: false }))
+    state = reducer(state, sseSlots([mk('a'), mk('b')]))
+    state = reducer(state, reply([mk('b')], 'held-key'))
+
+    expect(state.unreadSlots).toEqual(['a'])
+    expect(state.unreadSince.a).toBe('2026-01-01T00:00:00Z')
+    expect(JSON.parse(localStorage.getItem('mc-unread-shared') ?? '{}')).toHaveProperty('a')
+  })
+
+  it('keeps request-time channel holds after a live frame releases the hold', () => {
+    const channel = mk('slack_1.1')
+    let state = reducer(loaded(channel, mk('b')), sseSlotsPartial(false))
+    state = reducer(state, markSlotUnread({ slot: channel.key, ts: '2026-01-01T00:00:00Z' }))
+    state = reducer(state, sseSlotListHolds({ heldKeys: [], holdChannels: true }))
+    state = reducer(state, started('held-channel'))
+
+    state = reducer(state, sseSlotListHolds({ heldKeys: [], holdChannels: false }))
+    state = reducer(state, sseSlots([channel, mk('b')]))
+    state = reducer(state, reply([mk('b')], 'held-channel'))
+
+    expect(state.unreadSlots).toEqual([channel.key])
+    expect(state.unreadSince[channel.key]).toBe('2026-01-01T00:00:00Z')
+    expect(JSON.parse(localStorage.getItem('mc-unread-shared') ?? '{}')).toHaveProperty(channel.key)
   })
 })

@@ -28,11 +28,16 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from kiro_crew import platform_compat
 from kiro_crew.cloud import aws
-from kiro_crew.deploy.engine import aws_spawn_env, resolve_aws_bin, resolve_aws_tool_bin
+from kiro_crew.deploy.engine import (
+    aws_spawn_env,
+    resolve_aws_bin,
+    resolve_aws_tool_bin,
+    resolve_aws_tool_bin_with_refusals,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +239,178 @@ def session_manager_plugin_installed() -> bool:
     uses, so probe and spawn agree.
     """
     return shutil.which(resolve_aws_tool_bin(_SESSION_MANAGER_PLUGIN)) is not None
+
+
+@dataclass(frozen=True)
+class PluginRefusal:
+    """A Session Manager plugin (or ``aws`` CLI) that is installed but failed the provenance check.
+
+    ``path`` is the candidate the resolver found and ``reason`` the check's own
+    words. ``remedy_command`` is a copy-pasteable fix when one is known for this
+    install, else "".
+
+    ``code`` names the kind of refusal so a caller can say it in its own words
+    (see :data:`_REFUSAL_CODES`), "" for a reason no code covers. For an
+    ``other_owner`` refusal, ``owner_uid`` is the owning account's uid and
+    ``owner`` its login name on this host, "" when it has none.
+    """
+
+    path: str
+    reason: str
+    remedy_command: str
+    code: str = ""
+    owner: str = ""
+    owner_uid: Optional[int] = None
+
+
+def session_manager_plugin_refusal() -> Optional[PluginRefusal]:
+    """Why an installed plugin is not used, or None when there is nothing to explain.
+
+    None when the resolver accepted a plugin, and None when it found none at all
+    (the "not installed" case, whose remedy is the install command). Otherwise the
+    first refused candidate with a known fix, else the first refused candidate:
+    reporting that as "not installed" would send the user
+    to an install command that reinstalls the same refused file.
+
+    Reads the same walk :func:`session_manager_plugin_installed` performs and
+    changes nothing about what is accepted.
+    """
+    return _tool_refusal(_SESSION_MANAGER_PLUGIN, _plugin_ownership_remedy)
+
+
+def aws_cli_refusal() -> Optional[PluginRefusal]:
+    """Why an installed ``aws`` CLI is not used, or None when there is nothing to explain.
+
+    The same reading as :func:`session_manager_plugin_refusal`, for the CLI, so a
+    found but refused ``aws`` is not reported as missing with an install link that
+    puts the same refused file back. ``remedy_command`` is always "": the ownership
+    command is known to clear a refusal only inside AWS's plugin install tree.
+    """
+    return _tool_refusal("aws", lambda _candidate, _reason: "")
+
+
+def _tool_refusal(name: str, remedy_for: Callable[[str, str], str]) -> Optional[PluginRefusal]:
+    """The candidate for *name* to report, or None (accepted or absent): the first
+    refused one *remedy_for* has a fix for, else the first refused one."""
+    resolved, refusals = resolve_aws_tool_bin_with_refusals(name)
+    if os.path.isabs(resolved) or not refusals:
+        return None
+    # Prefer a candidate with a known fix: with a refused copy in an earlier
+    # install dir (a second account's Homebrew), reporting that one would hide
+    # the command that clears the copy AWS's installer put in a later dir.
+    remedies = [(r, remedy_for(r.path, r.reason)) for r in refusals]
+    first, remedy = next(((r, m) for r, m in remedies if m), remedies[0])
+    code, owner_uid = _classify_refusal(first.reason)
+    # With a remedy, name the resolved file: the candidate is often a link from a
+    # bin directory, and the command targets the folder the real file sits in.
+    return PluginRefusal(
+        path=os.path.realpath(first.path) if remedy else first.path,
+        reason=first.reason,
+        remedy_command=remedy,
+        code=code,
+        owner=_account_name(owner_uid) if owner_uid is not None else "",
+        owner_uid=owner_uid,
+    )
+
+
+#: The provenance check's POSIX refusals, each matched against its whole wording
+#: and named by a stable code the dashboard renders in the reader's language.
+#: ``other_owner``: a component belongs to an account that is neither root nor
+#: the gateway user. ``world_writable``: any account can change a component.
+#: ``root_gateway``: the gateway runs as root, which runs no provider program.
+#: ``strict_policy``: the strict policy's own refusals (not root-owned, writable
+#: by the gateway user, reached through a link). Any other reason, Windows ACL
+#: refusals included, has no code and is shown as written.
+_REFUSAL_CODES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "other_owner",
+        re.compile(
+            r"\A(?:executable|executable parent) is owned by another user \(uid (?P<uid>\d+)\)\Z"
+        ),
+    ),
+    ("world_writable", re.compile(r"\A(?:executable|executable parent) is world-writable\Z")),
+    ("root_gateway", re.compile(r"\Aprovider execution is disabled for a root gateway\Z")),
+    (
+        "strict_policy",
+        re.compile(
+            r"\A(?:(?:executable|executable parent) is (?:not root-owned|writable by the gateway user)"
+            r"|path must be canonical and contain no symlinks)\Z"
+        ),
+    ),
+)
+
+
+def _classify_refusal(reason: str) -> tuple[str, Optional[int]]:
+    """``(code, owner uid)`` for a provenance-check *reason*; ``("", None)`` when no
+    code covers it. The uid is set only for ``other_owner``."""
+    for code, pattern in _REFUSAL_CODES:
+        match = pattern.match(reason)
+        if match is not None:
+            uid = match.groupdict().get("uid")
+            return code, int(uid) if uid is not None else None
+    return "", None
+
+
+def _account_name(uid: int) -> str:
+    """The login name of *uid* on this host, or "" when it has none.
+
+    AWS's macOS package stamps its tree with the packager's uid, which usually
+    names no account here; the caller then shows the uid instead.
+    """
+    try:
+        import pwd
+    except ImportError:
+        return ""
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except (KeyError, OverflowError):
+        return ""
+
+
+#: Where AWS's own macOS and Linux packages install the plugin. The macOS ``.pkg``
+#: stamps this tree with the packager's uid rather than root, which the
+#: provenance check refuses as "owned by another user". Only meaningful on POSIX:
+#: :func:`_plugin_ownership_remedy` returns "" where there is no ``geteuid``.
+_AWS_PKG_PLUGIN_PREFIX = os.path.join(os.sep, "usr", "local", "sessionmanagerplugin")
+
+
+def _plugin_ownership_remedy(candidate: str, reason: str) -> str:
+    """``sudo chown -R root:<group> <prefix>`` when a third account owns AWS's install tree.
+
+    Offered only when *reason* is the provenance check's third-account ownership
+    refusal (code ``other_owner`` in :data:`_REFUSAL_CODES`, the only refusal a
+    root-owned tree clears: a root gateway, the strict policy and a world-writable
+    component are refused for reasons ``chown`` does not touch), the candidate
+    resolves inside :data:`_AWS_PKG_PLUGIN_PREFIX`, and some
+    directory or file on the way from that prefix to the binary is owned by an
+    account that is neither root nor the gateway user: exactly the state a stock
+    AWS ``.pkg`` install leaves, and one that making the tree root-owned clears.
+    Anything else returns "" and the caller shows only the reason, rather than a
+    command that would not fix it.
+    """
+    if _classify_refusal(reason)[0] != "other_owner":
+        return ""
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        return ""
+    try:
+        prefix = Path(os.path.realpath(_AWS_PKG_PLUGIN_PREFIX))
+        real = Path(os.path.realpath(candidate))
+    except OSError:
+        return ""
+    if prefix not in real.parents:
+        return ""
+    allowed = {0, geteuid()}
+    chain = [prefix, *[p for p in reversed(real.parents) if prefix in p.parents], real]
+    for component in chain:
+        try:
+            owner = component.stat().st_uid
+        except OSError:
+            return ""
+        if owner not in allowed:
+            group = "wheel" if platform.system() == "Darwin" else "root"
+            return f"sudo chown -R root:{group} {_AWS_PKG_PLUGIN_PREFIX}"
+    return ""
 
 
 def session_manager_plugin_install_hint() -> str:

@@ -123,12 +123,18 @@ retry the allowance exists for IS the debt's own fire.
 
 The judged baseline (`judge_pr_seen`) is committed only after the judge returns a
 verdict (`autonudge_service/gate.py` `_commit_judge_pr_seen`), so a turn spent without
-a verdict cannot move it. With no judge, a quiet tick delivers, except when the reading
-is whole and byte-identical to the previous one: no criterion about the subject can have
-become true while the subject did not change. PR bodies the judge compares are stashed in
-memory only, capped at `MAX_BODY_STASHES` (64) in `autonudge_judge.py`; a dropped stash
-makes the next reading partial, and a partial reading fires. Merged and closed map to a
-terminal outcome in the auto-nudge core, not in the fetcher.
+a verdict cannot move it. A reading that is whole and byte-identical to the previous one
+means no criterion about the subject can have become true while the subject did not
+change. With no judge, that tick is quiet and every other quiet tick delivers. With a
+judge, the same tick asks no judge when every target the judge would read is the watched
+pull request and no judge wake or terminal turn is owed (`gate.py`
+`_unchanged_reading_skips_judge`), so a judge that cannot answer (a timeout is a
+fallback, and a fallback fires) does not spend a turn on an unchanged board. The quiet
+floor still delivers, and a `decisions.nudge_wake.quiet_streak_floor` set below it keeps
+every tick judged, so that shorter bound holds. PR bodies the judge compares are stashed
+in memory only, capped at `MAX_BODY_STASHES` (64) in `autonudge_judge.py`; a dropped
+stash makes the next reading partial, and a partial reading fires. Merged and closed map
+to a terminal outcome in the auto-nudge core, not in the fetcher.
 
 A partial reading is never screened quiet on the half that arrived, but a REPEAT of one
 does not buy a turn every interval either. `MonitorState.short_reading_digest` holds the
@@ -286,7 +292,7 @@ retained `USER_STOP` record, a manual pause, an empty reason) refuses the arm; a
 row that is active, or that its own cycle cap, runtime budget, terminal subject,
 stop file or dropped sentinel deactivated, admits it, and the create-only and
 `replace_stopped` rules then decide as for any other arm. The self-arm tests in
-`test_autonudge_member_self_arm.py` and `test_monitor_directive_apply.py` pin
+`test_autonudge_member_self_arm.py` and `test_monitor_directive_apply_wake_authority.py` pin
 the four answers. When the wake carries a loop id, its `monitor_update`,
 `monitor_stop`, and `autonudge_stop` directives apply only while that id is the
 monitor currently bound to the session; a replacement monitor is never mutated
@@ -445,13 +451,17 @@ above, so script-cron `Skip`/`Report`/`Done` delivery is not this watch's path.
 
 ## Non-goals
 
-The structured GitHub monitor digests PR-level comment bodies to detect that
-one changed, so an in-place edit whose `created_at` never moves still wakes the
-owner. It never interprets what a comment says or decides whether an advisory
-finding is valid, and it deliberately does not read inline review-thread bodies
-at all -- it reports only the count of unresolved, non-outdated threads there. It
-reports typed provider facts and leaves judgment, source inspection, and any
-reply to the reactivated babysit session.
+The structured monitor digests comment bodies to detect that one changed, so an
+in-place edit whose `created_at` never moves still wakes the owner. GitHub
+digests its PR-level issue comments; Azure DevOps digests the comments nested
+inside its PR threads, skipping the `system`-type lifecycle narration it posts on
+its own; both reduce each body to a fixed-width fingerprint and fail closed to an
+empty digest (no wake) on an incomplete read. It never interprets what a comment
+says or decides whether an advisory finding is valid, and on GitHub it
+deliberately does not read inline review-thread bodies at all -- it reports only
+the count of unresolved, non-outdated threads there. It reports typed provider
+facts and leaves judgment, source inspection, and any reply to the reactivated
+babysit session.
 `monitor_start` remains appropriate when each delivered cycle requires the agent
 to make progress, the objective requires untyped evidence, or the watched subject
 is unsupported by a structured provider.

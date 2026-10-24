@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, MessageCircleQuestionMark, RotateCcw, CornerUpRight } from 'lucide-react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { api } from '../../api/client'
-import { sendTurn, type SendReceipt } from '../../chat-core/transport/sendTurn'
+import { sendTurn, SEND_ABORT_MS, type SendReceipt } from '../../chat-core/transport/sendTurn'
 import { sendFailureCopy, deliveryUnconfirmedCopy } from '../../chat-core/transport/receiptCopy'
 import { sideTurnWire } from './sideTurnWire'
 import { useAppSelector, useAppDispatch } from '../../store'
-import { sideClose, sideOptimisticAppend, sideOptimisticRollback, sseSideQueue, sideReleaseConsumed, sideSendStatus, queueEditBroadcastAt, stageToMainComposer, type SideStandingNotice } from '../../store/chatSlice'
+import { sideClose, sideOptimisticAppend, sideOptimisticRollback, restoreSideConversation, awaitSideRestore, sseSideQueue, sideReleaseConsumed, sideSendStatus, queueEditBroadcastAt, stageToMainComposer, transcriptTsMs, type SideStandingNotice } from '../../store/chatSlice'
 import QueueStack from '../../components/QueueStack'
 import ChatMessageList from '../../app-sdk/ChatMessageList'
 import FollowUpBar from '../../components/FollowUpBar'
@@ -92,7 +92,18 @@ function handBack(vars: SideSubmit): Pick<SendRecovery, 'text' | 'pastes'> {
  *  lazy-loading (the Lexical editor) before it gives up on placing the caret. */
 const SEED_FOCUS_WAIT_MS = 5000
 
-export default function SideChat({ slot }: { slot: string }) {
+export default function SideChat({ slot, onFileOpen, onArtifactOpen }: {
+  slot: string
+  /** Open a path named in a side reply as a Files tab of the panel this chat
+   *  sits in — the same opener the host hands the main transcript. Capability
+   *  by omission: absent, a path chip falls back to `MarkdownRenderer`'s own
+   *  OS reveal (a clipboard copy on a remote dashboard), a path link stays a
+   *  plain link. */
+  onFileOpen?: (path: string, opts?: { line?: number; endLine?: number }) => void
+  /** Open an artifact link as an artifact tab of the same panel; absent, the
+   *  link navigates away from the chat. */
+  onArtifactOpen?: (slug: string) => void
+}) {
   const connected = useConnected()
   const dispatch = useAppDispatch()
   // The footer describes what the backend enforces, so it asks the gateway the
@@ -109,6 +120,26 @@ export default function SideChat({ slot }: { slot: string }) {
   })
   const postureError = sideToolsQ.data?.config_unavailable === true
   const readOnlyToolsAvailable = sideToolsQ.data?.read_only_tools === true
+  // A page reload empties this panel, but the gateway keeps the side
+  // conversation, and the next question joins it. So the panel reads the
+  // gateway's copy once per page and merges it in (`restoreSideConversation`),
+  // and shows the conversation the model is in. Every send waits for that read
+  // (`sendMutation` below), so no question joins a conversation this panel has
+  // not drawn; while the read has failed, a send hands its text back.
+  const sideRestored = useAppSelector(s => s.chat.slotSideRestored?.[slot] === true)
+  const restoreQ = useQuery({
+    queryKey: ['sideRestore', slot],
+    queryFn: async () => {
+      await dispatch(restoreSideConversation(slot)).unwrap()
+      return true
+    },
+    enabled: !!slot && !sideRestored,
+    staleTime: 0,
+    gcTime: 0,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  })
+  const restoreFailed = restoreQ.isError && !sideRestored
   const reduxSide = useAppSelector(s => s.chat.slotSide[slot])
   const parentTurnCount = useAppSelector(s =>
     s.chat.messages.filter(m => m.role === 'user' || m.role === 'assistant').length
@@ -369,8 +400,22 @@ export default function SideChat({ slot }: { slot: string }) {
   // `sendTurn` never rejects; the mutation's error slot is kept for the truly
   // unexpected throw only.
   const sendMutation = useMutation({
-    mutationFn: ({ q, steer, slot: target }: SideSubmit): Promise<SendReceipt> =>
-      sendTurn({ message: q, slot: target, wire: sideTurnWire(target, steer) }),
+    // The restore read lands before the turn is asked, the way `/side` waits for
+    // it: a question sent ahead of it would join the gateway's conversation before
+    // this panel shows it. A read in flight is shared, so this usually waits
+    // milliseconds, and never longer than the send's own deadline. A read that
+    // fails or overruns sends nothing, and one that overruns stops being shared,
+    // so the next send asks the gateway again (`awaitSideRestore`). Its receipt is
+    // `refused`, the status for a send that definitely did not go out, so the text
+    // is handed back. Its `reason` says the conversation has not loaded, which is
+    // true in both cases: after a failed read, the restore notice and its Retry sit
+    // beside it; while the read is still in flight past the deadline, nothing else
+    // says why the text came back.
+    mutationFn: async ({ q, steer, slot: target }: SideSubmit): Promise<SendReceipt> => {
+      const restored = await dispatch(awaitSideRestore({ slot: target, ms: SEND_ABORT_MS })).unwrap()
+      if (restored !== 'restored') return { status: 'refused', body: {}, reason: i18nT('pages.chat.sideChat.send_blocked_not_loaded') }
+      return sendTurn({ message: q, slot: target, wire: sideTurnWire(target, steer) })
+    },
     onMutate: ({ q, optimistic, slot: target, override }: SideSubmit) => {
       setLocalError(null)
       setLocalNotice(null)
@@ -503,10 +548,10 @@ export default function SideChat({ slot }: { slot: string }) {
         }
       }
       // The client guessed idle (`optimistic: !isBusy`) but the SERVER is
-      // authoritative and says it queued this. They disagree after a reload, before
-      // the first frame restores `streaming`. Retract the bubble: while queued, the
-      // question belongs to its queue card, and claiming a transcript row would say
-      // it had already been asked.
+      // authoritative and says it queued this. They disagree after a reload, while
+      // a restored turn's deltas wait for its final frame. Retract the bubble:
+      // while queued, the question belongs to its queue card, and claiming a
+      // transcript row would say it had already been asked.
       if (res.queued && vars.optimistic) dispatch(sideOptimisticRollback(vars.slot))
       if (res.queued && res.queue_id && stillQueued) {
         dispatch(sseSideQueue({ slot: vars.slot, action: 'push', queue_id: res.queue_id, content: vars.q, raw: true }))
@@ -819,7 +864,14 @@ export default function SideChat({ slot }: { slot: string }) {
     ? (sendErr instanceof Error ? sendErr.message : String(sendErr))
     : (sendStatus?.error ?? localError)
 
-  const turnsBehind = reduxSide ? parentTurnCount - reduxSide.openedAtTurnCount : 0
+  // A restored conversation opened before this page loaded, so its banner counts
+  // the parent turns newer than its start, read when the panel renders: the parent
+  // transcript can arrive after the restore.
+  const openedAtMs = reduxSide?.countsTurnsSinceCreated ? transcriptTsMs(reduxSide.createdAt) : null
+  const turnsSinceOpened = useAppSelector(s => openedAtMs === null ? null : s.chat.messages.filter(m =>
+    (m.role === 'user' || m.role === 'assistant') && (transcriptTsMs(m.ts) ?? -Infinity) > openedAtMs
+  ).length)
+  const turnsBehind = reduxSide ? (turnsSinceOpened ?? parentTurnCount - reduxSide.openedAtTurnCount) : 0
   const age = reduxSide?.createdAt ? relativeTime(reduxSide.createdAt) : null
   const showBanner = !!reduxSide && messages.length > 0
   const isStale = turnsBehind >= 10 || (reduxSide?.createdAt && Date.now() - new Date(reduxSide.createdAt).getTime() >= 4 * 3600_000)
@@ -873,6 +925,10 @@ export default function SideChat({ slot }: { slot: string }) {
       <ChatMessageList
         messages={transcript}
         running={isBusy}
+        // The host's own openers, so a path or artifact named in a side reply
+        // opens where the main transcript opens it: a tab of this panel.
+        onFileOpen={onFileOpen}
+        onArtifactOpen={onArtifactOpen}
         transcript={{
           sessionId: `side:${slot}`,
           scrollerStyle: { paddingLeft: 12, paddingRight: 12, paddingTop: 8, paddingBottom: 8 },
@@ -897,6 +953,27 @@ export default function SideChat({ slot }: { slot: string }) {
           ) : undefined,
         }}
       />
+      {restoreFailed && (
+        <div className="px-3 py-1 border-t border-border">
+          {/* No hand-off: the unsent side-question draft in this panel's
+              composer is unsaved local state, and a navigation would discard it.
+              Retry is the recovery; until it lands, a send hands its text back. */}
+          <ErrorNotice
+            message={i18nT('pages.chat.sideChat.restore_failed')}
+            testId="side-chat-restore-failed"
+            footer={
+              <button
+                type="button"
+                onClick={() => { void restoreQ.refetch() }}
+                disabled={restoreQ.isFetching}
+                className="text-[12px] font-medium text-accent hover:text-accent-hover bg-transparent border-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed px-0"
+              >
+                {i18nT('pages.chat.sideChat.restore_retry')}
+              </button>
+            }
+          />
+        </div>
+      )}
       {displayError && (
         <div className="px-3 py-1 border-t border-border">
           {/* No hand-off: the side-chat composer draft (the failed question is
@@ -1018,13 +1095,14 @@ export default function SideChat({ slot }: { slot: string }) {
             />
           ) : sideToolsQ.isSuccess ? (
             <div role="note" className="px-1 pt-1.5 text-[11px] leading-4 text-muted">
-              {i18nT(
-                readOnlyToolsAvailable
-                  ? 'pages.chat.sideChat.context_only_tools_unavailable'
-                  : sideToolsQ.data?.claude_adapter_outdated === true
-                    ? 'pages.chat.sideChat.context_only_claude_adapter_outdated'
-                    : 'pages.chat.sideChat.context_only_tools_unavailable_backend',
-              )}
+              {readOnlyToolsAvailable
+                ? i18nT('pages.chat.sideChat.context_only_tools_unavailable')
+                : sideToolsQ.data?.claude_adapter_outdated === true
+                  ? i18nT('pages.chat.sideChat.context_only_claude_adapter_outdated', {
+                      version: sideToolsQ.data.claude_adapter_min_version,
+                      command: sideToolsQ.data.claude_adapter_update_command,
+                    })
+                  : i18nT('pages.chat.sideChat.context_only_tools_unavailable_backend')}
             </div>
           ) : null}
         </SlotProvider>

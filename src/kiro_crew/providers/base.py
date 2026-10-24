@@ -97,6 +97,15 @@ class SessionMcpReport(Protocol):
         self, kind: str, server_name: str, error: str = "", *, fanout_no_owner: bool = False
     ) -> bool: ...
 
+    #: The agent spec's enabled servers this session cannot use: failed,
+    #: awaiting authorization, or never reported. Decides an unattended run's
+    #: outcome.
+    def declared_not_ready(self) -> tuple[str, ...]: ...
+
+    #: The declared servers that never reported, which ``problem_summary`` does
+    #: not name. An unattended run's notice names them.
+    def declared_never_reported(self) -> tuple[str, ...]: ...
+
 
 class LLMProvider(ABC):
     """Abstract LLM backend."""
@@ -412,7 +421,8 @@ class LLMProvider(ABC):
 
     @property
     def member_capabilities_supported(self) -> bool:
-        """Whether a dedicated startup can load a complete member agent spec."""
+        """Whether a dedicated startup can verify native loading or a saved projection."""
+
         return False
 
     @property
@@ -421,9 +431,19 @@ class LLMProvider(ABC):
         return False
 
     @property
+    def mate_worker_kit_supported(self) -> bool:
+        """Whether a crewmate's worker session here runs with its per-session kit."""
+        return False
+
+    @property
     def loaded_capability_template(self) -> str:
-        """Confirmed active full-spec template; empty means no loading evidence."""
+        """Confirmed saved template; projection gaps are reported separately."""
         return ""
+
+    @property
+    def capability_projection_gaps(self) -> tuple[str, ...]:
+        """Saved fields this runtime cannot demonstrate applying."""
+        return ()
 
     @property
     def exit_code(self) -> int | None:
@@ -493,6 +513,16 @@ class LLMProvider(ABC):
         Set when the model half of a pair pin applied and the effort half did
         not: the session runs this bare model, not the pin and not the default.
         Default: ``""``, no partial application.
+        """
+        return ""
+
+    def settings_withheld_cause(self) -> str:
+        """Why Crew's MCP tools are withheld from this session, or ``""``.
+
+        ``"session"`` when another open Crew session's settings seed holds the
+        session's settings file, ``"project"`` when the project's own file does.
+        May read a file: call it off the event loop. Default: ``""``, nothing
+        withheld.
         """
         return ""
 
@@ -600,6 +630,15 @@ class LLMProvider(ABC):
     async def steer(self, message: str) -> bool:
         """Inject a mid-turn steer; return True if accepted. Default False for a
         provider with no steer extension (granted by opt-in, never inherited)."""
+        return False
+
+    async def discard_unanswered_prompt(self) -> bool:
+        """Remove the last prompt, which got no answer, from the backend's history.
+
+        For a caller about to re-send it, so the model does not read the failed
+        copy beside the new one. True only when the backend confirmed it. Default
+        False: the backend keeps the failed copy.
+        """
         return False
 
     @property
@@ -847,6 +886,15 @@ class LLMProvider(ABC):
         remove. A provider without one returns None explicitly.
         """
         return None
+
+    async def wait_for_declared_mcp(self, timeout: float) -> tuple[str, ...]:
+        """Wait, at most *timeout* seconds, for the agent spec's MCP servers to report.
+
+        For an unattended run (webhook, cron) before its first prompt. Returns
+        the declared servers that are still not ready, empty when all are. A
+        provider that keeps no MCP report has nothing to wait for or name.
+        """
+        return ()
 
     def get_valid_effort_levels(self) -> list[str]:
         """Reasoning-effort levels the provider accepts. Default empty for a

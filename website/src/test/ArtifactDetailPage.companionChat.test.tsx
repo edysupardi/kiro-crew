@@ -9,7 +9,7 @@
  *   critical path) + background context injection; resume without create
  * - session activation: the panel embeds ChatPage in single-session chrome with
  *   URL sync off, so it can never navigate the host /artifacts route away
- * - "Ask agent to address" staging via the writePrefill sessionStorage channel
+ * - "Draft a prompt in chat" staging via the writePrefill sessionStorage channel
  *   (bound vs fresh sessions)
  * - "New chat" archive-then-create ordering + optimistic prune
  * - red-X prune (bound slot vanishing resets the panel to its empty state)
@@ -340,6 +340,41 @@ describe('ArtifactDetailPage companion chat', () => {
     await waitFor(() => expect(vi.mocked(api).chatSlotContext).toHaveBeenCalledTimes(1))
   })
 
+  it('nudges when only a user prompt is newer than the artifact edit (#12837)', async () => {
+    // `last_activity_ts` now moves on a user prompt. A prompt sent after the edit
+    // does not tell the agent the artifact changed, so the nudge reads the agent's
+    // own last action (`last_agent_ts`), which is still older than the edit.
+    localStorage.clear()
+    sessionStorage.clear()
+    const store = createTestStore()
+    seedSlots(store, [mkSlot({
+      key: 'chat-bound', artifact: 'cr-queue',
+      last_agent_ts: '2026-05-01T00:00:00Z',
+      last_activity_ts: '2026-06-01T00:00:00Z',
+    })])
+    renderPage(false, store)
+    await waitForLoaded()
+    fireEvent.click(screen.getByLabelText('Toggle agent chat'))
+    await waitFor(() => expect(screen.getByTestId('chat-page')).toBeInTheDocument())
+    await waitFor(() => expect(vi.mocked(api).chatSlotContext).toHaveBeenCalledTimes(1))
+  })
+
+  it('does not nudge when the agent acted after the artifact edit', async () => {
+    localStorage.clear()
+    sessionStorage.clear()
+    const store = createTestStore()
+    seedSlots(store, [mkSlot({
+      key: 'chat-bound', artifact: 'cr-queue',
+      last_agent_ts: '2026-06-01T00:00:00Z',
+      last_activity_ts: '2026-06-01T00:00:00Z',
+    })])
+    renderPage(false, store)
+    await waitForLoaded()
+    fireEvent.click(screen.getByLabelText('Toggle agent chat'))
+    await waitFor(() => expect(screen.getByTestId('chat-page')).toBeInTheDocument())
+    expect(vi.mocked(api).chatSlotContext).not.toHaveBeenCalled()
+  })
+
   it('embeds ChatPage in single-session chrome with URL sync off', async () => {
     // noUrlSync is what stops the embedded page writing ?sid= and navigating the
     // host /artifacts/:slug route out from under the panel.
@@ -485,7 +520,7 @@ describe('ArtifactDetailPage companion chat', () => {
     expect(screen.getByText(/no active session for this artifact/i)).toBeInTheDocument()
   })
 
-  // ── "Ask agent to address" staging ──────────────────────────────────────────
+  // ── "Draft a prompt in chat" staging ──────────────────────────────────────────
 
   it('stages (never auto-sends) the address message into a bound session', async () => {
     const store = createTestStore()
@@ -500,8 +535,8 @@ describe('ArtifactDetailPage companion chat', () => {
     })
     renderPage(false, store)
     await waitForLoaded()
-    // Comments auto-reveal, exposing the sidebar's "Ask agent" action.
-    const ask = await screen.findByRole('button', { name: /ask agent/i })
+    // Comments auto-reveal, exposing the sidebar's "Draft a prompt in chat" action.
+    const ask = await screen.findByRole('button', { name: /draft a prompt in chat/i })
     fireEvent.click(ask)
     await waitFor(() => expect(screen.getByTestId('chat-page')).toBeInTheDocument())
     const staged = sessionStorage.getItem(PREFILL_STORAGE_KEY) ?? ''

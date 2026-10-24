@@ -32,11 +32,13 @@ import type { useSidebarReveal } from './reveal'
 import type { SidebarRows } from './rows'
 import type { useSearchMatches } from './search'
 import type { useSessionCleanup } from './sessionCleanup'
+import type { SessionSortError } from './sessionSort'
 import type { useSessionSources } from './sessionSources'
 import type { useStaleCollapse } from './stale'
 import type { useHoldPinnedHeaderOnCollapse } from './stickyCollapse'
 import type { useSidebarTags } from './tags'
 import type { AgentInfo, HistoryItem, Slot } from './types'
+import type { MemorySourceRow } from '../../lib/agentMemorySource'
 import type { UseQueryResult, useQueryClient } from '@tanstack/react-query'
 import type { useNavigate } from 'react-router-dom'
 
@@ -54,6 +56,11 @@ export interface ChatSidebarProps {
    *  not flash every label to muted and back. Display only: pickers such as
    *  FolderConfigModal keep reading the scoped `installedAgents`. Defaults to it. */
   rowAgents?: AgentInfo[]
+  /** The agent picker's rows, unfolded (a crewmate and a custom agent of one
+   *  name are two rows), as last loaded. A row label whose agent has such a
+   *  pair says which memory the session runs on (#19472). Display only.
+   *  Absent: no row is marked. */
+  rowChoices?: MemorySourceRow[]
   mode?: string
   onWidthChange?: (w: number) => void
   onDragChange?: (dragging: boolean) => void
@@ -118,13 +125,6 @@ export interface ChatSidebarProps {
   /** Where a crew row's window opens, for a host with no chat pane of its
    *  own (embed/sessions). Omit to open it over this page's pane. */
   onOpenPeerSession?: (instanceId: string, key: string) => void
-  /** Opts the list into the scroll peek: while the user scrolls the session
-   *  lane, titles the row clips are shown in full in a floating layer laid
-   *  over them. Rows keep the stored width. Omit (mobile drawer, embedded
-   *  view) to turn it off: a phone's near-full-width drawer leaves no room
-   *  beside the pane for an overflowing title, and the embedded view has no
-   *  chat beside it either. See chat-sidebar/scrollPeek. */
-  scrollPeek?: boolean
 }
 
 /** A setter from `useState`. */
@@ -183,7 +183,14 @@ export interface SidebarScope {
   setCollapsedHistoryGroups: SetState<Set<string>>
   setFolderModal: SetState<FolderModalTarget | null>
   sortKey: SortKey
-  setSortKey: SetState<SortKey>
+  /** The sort menu's pick: Manual with nothing saved seeds the order on screen first. */
+  setSortKey: (key: SortKey) => void
+  /** The last sort pick that did not save (null for none), and its dismiss. */
+  sortError: SessionSortError | null
+  dismissSortError: () => void
+  /** Why the last manual-order write did not take ('' for none), and its setter. */
+  manualOrderError: string
+  setManualOrderError: (message: string) => void
   flatView: boolean
   conductorView: boolean
   creatingSlot: RootState['chat']['creatingSlot']
@@ -216,6 +223,8 @@ export interface SidebarScope {
   folderRowsDrawn: boolean
   setLaneScrollEl: (el: HTMLDivElement | null) => void
   rowAnimEnabled: boolean
+  /** True until the lane's first population has painted (see rowAnimSettle.ts). */
+  rowMotionHeld: boolean
   activeDrag: { type: string; id: string } | null
   derivedHintCol: string | null
   setDerivedHintCol: SetState<string | null>
@@ -314,6 +323,9 @@ export interface SidebarScope {
 
   // From `usePinnedSessionOrder`
   pinned: ReturnType<typeof usePinnedSessionOrder>['pinned']
+  pinnedOrderError: ReturnType<typeof usePinnedSessionOrder>['pinnedOrderError']
+  setPinnedOrderError: ReturnType<typeof usePinnedSessionOrder>['setPinnedOrderError']
+  pinnedBandCaption: string | undefined
 
   // From `useStaleCollapse`
   staleCollapseMs: ReturnType<typeof useStaleCollapse>['staleCollapseMs']

@@ -142,9 +142,17 @@ describe('CrewScheduleList states and doors', () => {
     expect(onCreate).toHaveBeenCalledTimes(1)
   })
 
-  it('says in words that nothing wakes the crewmate, with the create door still offered', () => {
+  it('says only that there are no schedules when the mate already wakes on its own', () => {
+    // The Heartbeat row above the list says the mate wakes on its own; the
+    // empty line must not say the opposite.
+    render(<CrewScheduleList jobs={[]} loading={false} nowTs={NOW} onOpenAll={vi.fn()} onOpenJob={vi.fn()} onCreate={vi.fn()} selfWaking />)
+    expect(screen.getByTestId('crew-schedule-empty')).toHaveTextContent('No schedules yet.')
+    expect(screen.getByTestId('crew-schedule-empty')).not.toHaveTextContent(/Nothing wakes/)
+  })
+
+  it('says in words that nothing wakes the mate, with the create door still offered', () => {
     setup([])
-    expect(screen.getByTestId('crew-schedule-empty')).toHaveTextContent(/Nothing wakes this crewmate on its own yet/)
+    expect(screen.getByTestId('crew-schedule-empty')).toHaveTextContent(/Nothing wakes this mate on its own yet/)
     expect(screen.getByTestId('crew-schedule-create')).toHaveTextContent('New schedule')
     // No `0` anywhere: a count of none is the empty line's job.
     expect(screen.queryByText('0')).toBeNull()

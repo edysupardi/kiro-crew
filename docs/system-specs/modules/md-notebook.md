@@ -17,6 +17,19 @@ session auth gates the proxy entrance as with all builtin apps.
 The app id is `md-notebook`; the display name is "Notes". `defaultEnabled` is false, so it
 appears in the Apps library ready to be switched on rather than enabling itself.
 
+**Where the backend's code lives.** `server.py` is the backend's entry point (`app.json`
+`entryPoint`; the gateway runs it as `__main__`, and `syncer.py` imports it) and a mirror
+facade (`kiro_crew._facade_mirror`): every name stays reachable as `server.<name>`, and a
+patch through it reaches the owner modules beside it. It keeps the per-process state -- the
+save, vault-write, vaults and settings locks, the note caches and change watches, the
+self-write marks and the gh token memo -- with every function that reaches it, every route
+and the app wiring. New work goes to the owner of its responsibility: `server_store.py` (the
+data home, the staged state writes, `vaults.json`, `settings.json`, the PAT),
+`server_http.py` (`ApiError`, request bodies, the proxy-auth and error middlewares),
+`server_paths.py` (vault and note path checks, note staging, listing and reads, the save
+guard) and `server_host.py` (gh discovery, the trusted spawn env, the file-manager reveal
+and the folder chooser).
+
 ## Responsibilities
 
 1. **Vaults** — clone a remote repo into `<home>/vaults/<id>/`, or attach an existing local
@@ -36,14 +49,59 @@ Rooted at `MD_NOTEBOOK_HOME`, defaulting to `~/.kiro/crew/workspace/md-notebook/
 
 | Path | Contents |
 | --- | --- |
-| `vaults.json` | Vault descriptors. No secrets, but `localPath` is what sync runs git against, so it is in `_SENSITIVE_HOME_DIRS`. Published through the staging directory + `os.replace`. |
-| `pat` | GitHub token, chmod 0600, never echoed back to the UI (only a boolean is). Also listed in `_SENSITIVE_HOME_DIRS`, so agent file tools cannot read it through the shared gate — 0600 alone does not isolate another process running as the same user. Cleared by writing an EMPTY file, never by `unlink`: the empty file is the reader's absent-equivalent, and removing the inode would delete the sandbox mask's mount target. |
-| `settings.json` | The `autoSync` authorization bit, `autoSyncMins` cadence, and `lastSync` stamps. Published through the staging directory with `fsync`, so a rename from an unflushed page cache cannot discard an acknowledged toggle. |
-| `../../md-notebook-staging/` | Write-staging directory for the three state files above, at the crew data home ROOT. Every state writer opens its temp HERE and renames onto the target, so no temp carrying PAT bytes ever lands at a name the sandbox masks do not cover. Masked as a whole directory. It is top-level rather than a child of this directory because a mask covers the leaf and not its ancestors: under the agent-writable `workspace/md-notebook` it could be renamed out from under its own mask. Same filesystem, so the publish rename stays atomic. |
 | `vaults/<id>/` | Vaults this app cloned itself. Attached vaults stay where the user has them. |
 
-The three state files and the staging directory resolve through the crew data home and
-ignore `MD_NOTEBOOK_HOME`; only clone data under `vaults/` follows it.
+The state files live in `<crew-home>/md-notebook-staging/`, a directory at the crew data
+home ROOT, and ignore `MD_NOTEBOOK_HOME`:
+
+| Path | Contents |
+| --- | --- |
+| `vaults.json` | Vault descriptors. No secrets, but `localPath` is what sync runs git against, so the directory is in `_SENSITIVE_HOME_DIRS`. |
+| `pat` | GitHub token, chmod 0600, never echoed back to the UI (only a boolean is). 0600 alone does not isolate another process running as the same user, so the directory is masked and fenced. Cleared by writing an EMPTY file, never by `unlink`: the empty file is the reader's absent-equivalent. |
+| `settings.json` | The `autoSync` authorization bit, `autoSyncMins` cadence, and `lastSync` stamps. Written with `fsync`, so a rename from an unflushed page cache cannot discard an acknowledged toggle. |
+| `.migrated`, `.migrating` | The legacy move's marker (its existence closes the move for good), and the lock a pass holds. |
+
+Every state writer stages its temp INSIDE this directory and renames it onto a name in the
+same directory, so the publish never crosses a mount point. (An older layout kept the files
+at `workspace/md-notebook/<name>` and staged here; under the Linux sandbox each was its own
+bind mount and every state write failed with `EXDEV`.) The directory is masked as a whole,
+so a temp or crash orphan holding PAT bytes is always covered. It is top-level because a
+mask covers the leaf and not its ancestors: under the agent-writable `workspace/md-notebook`
+it could be renamed out from under its own mask.
+
+**Legacy move.** `kiro_crew.md_notebook_state.migrate_legacy_state` moves real state from the
+old bare names into this directory, in one pass. Sandbox spawn prep runs it first, and the
+Notes backend spawn runs it for a host with no sandbox wrap. A failed pass in spawn prep is
+logged and the spawn goes on: the stubs planted right after keep every bare name masked, so
+no agent can plant state for a later pass to promote. The Notes backend does not start until
+the pass is sealed, so no backend write can race it, and passes hold
+a lock (`.migrating`) from the marker check to the marker write, so two spawns never run
+one at once. The pass reads each source once (regular file, no link followed) and writes
+those bytes with `atomic_write` only over an absent or stub destination. It syncs this
+directory, and only then empties the legacy `pat` in place (truncated through an
+`O_NOFOLLOW` descriptor, never unlinked, so a live namespace's mask stays on its inode); if
+the sync fails nothing is emptied. A legacy directory reached through a link is sealed with
+nothing moved, because an agent could swap that link for a directory of its own; Notes
+could not write state on that layout before either.
+The pass ends by writing `.migrated`, which closes promotion for good. A copy that fails
+stops the pass unsealed, so the next spawn copies it again (so does a source it cannot
+read for a reason other than being absent), and a PAT with a second hard
+link stops it unsealed too, so the hard-link check keeps refusing on it. Every unsealed
+case is one where a data-home write is failing, the hard-link check refuses the spawn anyway,
+or a concurrent pass is about to seal; until it seals, Notes stays off. The old bare names keep stubs where absent, so their masks always mount, and they
+are not carved back.
+
+**Rollback loses the PAT.** The move empties the legacy `pat` after copying it, so a build
+from before this layout, which reads only the bare names, has no token; the user enters it
+again. The registry and settings hold no secret and stay at their old names, so vaults and
+settings survive the rollback. Deleting the PAT is deliberate: a copy left behind would keep
+a token the user may later revoke on disk at a second name.
+
+**Re-upgrading does not move state again.** `.migrated` stays, so after upgrade, rollback
+and upgrade again the build reads the state directory as it was at the first upgrade.
+Vaults attached, settings changed or a PAT entered on the older build stay at the old bare
+names (masked and fenced) and are not picked up; the user attaches them and enters the PAT
+again.
 
 A vault descriptor carries `id`, `name`, `repo`, `localPath`, `branch`, `readOnly`, an
 optional `subfolder` scope, plus `knowledge` and `knowledgeSourceId`. The `external` field
@@ -52,10 +110,11 @@ never persisted.
 
 ## Sandbox
 
-`sandbox._CREW_HIDDEN_LEAVES` bind-masks the three state files and `md-notebook-staging` in every
-sandbox tier, so an agent's spawned subprocesses cannot read the GitHub token or repoint a
-vault. The backend itself is a sandboxed spawn that OWNS those files, so exactly that one
-spawn gets them back: `_APP_BACKEND_OWNED_LEAVES` declares the leaves it owns and
+`sandbox._CREW_HIDDEN_LEAVES` bind-masks the `md-notebook-staging` directory, and the three
+old bare names under `workspace/md-notebook/` (stubbed before every spawn), in every sandbox tier, so an agent's spawned
+subprocesses cannot read the GitHub token or repoint a vault. The backend itself is a
+sandboxed spawn that OWNS that directory, so exactly that one spawn gets it back:
+`_APP_BACKEND_OWNED_LEAVES` declares the directory and
 `apps/backend.py` passes `app_backend_visible_targets()` as `extra_visible_dirs`, gated on
 shipped-builtin provenance. A spelling that sits beneath an independently masked directory
 is refused rather than carved, because carving it would unmask that whole foreign tree.
@@ -65,19 +124,15 @@ Two properties keep the mask meaningful now that the backend can create these fi
 * **The masks are materialised before launch.** `mount(2)` cannot target an absent path and
   the launcher's hiding loops guard on existence, so an absent leaf would get no mask at
   all and a namespace spawned before the first vault attach would read the PAT saved after
-  it. `_materialize_md_notebook_mask_targets()` creates each leaf's absent-equivalent
-  document (`pat` empty, `vaults.json` `[]`, `settings.json` `{}`) before launch. It refuses
-  the spawn for a non-regular file at a leaf or a creation failure, but a link in the chain
-  DEGRADES instead: that leaf is skipped and the spawn proceeds, because refusing would let
-  one optional app's on-disk layout stop every sandboxed process on the host — an operator
-  who symlinks `workspace/` to another disk would find no agent could start, over a Notes
-  file they may never have created. Skipping is safe only because it is keyed off the same
-  predicate that withholds the carve-out (`carveout_chain_has_planted_link`, applied in
-  `app_backend_visible_targets`): while a link is in the chain the backend cannot write this
-  state at all, so an unmaterialised — and therefore unmasked — leaf has nothing to expose.
-  The two are never decided separately, and a test pins them together. The staging directory
-  is a direct child of the data home, so the shared `_materialize_maskable_dirs` covers it
-  under its own rule.
+  it. The state directory is a direct child of the data home, so the shared
+  `_materialize_maskable_dirs` creates it, and refuses the spawn when it is a link.
+  `_materialize_md_notebook_mask_targets()` then puts each file's absent-equivalent
+  document inside it (`pat` empty, `vaults.json` `[]`, `settings.json` `{}`), refusing the
+  spawn for a non-regular file at a state name. A link at `workspace/md-notebook` (an
+  operator who moved `workspace/` to another disk) DEGRADES instead of refusing: the whole
+  `workspace/md-notebook` directory is masked (`_md_notebook_degraded_mask_dirs`), and
+  `apps/backend.py` does not start the Notes backend, so nothing clones into the
+  namespace-only stand-in and lose notes on restart.
 * **The backend spawn starts isolated.** It launches with `-I` and runs the module through
   `runpy` with an explicit import root, so interpreter startup hooks (`sitecustomize`,
   `usercustomize`, user-site `.pth`) from an agent-writable directory do not execute in the
@@ -85,8 +140,8 @@ Two properties keep the mask meaningful now that the backend can create these fi
   `python -m` launch.
 * **Pre-upgrade orphans are swept.** Older writers staged beside the target, so a crash in
   that window could leave a PAT-bearing `*.tmp` at a name no mask covers. Every `*.tmp`
-  direct child of the state directory is such an orphan by construction — the writers now
-  stage in the top-level staging directory, and note temps live beside their note under
+  direct child of `workspace/md-notebook` is such an orphan by construction — the writers now
+  stage in the top-level state directory, and note temps live beside their note under
   `vaults/<id>/` — so the sweep removes them. Because it DELETES, its guard is stronger
   than the materialiser's: the descent from the crew data home is ANCHORED and
   per-component, each step `open`ed `O_NOFOLLOW | O_DIRECTORY` relative to the descriptor
@@ -103,26 +158,27 @@ Two properties keep the mask meaningful now that the backend can create these fi
   covers the named leaves, never an arbitrary `*.tmp` sibling, so an orphan would otherwise
   stay readable on macOS forever. A removal is logged as a security event — the token in
   that file was readable by anything running as this user, so it should be rotated.
-* **A skipped root has its whole state directory masked.** Skipping the sweep leaves the
-  one thing the three leaf masks cannot cover: an orphan whose name is neither `pat` nor a
-  state file. So the same predicate that withholds the carve-out also adds the state
-  DIRECTORY to the hidden set, on both launch paths, and a directory mask covers every name
-  inside it. This is deliberately conditional rather than always-on: the directory also
-  holds the vault clone data agents are MEANT to read, so masking it wholesale on a healthy
-  host would hide the user's notes and defeat the app. It applies only where the chain is
-  linked — where the carve-out is already withheld, the app is already non-functional for
-  that root, and hiding the directory costs nothing that still works. The predicate is
+* **A skipped root has its whole `workspace/md-notebook` masked.** Skipping the sweep leaves
+  the one thing the three bare-name masks cannot cover: an orphan whose name is neither `pat`
+  nor a state file. So a linked chain adds the whole `workspace/md-notebook` DIRECTORY to
+  the hidden set, on both launch paths, and a directory mask covers every name inside it.
+  This is deliberately conditional rather than always-on: the directory also holds the
+  vault clone data agents are MEANT to read, so masking it wholesale on a healthy host
+  would hide the user's notes and defeat the app. Where it applies, `apps/backend.py`
+  does not start the Notes backend, so the app is non-functional for that root and hiding the
+  directory costs nothing that still works. The predicate is
   asked about a LEAF path, the same shape the carve-out filter passes, because it judges a
   path's parent chain: asking about the directory would miss a link at the directory itself,
   which is exactly the case the final-component refusal leaves unswept.
 
-The agent-side file-tool gate (`security.is_sensitive_path`) fences all four paths
-independently of the OS mask, so the agent's own reach through tool calls is unchanged.
+The agent-side file-tool gate (`security.is_sensitive_path`) fences the state directory and
+the three bare names independently of the OS mask, so the agent's own reach through tool
+calls is unchanged.
 
 ### Why the state writers do not go through `atomic_write`
 
-`_write_state_staged_sync` stages its temp in the top-level staging directory and renames
-onto the target, rather than calling `atomic_write`. That is a deliberate fork of the
+`_write_state_staged_sync` stages its temp inside the state directory and renames onto the
+target, rather than calling `atomic_write`. That is a deliberate fork of the
 secret-write chokepoint, recorded here so it stays a decision:
 
 * `atomic_write` stages in the TARGET's parent (`mkstemp(dir=path.parent)`), and its
@@ -136,8 +192,9 @@ secret-write chokepoint, recorded here so it stays a decision:
   is the same private helper made public for exactly this caller class, and tests fail if
   either call site drops it.
 * The cost is real and accepted: a future guard added inside `atomic_write` does not reach
-  this writer. Moving the state into one masked directory would remove the reason for the
-  fork entirely; `staging_dir=` is the right change only if that move is not made.
+  this writer. The state now sits in one masked directory, so the target's parent IS the
+  staging directory and `atomic_write(restrict_to_owner=True)` could replace the fork; that
+  swap is left to its own change so this fix stays small.
 
 ## Routes
 
@@ -239,7 +296,7 @@ written and deleted the same day — and git can only restore what it already ha
   existence-checked, never resolved from the agent-writable front of `PATH`. A trusted binary
   is not sufficient on Linux, because **`xdg-open` is a shell script that dispatches to
   whichever helper it finds on `PATH`** (`gio`, `gvfs-open`, `exo-open`, …) — so every POSIX
-  spawn in `server.py` passes `_trusted_env()`, which replaces `PATH` with
+  spawn in `server.py` and `server_host.py` passes `_trusted_env()`, which replaces `PATH` with
   `git_ops.TRUSTED_PATH` and keeps the rest (the desktop session needs `DISPLAY` /
   `DBUS_SESSION_BUS_ADDRESS` / `XDG_*`). Otherwise a planted `~/.local/bin/gio` would run on a
   click the user has every reason to trust. The same pin covers `gh auth token` and the
@@ -459,6 +516,14 @@ The UI is a compiled builtin surface at `website/src/apps/md-notebook/`, routed 
 only from `apps_dir()/<name>/ui/`, and builtin registration writes metadata without
 copying files there, so a package-resident builtin must compile into the frontend.
 
+The page is `website/src/apps/md-notebook/MdNotebookPage.tsx`, the route's import path,
+which renders the panel and the open note. Its state, effects and actions (the note
+buffer and its saving, the sync settings, the vault and note commands, the polls and
+search) live in `website/src/apps/md-notebook/useMdNotebookPageState.ts`, the page's one
+hook. New state or behaviour goes in the hook, or in a sibling
+`useMdNotebookPage<Part>.ts` the hook calls, and new markup in the page;
+`website/src/apps/md-notebook/MdNotebookPage.owners.test.tsx` pins that shape.
+
 Knowledge-sync calls go to the HOST API (`/api/knowledge/*`) rather than the app namespace,
 because registration needs the user's dashboard session. `/api/knowledge` is therefore
 declared in the manifest's `permissions.api`.
@@ -522,12 +587,19 @@ Delete is the one destructive row action, and it is staged rather than immediate
 
 ## Tests
 
-`test/test_md_notebook.py` drives the aiohttp app through a signed test client, so the
-proxy-HMAC middleware is exercised on every call rather than bypassed. Coverage includes
-the save guard, path traversal, unique note naming, duplicate-note naming and containment,
-move-without-overwrite, external-change detection, self-write suppression, token file
-permissions, the knowledge flag round-trip, and a real sync against git fixtures including
-the conflict path. `test/test_md_notebook_git_ops.py` pins Git subprocess lifecycle,
+`test/test_md_notebook.py` and its topic siblings drive the aiohttp app through a signed
+test client, so the proxy-HMAC middleware is exercised on every call rather than bypassed.
+Coverage includes the save guard, path traversal, unique note naming, duplicate-note naming
+and containment, move-without-overwrite, external-change detection, self-write suppression,
+token file permissions, the knowledge flag round-trip, and a real sync against git fixtures
+including the conflict path. The suite is split by topic: `test/test_md_notebook.py`
+(request signing, the vault routes, trash reveal and the basic note routes),
+`test/test_md_notebook_notes.py` (naming, delete-to-trash, duplicate, move, search and tags),
+`test/test_md_notebook_git_trust.py` (the token, sync and the git trust boundary),
+`test/test_md_notebook_write_safety.py` (the vault lock and staged saves) and
+`test/test_md_notebook_settings_sync.py` (change polling, sync stamps, settings and the
+auto-sync loop), with shared fixtures in `test/md_notebook_helpers.py`.
+`test/test_md_notebook_git_ops.py` pins Git subprocess lifecycle,
 `test/test_sandbox_md_notebook_carveout.py` pins the state-file carve-out and orphan sweep,
 and `src/kiro_crew/apps/builtins/md_notebook/tests/test_md_notebook_windows.py` covers the
 native Windows branches. All are collected because `setup.cfg` includes both `test` and

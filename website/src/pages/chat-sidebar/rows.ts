@@ -23,11 +23,12 @@ import type { ChatTag } from '../../types'
 import type { GuideStepPlan } from '../../guide/guideActions'
 import type { PaletteBoost } from '../../utils/sessionColors'
 import { isChatPageSurface } from '../../utils/channelOrigin'
-import { compareBySort, comparePinnedThenSort, lastActivityEpoch, slotActivityTs, type SortKey } from '../chat/sessionOrder'
+import { compareBySort, compareManual, comparePinnedThenSort, lastActivityEpoch, slotActivityTs, type SortKey } from '../chat/sessionOrder'
 import { crewOf } from '../../hooks/useInstanceSessions'
 import { isWithinRecentWindow } from '../recentWindow'
 import { splitStaleSlots, type StaleSplit } from '../staleCollapse'
 import { isPeerRow, sessionRowIdentity } from './rowIdentity'
+import type { MemorySourceRow } from '../../lib/agentMemorySource'
 import type { AgentInfo, FilterDimension, RevealBlockingFilter, SessionFilterKey, SidebarSourceLink, Slot } from './types'
 
 /** What the chip prints. The serializer decides it; this only covers its absence,
@@ -58,6 +59,11 @@ export interface LocalRowIndex {
   recent: ReadonlySet<string>
   /** The backend's relevance order while a content search is active, else null. */
   searchRanks: ReadonlyMap<string, number> | null
+  /** Place in the manual order (sort "Manual"), drawn below the pinned section. */
+  manualRank: ReadonlyMap<string, number>
+  /** Each unpinned row's position in the order it is drawn in now, whatever the
+   *  sort: where a manual drop's insertion line goes. */
+  drawnIndex: ReadonlyMap<string, number>
 }
 
 export interface SidebarRowFilters {
@@ -154,6 +160,9 @@ export interface RowPlacement {
   orderStamp: number
   /** Layout projection on for this copy (the facade's displacement-window gate). */
   rowAnimEnabled: boolean
+  /** The lane's first population is still settling: the row keeps its projection
+   *  but snaps instead of springing and skips its mount slide-in (rowAnimSettle.ts). */
+  rowMotionHeld?: boolean
   conductor?: ConductorRowView
   /** This copy is the one its FOLDER is drawn around: lifted to the top of the
    *  folder body, before the sub-folders and before the sorted rows. It is NOT a
@@ -178,16 +187,22 @@ export interface RowShell {
   colorMode: string
   defaultAgent: string
   installedAgents: AgentInfo[]
+  /** The picker's unfolded rows: a row whose agent has a same-name crewmate and
+   *  custom agent says which memory it runs on (#19472). */
+  memoryRows: MemorySourceRow[]
   tagById: Record<string, ChatTag>
   paletteColors: string[]
   boost: PaletteBoost
   boostFor: (hex: string) => PaletteBoost
   recentTintCount: number
   /** A dnd-kit drag is in flight, the raw LOCAL key of a dragged session (only local
-   *  rows can be dragged), and that session's pinned rank. */
+   *  rows can be dragged), and that session's pinned rank and drawn position. */
   dragInFlight: boolean
   activeDraggedKey: string | null
   activeDraggedPinnedIndex: number
+  activeDraggedDrawnIndex: number
+  /** The sort is Manual: unpinned local rows show their drag handle. */
+  manualSort: boolean
   /** A guide step points at the open row's action group (`sessions.row-*`):
    *  the open row keeps that group shown with no pointer on it. */
   guideOnRowControl: boolean
@@ -238,6 +253,7 @@ export interface SessionRowView {
   showDivider: boolean
   orderStamp: number
   rowAnimEnabled: boolean
+  rowMotionHeld: boolean
   conductor: ConductorRowView | null
   /** See `RowPlacement.folderConductor`. False in every lane but the folder tree. */
   folderConductor: boolean
@@ -259,6 +275,12 @@ export interface SessionRowView {
   renameValue: string
   revealFlash: 'flash' | 'fade' | null
   pinnedOrderIndex: number
+  /** While a drag is in flight, an unpinned row's position in the order drawn now
+   *  (-1 for a pinned or peer row, and for every row at rest): a manual drop's
+   *  insertion line compares it with the dragged row's. */
+  drawnOrderIndex: number
+  /** Drop and Alt+Arrow reorder this row: off for a peer row and while a search
+   *  ranks the list. The pinned and the manual order both read it. */
   pinnedReorderEnabled: boolean
   /** A LOCAL row whose surface this page does not render (a crew member's own DM
    *  thread, admitted to the conductor lane as a creator anchor) opens here instead
@@ -289,6 +311,10 @@ export interface SidebarRows {
   filteredSlots: Slot[]
   /** Is any dimension narrowing the list right now? */
   listNarrowed: boolean
+  /** Is a dimension that lets pinned rows through (tags, status chips) narrowing
+   *  the list right now? Then a visible pinned row may be there only because it is
+   *  pinned, which the pinned-band caption says. */
+  pinnedExemptNarrowing: boolean
   /** One entry per dimension, in declaration order: does it hide THIS row, and how to
    *  drop it. The reveal effect walks this instead of naming the dimensions. */
   revealBlockingFilters: RevealBlockingFilter[]
@@ -439,6 +465,7 @@ function makeLaneOrder(
   pinned: ReadonlySet<string>,
   pinnedRank: ReadonlyMap<string, number>,
   isPinned: SidebarRows['isPinned'],
+  manualRank: ReadonlyMap<string, number>,
 ): SidebarRows['laneOrder'] {
   // Search relevance, not the sort: pinning is a reachability promise for browsing,
   // not a ranking hint inside explicit search results. A peer row is never ranked,
@@ -455,6 +482,14 @@ function makeLaneOrder(
     const bPinned = isPinned(b)
     if (aPinned !== bPinned) return aPinned ? -1 : 1
     if (aPinned && bPinned) return comparePinnedThenSort(a, b, sortKey, pinned, pinnedRank)
+    if (sortKey === 'manual') {
+      // Manual places are LOCAL, so a peer row, which no drag can place, sits
+      // after the local rows instead of floating above them as unplaced.
+      const aLocal = localKeyOf(a)
+      const bLocal = localKeyOf(b)
+      if ((aLocal === null) !== (bLocal === null)) return aLocal === null ? 1 : -1
+      return compareManual(a, b, slot => (localKeyOf(slot) === null ? undefined : manualRank.get(slot.key)))
+    }
     return compareBySort(a, b, sortKey)
   }
 }
@@ -532,6 +567,7 @@ function makeDimensions(
       // is a session property, so it behaves like the Unread/Pinned status chips.
       filtersRow: slot => tags.resolved.size === 0 || pinnedBypass(slot) || (slot.tags ?? []).some(id => tags.resolved.has(id)),
       narrows: () => tags.resolved.size > 0,
+      exemptsPinned: true,
       // The pinned exemption is restated here because this predicate does not go
       // through `excluded`: a reveal of a pinned row must not clear a tag filter that
       // was never hiding it.
@@ -564,6 +600,7 @@ function makeDimensions(
           || ((slot.title || '') + slot.key + (slot.agent || '')).toLowerCase().includes(q)
       },
       narrows: () => Boolean(search.text),
+      exemptsPinned: false,
       hides: (slot, excluded) => Boolean(search.text) && excluded(slot),
       clear: () => clears.search(),
     },
@@ -575,6 +612,7 @@ function makeDimensions(
       // hidden by the chips and a reveal would clear them.
       filtersRow: slot => activeStatus.length === 0 || pinnedBypass(slot) || activeStatus.some(key => matches[key](slot)),
       narrows: () => activeStatus.length > 0,
+      exemptsPinned: true,
       hides: (slot, excluded) => activeStatus.length > 0 && !pinnedBypass(slot) && excluded(slot),
       clear: () => clears.status(),
     },
@@ -583,6 +621,7 @@ function makeDimensions(
       // un-hides the row's own ancestor chain rather than clearing globally.
       filtersRow: null,
       narrows: null,
+      exemptsPinned: false,
       hides: slot => {
         const folderId = folderOf(slot)
         return !!folderId && folderFilter.hiddenSubtree.has(folderId)
@@ -597,6 +636,7 @@ function makeDimensions(
       // a hidden row clears only the hide, not the include chips set alongside it.
       filtersRow: slot => !isRowStatusHidden(slot),
       narrows: () => status.hidden.size > 0,
+      exemptsPinned: false,
       // Unlike search and the include chips, a hide CAN answer for one row on its
       // own: it hides exactly the rows its predicates match. Asking list membership
       // instead would let a row the search dropped clear every hide on reveal, even
@@ -613,6 +653,7 @@ function makeDimensions(
       // asked to leave the list.
       filtersRow: models.passes,
       narrows: () => models.active,
+      exemptsPinned: false,
       hides: slot => !models.passes(slot),
       clear: () => clears.models(),
     },
@@ -715,6 +756,7 @@ interface ViewModel {
   unread: ReadonlySet<string>
   isRunning: (slot: Slot) => boolean
   searchRanks: ReadonlyMap<string, number> | null
+  drawnIndex: ReadonlyMap<string, number>
 }
 
 /** The active row. A peer row is active only for the crew window open on its own
@@ -758,7 +800,7 @@ function makeViews(model: ViewModel): SidebarRows['views'] {
 export function buildSidebarRows(inputs: SidebarRowInputs, previous?: SidebarRows | null): SidebarRows {
   const prev = previous ? memosOf.get(previous) : undefined
   const { rows, local, filters, clears, crewGroups, sortKey, clock, frozen } = inputs
-  const { folderOf: slotFolders, pinned, pinnedRank, unread, running, recent, searchRanks } = local
+  const { folderOf: slotFolders, pinned, pinnedRank, unread, running, recent, searchRanks, manualRank, drawnIndex } = local
   const { tags, search, status, folders: folderFilter } = filters
   // Read here, outside every compute: the drag freeze is the one place a build reads
   // the previous one's output.
@@ -771,8 +813,8 @@ export function buildSidebarRows(inputs: SidebarRowInputs, previous?: SidebarRow
   const isPinned = isPinnedMemo.value
   const isRunning = isRunningMemo.value
 
-  const laneOrder = reuse(prev?.laneOrder, [searchRanks, sortKey, pinned, pinnedRank], () =>
-    makeLaneOrder(searchRanks, sortKey, pinned, pinnedRank, isPinned))
+  const laneOrder = reuse(prev?.laneOrder, [searchRanks, sortKey, pinned, pinnedRank, manualRank], () =>
+    makeLaneOrder(searchRanks, sortKey, pinned, pinnedRank, isPinned, manualRank))
   const statusMatches = reuse(prev?.statusMatches, [unread, running, recent, status.recentWindowMs, clock], () =>
     makeStatusMatches(unread, isRunning, recent, status.recentWindowMs, clock))
   const isRowStatusHidden = reuse(prev?.isRowStatusHidden, [status.hidden, statusMatches.value], () =>
@@ -790,6 +832,7 @@ export function buildSidebarRows(inputs: SidebarRowInputs, previous?: SidebarRow
   const filteredSlots = reuse(prev?.filteredSlots, [rows, dimensions.value, laneOrder.value, frozen], () =>
     frozenList ?? filterRows(rows, dimensions.value, laneOrder.value))
   const listNarrowed = dimensions.value.some(d => d.narrows !== null && d.narrows())
+  const pinnedExemptNarrowing = dimensions.value.some(d => d.exemptsPinned && d.narrows !== null && d.narrows())
   const revealBlockingFilters = reuse(prev?.revealBlockingFilters, [dimensions.value, filteredSlots.value], () =>
     makeRevealRegistry(dimensions.value, filteredSlots.value))
 
@@ -821,6 +864,7 @@ export function buildSidebarRows(inputs: SidebarRowInputs, previous?: SidebarRow
   const result: SidebarRows = {
     filteredSlots: filteredSlots.value,
     listNarrowed,
+    pinnedExemptNarrowing,
     revealBlockingFilters: revealBlockingFilters.value,
     statusCounts: statusCounts.value,
     laneOrder: laneOrder.value,
@@ -840,7 +884,7 @@ export function buildSidebarRows(inputs: SidebarRowInputs, previous?: SidebarRow
     isPinned,
     isRunning,
     staleSplit: makeStaleSplit(listNarrowed, sortKey, clock),
-    views: makeViews({ pinned, pinnedRank, unread, isRunning, searchRanks }),
+    views: makeViews({ pinned, pinnedRank, unread, isRunning, searchRanks, drawnIndex }),
   }
   memosOf.set(result, {
     folderOf: folderOfMemo, isPinned: isPinnedMemo, isRunning: isRunningMemo,
@@ -871,6 +915,7 @@ function rowView(slot: Slot, placement: RowPlacement, scene: RowScene, model: Vi
     showDivider: placement.showDivider,
     orderStamp: placement.orderStamp,
     rowAnimEnabled: placement.rowAnimEnabled,
+    rowMotionHeld: placement.rowMotionHeld ?? false,
     conductor: placement.conductor ?? null,
     folderConductor: placement.folderConductor ?? false,
     isActive: isActiveIn(scene, slot),
@@ -889,6 +934,11 @@ function rowView(slot: Slot, placement: RowPlacement, scene: RowScene, model: Vi
     // A pinned rank is a LOCAL ordering: a peer row sits outside the pinned band and
     // refuses keyboard reorder, so a key collision cannot rewrite the local pin order.
     pinnedOrderIndex: local === null ? -1 : (model.pinnedRank.get(local) ?? -1),
+    // Only while a drag is in flight, the one time the insertion line reads it: a
+    // new row shifts every row's position, so carried at rest it would re-render
+    // every row on every insertion (the displacement window exists to prevent
+    // that). A drag start already re-renders every row through the shell.
+    drawnOrderIndex: local === null || !scene.drag ? -1 : (model.drawnIndex.get(local) ?? -1),
     pinnedReorderEnabled: !model.searchRanks && local !== null,
     opensElsewhere: opensElsewhereOf(slot),
     shell: scene.shell,
@@ -908,11 +958,11 @@ export function opensElsewhereOf(slot: Slot): string | null {
  *  without a line here is a type error rather than a field equality never compares. */
 const VIEW_FIELDS: Record<keyof SessionRowView, true> = {
   slot: true, identity: true, localKey: true, peerId: true, peerName: true, scope: true, navScope: true,
-  holdContainer: true, showDivider: true, orderStamp: true, rowAnimEnabled: true, conductor: true,
+  holdContainer: true, showDivider: true, orderStamp: true, rowAnimEnabled: true, rowMotionHeld: true, conductor: true,
   folderConductor: true,
   isActive: true, isOut: true, isPinned: true, isUnread: true, isRunning: true, recent: true,
   subagentCount: true, subagentApprovalCount: true, digitBadge: true, isRenaming: true, renamingHere: true,
-  renameValue: true, revealFlash: true, pinnedOrderIndex: true, pinnedReorderEnabled: true,
+  renameValue: true, revealFlash: true, pinnedOrderIndex: true, drawnOrderIndex: true, pinnedReorderEnabled: true,
   opensElsewhere: true, shell: true,
 }
 const VIEW_KEYS = Object.keys(VIEW_FIELDS) as (keyof SessionRowView)[]

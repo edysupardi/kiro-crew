@@ -7,7 +7,7 @@ actually does. Stdlib only; portable across OSes.
 
 With ``--check-body`` it also reads the PR body the skill writes --
 ``<git-dir>/prepare-pr-body.md``, with ``<git-dir>`` from
-``git rev-parse --absolute-git-dir`` -- and runs three checks on it:
+``git rev-parse --absolute-git-dir`` -- and runs four checks on it:
 
 * **Accounting (hard).** Every changed *area* -- the unit ``pr-scope.yml`` counts,
   a module directory for ``src/kiro_crew/`` and ``website/src/``, the top-level
@@ -25,27 +25,61 @@ With ``--check-body`` it also reads the PR body the skill writes --
   contract's "three short paragraphs at most" come to. Over it is exit 21. The
   accounting check already guarantees nothing is hidden, so a cap cannot cut a
   true fact -- only a restated one: the body says what changed for the reader
-  and why; the diff is the evidence.
+  and why; the diff is the evidence. Table rows there are bounded too, by
+  ``TABLE_ROW_LIMIT`` -- the "eight rows" ceiling ``references/body-picture.md``
+  sets for a picture -- so a recital cannot move into a table to dodge the count.
+  A body with no ``## What changed`` section is left to the template check below.
 * **Template (hard).** The repo's own ``.github/scripts/pr-description-check.sh``
   -- the script CI's PR Hygiene runs -- is read from ``origin/<base>``, never from
   the checkout, so a branch cannot weaken its own check, and run on the body.
   A failure prints that script's message; that is exit 22. A base without the
   script (another repo) skips it silently.
+* **Sibling sweep (advisory until CI enforces it).** On a ``fix``/``revert`` title (the
+  branch's first commit subject) the body's ``## Sibling sweep`` section is judged by
+  ``.github/scripts/sibling_list_check.py``, also read from ``origin/<base>``. While CI's
+  step is in warn mode the findings print and the exit stays 0; once the script turns red
+  for this pull request, the same findings are exit 23. A base without the script skips it.
+
+* **Proof line (advisory until CI enforces it).** On a ``fix`` title (the branch's first
+  commit subject) the body's ``Proof:`` line must sit inside ``## Tests``.
+  ``.github/scripts/proof_line_check.py``, also read from ``origin/<base>``, judges it, and
+  compares it with ``<git-dir>/prepare-pr-prove.json`` -- the record ``prove.py`` writes --
+  for the same tree, so a stale or invented line fails here though CI cannot see the
+  record. While CI's step is in warn mode the findings print and the exit stays 0; once the
+  script turns red for this pull request the same findings are exit 24. A base without the
+  script skips it.
+
+* **Gate proof (advisory).** A ``Gate proof:`` line in the body is a claim that
+  ``pre_push_gate.py`` ran. It is checked against ``<git-dir>/prepare-pr-gate-proof.json``
+  for HEAD's tree; a line the proof contradicts, or that has no proof behind it, is exit
+  25. A body with no such line never fails: the proof is optional.
 
 All checks run and print before any exit; when several breach, the lowest code wins.
 
-Usage:  python3 diff_signals.py [base-branch] [--check-body]
+Size and age signals are printed, never an exit code. ``! SIZE`` appears at
+``SIZE_HINT_FILES`` changed files and says more at ``SIZE_STOP_FILES``, where CI's
+``PR Size`` check (``.github/scripts/pr_size.py``) wants an owner's approval once it
+is enforced. ``--age`` adds ``! AGE`` from ``gh pr view`` when the pull request has
+been open ``AGE_HOURS`` hours; it is opt-in because it is the one call that leaves
+the machine.
+
+Usage:  python3 diff_signals.py [base-branch] [--check-body] [--age]
 Exit:   0 printed / body passes | 20 unaccounted area(s) | 21 What changed too long |
-        22 template sections missing | 2 environment error
+        22 template sections missing | 23 Sibling sweep missing or malformed (when enforced) |
+        24 Proof line missing, malformed or stale (when enforced) |
+        25 a Gate proof: line the recorded proof contradicts |
+        2 environment error
 """
 
 import argparse
+import importlib.util
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 SIGNALS = [
     (
@@ -66,6 +100,18 @@ SIGNALS = [
 # states the same number next to its paragraph rule; a test keeps the two equal.
 WORD_LIMIT = 500
 
+# Table rows (header and |---| separator not counted) allowed in What changed,
+# summed over every table there. references/body-picture.md's "eight rows is the
+# ceiling" for a picture; a test keeps the two equal.
+TABLE_ROW_LIMIT = 8
+
+# Size and age signals. Printed, never an exit code. A test keeps these equal to the
+# thresholds in .github/scripts/pr_size.py, which is what CI's PR Size check judges
+# (files, not lines: a 5,000-line split is usually fine, an 80-file change is not).
+SIZE_HINT_FILES = 50
+SIZE_STOP_FILES = 80
+AGE_HOURS = 168
+
 # git prints every path with forward slashes, on every OS. These helpers split
 # and join git's own output, never filesystem paths, so the separator is git's.
 GIT_SEP = "/"
@@ -75,6 +121,14 @@ BODY_FILENAME = "prepare-pr-body.md"
 
 # CI's template check, read from origin/<base> by --check-body.
 TEMPLATE_CHECK = ".github/scripts/pr-description-check.sh"
+
+# CI's Sibling sweep check, read from origin/<base> by --check-body.
+SIBLING_CHECK = ".github/scripts/sibling_list_check.py"
+
+# CI's Proof line check, read from origin/<base> by --check-body, and the record
+# prove.py writes for it to compare against (inside the git directory).
+PROOF_CHECK = ".github/scripts/proof_line_check.py"
+PROVE_RECORD = "prepare-pr-prove.json"
 
 # Bare file names that appear in many places at once; naming one of these does
 # not tell the reader WHICH one changed, so it never satisfies the accounting.
@@ -122,6 +176,50 @@ def area_of(path):
     if len(parts) >= 3 and (parts[:2] == ["src", "kiro_crew"] or parts[:2] == ["website", "src"]):
         return GIT_SEP.join(parts[:3])
     return parts[0]
+
+
+def size_signal(file_count):
+    """The ``! SIZE`` line for a diff of ``file_count`` files, or None under the hint."""
+    if file_count >= SIZE_STOP_FILES:
+        return (
+            "! SIZE: {} files (CI's PR Size limit is {}) - an owner approves with "
+            "`/pr-size approve: <reason>`; or split along a seam, or land it today".format(
+                file_count, SIZE_STOP_FILES
+            )
+        )
+    if file_count >= SIZE_HINT_FILES:
+        return (
+            "! SIZE: {} files (hint at {}, PR Size limit {}) - split along a seam "
+            "or land it today".format(file_count, SIZE_HINT_FILES, SIZE_STOP_FILES)
+        )
+    return None
+
+
+def hours_open(created_at, now):
+    """Whole hours from an ISO-8601 ``created_at`` (``Z`` suffix allowed) to ``now``."""
+    text = created_at.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    created = datetime.fromisoformat(text)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return max(0, int((now - created).total_seconds() // 3600))
+
+
+def age_signal(hours):
+    """The ``! AGE`` line for a pull request open ``hours`` hours, or None."""
+    if hours >= AGE_HOURS:
+        return (
+            "! AGE: open {} h ({}+ days) - merge, split or close; waiting for review "
+            "is not your fault, so ask an owner which".format(hours, AGE_HOURS // 24)
+        )
+    return None
+
+
+def pr_created_at():
+    """``createdAt`` of this branch's pull request, or None (no gh, no PR, no network)."""
+    rc, out, _ = run(["gh", "pr", "view", "--json", "createdAt", "--jq", ".createdAt"])
+    return out.strip() if rc == 0 and out.strip() else None
 
 
 def changed_paths(name_status):
@@ -184,15 +282,46 @@ def unaccounted_areas(paths, body):
     return missing
 
 
+def _what_changed_unfenced(body):
+    """The ``## What changed`` section with fenced blocks removed, or None if absent."""
+    m = re.search(r"^## +What changed[^\n]*\n(.*?)(?=^## |\Z)", body, re.MULTILINE | re.DOTALL)
+    if not m:
+        return None
+    return re.sub(r"^```.*?^```[ \t]*$", "", m.group(1), flags=re.MULTILINE | re.DOTALL)
+
+
+_TABLE_SEPARATOR = re.compile(r"^\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$")
+
+
+def what_changed_table_rows(body):
+    """Table rows in ``## What changed``, outside fences; headers and separators excluded.
+
+    Each ``|---|`` separator marks the row above it as a header. Returns None when
+    the body has no such section.
+    """
+    section = _what_changed_unfenced(body)
+    if section is None:
+        return None
+    rows = 0
+    for line in section.splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        if _TABLE_SEPARATOR.match(s):
+            rows -= 1  # the line above was the header, not a row
+        else:
+            rows += 1
+    return max(rows, 0)
+
+
 def what_changed_prose(body):
     """The ``## What changed`` section with fences, table rows and image lines removed.
 
     Returns None when the body has no such section (template absent or renamed).
     """
-    m = re.search(r"^## +What changed[^\n]*\n(.*?)(?=^## |\Z)", body, re.MULTILINE | re.DOTALL)
-    if not m:
+    section = _what_changed_unfenced(body)
+    if section is None:
         return None
-    section = re.sub(r"^```.*?^```[ \t]*$", "", m.group(1), flags=re.MULTILINE | re.DOTALL)
     kept = []
     for line in section.splitlines():
         s = line.strip()
@@ -225,8 +354,18 @@ def check_body(body, name_status, word_limit=WORD_LIMIT):
     prose = what_changed_prose(body)
     too_long = False
     if prose is None:
+        # The template check (exit 22) already fails this body; not a second gate.
         print("WARN: no '## What changed' section found - length check skipped")
     else:
+        rows = what_changed_table_rows(body)
+        if rows > TABLE_ROW_LIMIT:
+            too_long = True
+            print(
+                "TOO MANY ROWS: What changed has {} table rows (limit {}) - a picture shows "
+                "only the delta; move the walkthrough out, the diff is the evidence".format(
+                    rows, TABLE_ROW_LIMIT
+                )
+            )
         n = word_count(prose)
         if n > word_limit:
             too_long = True
@@ -246,6 +385,34 @@ def check_body(body, name_status, word_limit=WORD_LIMIT):
     print("every changed area is named in the body")
     if too_long:
         return 21
+    return 0
+
+
+def gate_proof_check(body, gitdir):
+    """Return 25 when a ``Gate proof:`` line in ``body`` contradicts the recorded proof, else 0.
+
+    ``pre_push_gate.py`` owns the proof format, so it is loaded from beside this script.
+    Without a ``Gate proof:`` line, or without that script, there is nothing to contradict.
+    """
+    if "Gate proof:" not in body:
+        return 0
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pre_push_gate.py")
+    previous, sys.dont_write_bytecode = sys.dont_write_bytecode, True  # no __pycache__ here
+    try:
+        spec = importlib.util.spec_from_file_location("pre_push_gate", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(path)
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+    except (AttributeError, ImportError, OSError, SyntaxError):
+        return 0
+    finally:
+        sys.dont_write_bytecode = previous
+    tree = run(["git", "rev-parse", "HEAD^{tree}"])[1].strip()
+    problem = gate.contradiction(body, gitdir, tree)
+    if problem:
+        print("GATE PROOF: {} - fix the line or delete it; the proof is optional".format(problem))
+        return 25
     return 0
 
 
@@ -287,10 +454,112 @@ def template_check(body, base):
     return 22
 
 
+def sibling_check(body, base):
+    """Run the base ref's ``SIBLING_CHECK`` on ``body``; return 0 or 23.
+
+    The script prints its findings and exits 1 only when it is enforcing, so a
+    warn-mode finding is shown here and never stops the loop. Absent on the base
+    (another repo, or before the check landed) is a silent skip.
+    """
+    rc, script, _ = run(["git", "show", "origin/{}:{}".format(base, SIBLING_CHECK)])
+    if rc != 0:
+        return 0
+    # The pull request title is the squash message of a one-commit branch; with the
+    # permitted second (mechanical) commit it is still the first commit's subject.
+    subjects = run(["git", "log", "--reverse", "--format=%s", "origin/{}..HEAD".format(base)])[1]
+    title = subjects.splitlines()[0].strip() if subjects.strip() else ""
+    merge_base = run(["git", "merge-base", "origin/" + base, "HEAD"])[1].strip()
+    head = run(["git", "rev-parse", "HEAD"])[1].strip()
+    if not (title and merge_base and head):
+        print("WARN: cannot resolve HEAD or the merge-base - sibling sweep check skipped")
+        return 0
+    with tempfile.TemporaryDirectory() as tmp:
+        script_path = os.path.join(tmp, "sibling_list_check.py")
+        with open(script_path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(script)
+        env = dict(os.environ, PR_TITLE=title, PR_BODY=body, MERGE_BASE=merge_base, HEAD_SHA=head)
+        env.pop("GITHUB_ACTIONS", None)  # plain lines here, not workflow annotations
+        env.pop("PR_CREATED_AT", None)
+        try:
+            p = subprocess.run(
+                [sys.executable, script_path],
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as exc:
+            print(
+                "WARN: cannot run {} ({}) - sibling sweep check skipped".format(SIBLING_CHECK, exc)
+            )
+            return 0
+    for line in p.stdout.splitlines():
+        print(line)
+    if p.returncode == 1:
+        return 23
+    if p.returncode != 0:
+        print("WARN: {} could not run ({}) - skipped".format(SIBLING_CHECK, p.stderr.strip()))
+    return 0
+
+
+def proof_check(body, base, gitdir):
+    """Run the base ref's ``PROOF_CHECK`` on ``body``; return 0 or 24.
+
+    The script prints its findings and exits 1 only when it is enforcing, so a
+    warn-mode finding is shown here and never stops the loop. Absent on the base
+    (another repo, or before the check landed) is a silent skip.
+    """
+    rc, script, _ = run(["git", "show", "origin/{}:{}".format(base, PROOF_CHECK)])
+    if rc != 0:
+        return 0
+    # The pull request title is the squash message of a one-commit branch; with the
+    # permitted second (mechanical) commit it is still the first commit's subject.
+    subjects = run(["git", "log", "--reverse", "--format=%s", "origin/{}..HEAD".format(base)])[1]
+    title = subjects.splitlines()[0].strip() if subjects.strip() else ""
+    tree = run(["git", "rev-parse", "HEAD^{tree}"])[1].strip()
+    if not (title and tree):
+        print("WARN: cannot resolve HEAD - proof line check skipped")
+        return 0
+    with tempfile.TemporaryDirectory() as tmp:
+        script_path = os.path.join(tmp, "proof_line_check.py")
+        with open(script_path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(script)
+        env = dict(
+            os.environ,
+            PR_TITLE=title,
+            PR_BODY=body,
+            TREE_ID=tree,
+            PROVE_RECORD=os.path.join(gitdir, PROVE_RECORD),
+        )
+        env.pop("GITHUB_ACTIONS", None)  # plain lines here, not workflow annotations
+        env.pop("PR_CREATED_AT", None)
+        try:
+            p = subprocess.run(
+                [sys.executable, script_path],
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as exc:
+            print("WARN: cannot run {} ({}) - proof line check skipped".format(PROOF_CHECK, exc))
+            return 0
+    for line in p.stdout.splitlines():
+        print(line)
+    if p.returncode == 1:
+        return 24
+    if p.returncode != 0:
+        print("WARN: {} could not run ({}) - skipped".format(PROOF_CHECK, p.stderr.strip()))
+    return 0
+
+
 def parse_args(argv):
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("base", nargs="?", default="")
     ap.add_argument("--check-body", action="store_true")
+    ap.add_argument("--age", action="store_true")
     return ap.parse_args(argv[1:])
 
 
@@ -317,7 +586,7 @@ def main(argv):
         err("ERROR: origin/{0} not found - run: git fetch origin {0}".format(base))
         return 2
 
-    body = None
+    body = gitdir = None
     if args.check_body:
         gitdir = run(["git", "rev-parse", "--absolute-git-dir"])[1].strip()
         if not gitdir:
@@ -346,13 +615,34 @@ def main(argv):
         if re.search(pat, ns, re.IGNORECASE | re.MULTILINE):
             print("! " + msg)
             any_flag = True
+    # One name-status row per changed file (a rename is one row), the count GitHub
+    # reports as changed_files and PR Size judges.
+    size_line = size_signal(len([row for row in ns.splitlines() if row.strip()]))
+    if size_line:
+        print(size_line)
+        any_flag = True
+    if args.age:
+        created = pr_created_at()
+        try:
+            age_line = (
+                age_signal(hours_open(created, datetime.now(timezone.utc))) if created else None
+            )
+        except ValueError:  # a createdAt that is not a timestamp is no signal
+            age_line = None
+        if age_line:
+            print(age_line)
+            any_flag = True
     if not any_flag:
         print("(no notable structural signals - still describe the behavior changes)")
 
     if body is not None:
         rc = check_body(body, ns)
         tpl = template_check(body, base)
-        return rc or tpl
+        # Evaluated before the return: every check prints, then the lowest code wins.
+        sibling = sibling_check(body, base)
+        proof = proof_check(body, base, gitdir)
+        gate_proof = gate_proof_check(body, gitdir)
+        return rc or tpl or sibling or proof or gate_proof
     return 0
 
 

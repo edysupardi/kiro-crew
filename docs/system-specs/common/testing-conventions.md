@@ -49,8 +49,14 @@ promise-sleep, `waitForTimeout`); a deliberate one says why with
   executor thread), and a ceiling of 30 s or more only names a hang -- a
   `wait_for(..., timeout=2)`, a `.result(timeout=5)` or a poll of N short sleeps bets
   on the runner's speed, and `test/test_wait_discipline_ratchet.py` holds each test
-  file to the number of those it already has (a renamed file keeps its line under its
-  new path: `python test/test_wait_discipline_ratchet.py --move OLD NEW`).
+  file to the number of those it already has: on a pull request each touched file is
+  compared to its count at the PR's merge-base, and also to its committed baseline
+  entry, so a PR is not blamed for drift it did not cause but a rename without a
+  baseline-entry update is still caught.  A new file the PR splits off may declare
+  its count by adding an entry to ``test/wait_discipline_baseline.txt``; without
+  that entry its sites are a violation.  Merge-order drift in untouched files is
+  still caught by the committed baseline on main and in the merge queue.  A renamed file
+  keeps its line under its new path: `python test/test_wait_discipline_ratchet.py --move OLD NEW`.
   [Class 2](#2-wall-clock-races).
 - **D2. One clock, injected or frozen at the seam the code reads.** Replace the module's
   own `time` / `datetime` name with a `ManualClock` (`kiro_crew.testing.clock`, or the
@@ -122,13 +128,17 @@ id>` with the reason where a `semgrep/test-determinism.yaml` rule refuses it. Re
 accepts the marker, and the reason is the record of why the rule does not apply there.
 
 `test/test_flake_pattern_ratchet.py` counts, file by file, the shapes
-`semgrep/test-determinism.yaml`'s patterns miss, so no site needs both markers: patches of `asyncio.sleep`, of the
-`datetime` classes or of another module's `time` binding (`<mod>.time`,
-`"pkg.mod.time.<attr>"`, `mock.patch.object(time, ...)`), a `sys.modules` eviction with
+`semgrep/test-determinism.yaml`'s patterns miss, so no site needs both markers: patches of `asyncio.sleep` or of the
+`datetime` classes (named directly or through another module's binding; the `time`
+module through any binding is the semgrep rule's), a `sys.modules` eviction with
 no restore in the same function, raw environment writes, duration bounds, literal waits
 under two seconds (the too-tight lost-run bound of class 6; a negative such as
 `assert not done.wait(0.3)` is not one), literal listener ports, fixed crew-log flush
-ceilings, crew-log removals outside `eager.paused()`, and five frontend shapes. It fails a
+ceilings, crew-log removals outside `eager.paused()`, and five frontend shapes. In a file
+the pinned semgrep reads no line of, it counts the `time` patches the semgrep rule would
+refuse as well: a file over 1,000,000 bytes, or one holding both a lambda with a bare `*`
+(`lambda a, *, b: ...`) and a parenthesized `with (a as b, ...):`, which semgrep 1.78
+cannot parse. It fails a
 change that raises any file's count above that file's count at the change's merge-base:
 `FLAKE_RATCHET_BASE` when set, the first parent of a CI merge commit, else the newer
 merge-base with `upstream/main` or `origin/main` (fetch the remote your branch was cut
@@ -140,8 +150,12 @@ change; a function edited in place, or a site a `flake-ok` still excuses, has no
 left). When no merge-base is readable, the test
 warns `compared nothing` and passes rather than judge a change by sites other merged
 changes added. CI's Backend Tests checkout is depth 2, so the merge commit's first
-parent is readable there and CI gates the comparison; run
-`python -m pytest -n0 test/test_flake_pattern_ratchet.py` before pushing to see it first. It does not
+parent is readable there and the shards gate the comparison after their 20-40 min run;
+the early, fail-closed verdict is `fast-gate.yml`'s `flake-pattern-ratchet` job, which
+checks out depth 2 on every pull request and merge group so the resolver reads that
+first parent, answers in about a minute, and fails when the ratchet still
+reports `compared nothing`. Run `python -m pytest -n0 test/test_flake_pattern_ratchet.py`
+before pushing to see the same verdict first. It does not
 count an order assertion (D4) or a network call (D10): those rest on review. A
 `flake-ok` line whose reason has ten characters or more, words and not just punctuation
 or digits, is not counted. `python test/test_flake_pattern_ratchet.py` prints each
@@ -165,7 +179,10 @@ The test floor clears live session and run execution records between tests so a
 reused temporary home cannot inherit another test's routing or retention mode.
 Dispatch doubles provide a concrete `get_agent_selection()` tuple, including
 `("template", "")` for the default template. An unconstrained mock is not a
-valid member or template identity. Session context doubles implement the async
+valid member or template identity. Runtime fixtures that bypass the constructor
+with `__new__` explicitly set `_remote_workspace = None` for a local session,
+so activation exercises its real local path rather than an incomplete object.
+Session context doubles implement the async
 `memory_mode_for_session()` accessor and return a concrete retention mode.
 Session-start collector tests declare their
 MCP roster explicitly rather than inheriting the installed agent's tools.
@@ -351,7 +368,7 @@ every supported platform's `pid_max`
 several; `test/test_update_provider.py::_UNALLOCATABLE_PID` is the same value), or
 neutralise the killer
 and assert the ordering instead
-(`test/test_platform_compat.py::TestKillAndReap`). The first spelling IS gated:
+(`test/test_platform_compat_kill_reap.py::TestKillAndReap`). The first spelling IS gated:
 `semgrep/mock-pid-allocatable.yaml` (`kirocrew.mock-pid-allocatable`), which
 `code-review.yml`'s SAST job runs diff-scoped and blocking, refuses a literal below
 `2**32` assigned to `.pid` or passed as `pid=` to a `Mock` / `SimpleNamespace`
@@ -446,7 +463,7 @@ test that removes crew-log segments or a unit folder with a bare `path.unlink()`
 which reads the unit on its own thread after every entry. Retention removes them inside
 `crew_log.eager.paused()`, which holds the folder between batches; a test does the same
 after `eager.drain()`, and asserts the hold was granted rather than proceeding without it
-(`test_issue_radar_crew_store.py::test_a_unit_recreated_under_its_id_folds_cold_however_far_its_seq_climbed`).
+(`test_issue_radar_crew_store_fold_bounds.py::test_a_unit_recreated_under_its_id_folds_cold_however_far_its_seq_climbed`).
 That hold is only waited for off the event-loop thread: an `async def` test that calls
 `store.sweep_expired` or `store.remove_unit` directly proceeds without it, so the fold
 woken by the entry the test just flushed keeps the segment open and Windows reports
@@ -460,7 +477,7 @@ test patched `_read_header_line` can assign `_slot_index` after the test's own r
 replacing the map the test is about to check with one that proves every unit. A test
 that patches a store read and then inspects the index does it inside
 `_eager_folder_held()` (drain, then `eager.paused()`), the way the two unprovable-header
-tests in `test_issue_radar_crew_store.py` do.
+tests in `test_issue_radar_crew_store_write_refusal.py` do.
 
 **Hold the crew-log writer for a burst the test counts.** `CrewLogWriter` claims a
 unit's whole bucket after its batching pause (`WriterLimits.batch_deadline_seconds`,
@@ -524,11 +541,11 @@ exercises the production value. Symptom: a test that "shortens" a timeout yet
 still takes the full production duration.
 
 ```python
-# WRONG — handlers/__init__.py only re-exports the constant; sessions.py
-# still reads its own module global (test silently waits the real 10s):
+# WRONG — handlers/__init__.py only re-exports the constant; the sessions
+# family still reads its own module global (test silently waits the real 10s):
 monkeypatch.setattr("kiro_crew.dashboard.handlers._SHUTDOWN_TIMEOUT_SECS", 0.05)
 
-# RIGHT — patch where the constant is defined and read:
+# RIGHT — patch the sessions facade, whose mirror writes the owner that reads it:
 monkeypatch.setattr("kiro_crew.dashboard.handlers.sessions._SHUTDOWN_TIMEOUT_SECS", 0.05)
 ```
 
@@ -817,9 +834,9 @@ one scope down:
   boundary, so writing back a setup-phase snapshot during teardown would drop the handler
   the teardown phase is capturing through.
 * `_restore_autonudge_singleton` puts `autonudge._INSTANCE` back to whatever the test
-  inherited. It lives in `test/conftest.py` rather than the rootdir floor, because only
-  the `test/` suites drive the service; it is listed here because its failure shape is
-  the process-global one this section is about.
+  inherited. It lives in `test/conftest_resets.py`, bound by `test/conftest.py`, rather
+  than the rootdir floor, because only the `test/` suites drive the service; it is
+  listed here because its failure shape is the process-global one this section is about.
   `AutoNudgeService.start()` publishes itself there and `stop()` clears it, so
   a test that starts the service — or drives a dashboard handler that does — leaves a live
   instance holding timer TASKS created on that test's event loop. Every later test in the
@@ -840,6 +857,28 @@ the held slot descriptors are module state.
 
 `test/conftest.py` holds the rest: suite-specific isolation (Slack thread state, the
 model-window cache, the platform context, …) and the Windows collect-ignore list.
+
+Both conftests keep most of their definitions in plain modules beside the suite, never
+collected: `test/conftest_floor_*.py` for the rootdir file and `test/conftest_*.py` for
+`test/conftest.py`. Each conftest binds every fixture and hook back into its own
+namespace, because pytest registers them from there. The rootdir file loads its parts
+by file path (`_load_floor_part`), since `test/` is off `sys.path` for the in-package
+suites. A patch on a conftest rebinds that conftest's global only, so a function that
+reads a name a test patches there stays in the conftest beside it, and so does what a
+test needs fresh each time it loads `conftest.py` by path (the audit core, the residue
+guard). `test/test_conftest_parts_reach.py` resolves the patches the test trees make on
+a conftest it can name (a by-path load, a plugin lookup, `import conftest`, a helper
+parameter every caller fills with one) and fails on a reader in a part, apart from
+listed readers the patching test never runs. It fails closed on a patch call it cannot
+resolve in a file that reaches a conftest; a plugin written as a string is listed there
+by hand. A source pin whose assertion covers every site in a conftest (absent,
+counted, listed) reads it joined with its parts. Anything else a test reads on a
+conftest is bound from its part. New isolation goes in the part whose docstring names
+its job, and a new fixture or hook is also added to its conftest's import block, or
+pytest never sees it. The local related-test selection matches the name `conftest.py`
+only, so after editing a part also run the floor's own tests
+(`test/test_host_isolation_floor*.py`, `test/test_host_service_guard.py`,
+`test/test_testing_determinism_helpers.py`, `test/test_conftest_parts_reach.py`).
 
 Host-side `PodConfig` paths do not derive from `KIROCREW_HOME`. Tests that publish
 pod state must set `pod_root`, `pods_dir` and `artifacts_dir` under `tmp_path` on
@@ -1444,17 +1483,22 @@ measures, never above.
   tmpfs cleared on reboot. That reliance is deliberate and is worth knowing if you own a
   long-lived CI host: it is bounded at one directory per killed run.
 
-  Reported, not yet fatal, and that split is a staged rollout rather than a soft opinion.
-  Two classes under that root are deliberately **not** residue and are excluded by name:
-  the computer-use screenshot spool, which production keeps as a persistent ring buffer,
-  and the scratch that Chromium and the Playwright driver create because a child inherits
-  the redirected `TMPDIR`. What remains is a handful of single `mkstemp` **files**, some
-  of them written by production code a test merely reached — one inode each, not the
-  `mkdtemp` directories the rule is about. Failing the suite on that set today would
-  block every unrelated change while it is attributed, and a guard that blocks unrelated
-  work is a guard somebody deletes. Set `KIROCREW_TMP_RESIDUE_STRICT=1` to make it fatal,
-  which is how the remaining set gets burned down and how the line gets held afterwards —
-  the same shape as `windows-expected-failures.txt`.
+  Fatal in CI's `Backend Tests*` jobs, a warning elsewhere. Those six jobs in `ci.yml`
+  set `KIROCREW_TMP_RESIDUE_STRICT=1`, so a test that leaves residue fails the shard it
+  runs in. A local run only warns, because a developer host has its own tools writing under
+  the redirected `TMPDIR` that CI does not have; set the variable yourself to hold a
+  local run to the CI rule. Two classes under that root are deliberately **not** residue
+  and are excluded by name: the computer-use screenshot spool, which production keeps as
+  a persistent ring buffer, and the scratch that Chromium and the Playwright driver
+  create because a child inherits the redirected `TMPDIR`.
+
+  A residue line names the test that created the entry when `tempfile` made it in that
+  worker. The usual cause is not a missing cleanup but a late writer: a background
+  thread that still holds a path under the removed directory and calls
+  `mkdir(parents=True)`, which re-creates it. The crew-log eager fold worker is one: a
+  fold still running when a test removes its private `KIROCREW_HOME` re-creates that
+  home. Use the conftest's per-test `KIROCREW_HOME` pin instead of a private home,
+  because the conftest stops that worker before the pin lifts.
 
   Why it is worth a guard rather than a convention: `/tmp` is commonly a tmpfs with a
   fixed **inode** budget (1,048,576 on the hosts this was measured on), and it returns
@@ -1533,8 +1577,9 @@ measures, never above.
   no tool state and **spins forever instead of exec'ing an interpreter**. Nine such
   processes were measured reparented to init at 1464% CPU between them for six days;
   another site turned it into a permanently blocked xdist worker. Either pin the real
-  interpreter's own directory first on `PATH` (`test_security_conductor_scripts.runnable_python`
-  is the shape) or resolve the tool to its real executable before building the env. Do
+  interpreter's own directory first on `PATH`
+  (`test_security_conductor_scripts_verify_finding.runnable_python` is the shape) or
+  resolve the tool to its real executable before building the env. Do
   NOT drop the `HOME` substitution to fix it — that is usually a blast-radius bound
   somebody chose on purpose.
 
@@ -1547,7 +1592,7 @@ measures, never above.
   directory that also contains sibling tools.
 
 - **Bootstrap fixtures must match the child's libc target.** In
-  `test_playwright_cli_installer.py`, `_expected_node_base` uses native
+  `playwright_cli_installer_helpers.py`, `_expected_node_base` uses native
   `os.confstr("CS_GNU_LIBC_VERSION")` on Linux/x64 to select `glibc-217` below
   glibc 2.28. OS and architecture alone give the fake mirror the wrong archive,
   failing before checksum and cleanup assertions. Keep the real platform tool
@@ -1828,7 +1873,7 @@ found these further classes. Each one passed on the host that wrote it.
   tests that meant to exercise the PEP 668 branch failed on every uv host. Pin every probe
   the function reads, not just the one the test is about.
 - **A test-only import that CREATES the data home.** `test/conftest.py` imports
-  `slack.handler`, which built `_PHASE_EMOJIS` by calling `KiroCrewConfig.load()` at import —
+  `slack.handler` (through `test/conftest_slack.py`), which built `_PHASE_EMOJIS` by calling `KiroCrewConfig.load()` at import —
   and loading resolves `config_dir()`, which `mkdir`s `~/.kiro/crew`. Import-time reads of
   the data home peek first (`peek_data_home()`) and load only when the file already exists.
 - **Bytecode written into the checkout by import-by-path.** Loading a script with
@@ -1924,11 +1969,12 @@ tests; the classes below are what the rest was made of.
   The `mc-maint` pool is the gateway's own, so `_join_test_loop_executor` (which joins
   the TEST LOOP's default executor at teardown) cannot reach it; the caller-resolves rule
   is the fix there. The loop's executor is covered: a cache write-through in
-  `test_source_providers.py` scheduled a detached repo-visibility refresh whose
-  `to_thread` resolved the provider CLI through `workspace_root()`; the join drains it,
-  and the module also stubs the scheduler (a recorder, so the calls stay observable),
-  because no test there is about visibility and a side task that never starts has
-  nothing to drain.
+  `test_source_providers.py` (and the topic modules split from it, which import its
+  fixtures from `source_providers_helpers.py`) scheduled a detached repo-visibility
+  refresh whose `to_thread` resolved the provider CLI through `workspace_root()`; the
+  join drains it, and those modules also stub the scheduler (a recorder, so the calls
+  stay observable), because no test there is about visibility and a side task that
+  never starts has nothing to drain.
 - **Dropping the override to test the DEFAULT home resolves, and creates, the real one.**
   Five tests `delenv("KIROCREW_HOME")` (or `patch.dict(os.environ, {}, clear=True)`, or
   ran a module-scoped fixture BEFORE the function-scoped floor) and let `config_dir()`
@@ -2096,8 +2142,9 @@ run, and each named a class the floor did not yet close.
   registry, and `pod_root` from `Path.home()/.kirocrew-pods`. A fixture that was simply
   `PodConfig.load()` therefore recorded `viability-*.refused` notes into the real pod plane.
   The floor now pins `KIROCREW_POD_ROOT` and `KIROCREW_POD_ENV_DIR` per test
-  (`TestThePodPlaneIsPinnedForEveryTestpath`); `test_pod.py` clears them deliberately
-  because its subject includes the home-derived defaults, with `HOME` redirected first.
+  (`TestThePodPlaneIsPinnedForEveryTestpath`); the modules that import `pod_helpers.py`'s
+  autouse `_isolate_pod_host_state` (`test_pod.py` among them) clear them deliberately because
+  the pod tests' subject includes the home-derived defaults, with `HOME` redirected first.
 - **A collection-time probe reads the operator's config.** `test_app_backend.py`'s
   `_sandbox_can_spawn()` runs at import, before any per-test pin, and called
   `wrap_argv()` — which loads `KiroCrewConfig` from the REAL `~/.kiro/crew/config.json`.
@@ -2205,7 +2252,8 @@ carrying forward:
   `killpg` (POSIX) or `taskkill /T` (Windows), which is what
   `test/installer_test_helpers.run_bounded` already did one layer up. **And a test that
   lets a proof actually RUN pins the interpreter's own directory first on PATH**
-  (`runnable_python`). It cannot be fixed by spelling `sys.executable` in the proof
+  (`test_security_conductor_scripts_verify_finding.runnable_python`). It cannot be fixed by
+  spelling `sys.executable` in the proof
   itself: the verifier refuses a proof whose argv names an absolute path outside the
   worktree, and that refusal is correct and stays.
 
@@ -2260,7 +2308,7 @@ carrying forward:
   window.**
 
 - **A production timeout the test never asserts on is paid in full, ~11 times over.**
-  Eleven `test_slack_gateway.py::TestAutoApplyUpdate*` tests measured **30.02–30.16s
+  Eleven `test_slack_gateway_update_*.py::TestAutoApplyUpdate*` tests measured **30.02–30.16s
   each, identically in all five runs**: `_auto_apply_update` awaits
   `_drain_update_callback_work(timeout=30.0)`, nothing in those tests makes the drain
   condition true, and it polls at 10ms to the deadline. That is **~330s of pure sleeping
@@ -2452,7 +2500,7 @@ The ten failures were the venv, not the code:
   `sys.executable`, so `resolve_app_python` and `venv_provided_command` both "prefer" the
   running interpreter. `python -m venv` — where real venvs come from — uses symlinks on
   POSIX. Build fixture venvs with `symlinks=not IS_WINDOWS`
-  (`test_apps_backend_coverage._create_real_venv`).
+  (`test_apps_backend_coverage_dispatch._create_real_venv`).
 - **A probe of the RUNNING interpreter's packaging.** `_run_app_build` decides whether
   to plan a `pip install` with `importlib.util.find_spec("pip")`, which is `None` in a uv
   venv, so every build-planning test captured an empty command list. Already a documented
@@ -2938,7 +2986,7 @@ negative control before it was believed, and that is what caught them.
   re-resolving the name is. Both halves are worth having: the test stops accusing observers,
   and a well-behaved observer stops being visible to tests that patch a stdlib symbol.
 - **A datagram `connect()` sends no packet, so it is a routing-table query and not a network
-  connection.** `src/kiro_crew/security/argv_floor.py`'s own-address enumeration connects a
+  connection.** `src/kiro_crew/security/argv_floor_hosts.py`'s own-address enumeration connects a
   `SOCK_DGRAM` socket to `198.51.100.1:53` and `2001:db8::1:53` — TEST-NET-2 and
   documentation addresses, contacted by nobody — to learn the primary outbound address per
   family, and says so in a comment three lines above. The `socket.connect` audit hook never
@@ -3087,7 +3135,7 @@ mechanism, and one of them a production defect wearing a test's clothes.
   with it the frames); both hunks together are green, and reverting the test hunk alone
   stays green, so the production change is the load-bearing one and the test change is
   hygiene plus the witness. The pin then paid for itself before the PR merged: on the macOS
-  shard it read a lease from `test_crew_log_core.py`'s chmod-refusal test, an earlier file
+  shard it read a lease from `test_crew_log_core_segments.py`'s chmod-refusal test, an earlier file
   on the same worker -- `store._mkdir_private` warned with `exc_info=True` from inside
   `CrewLog.append`, the same class at a second site, POSIX-only because Windows never
   refuses the `chmod`. That warning carries its traceback as text now and the test pins
@@ -3106,7 +3154,7 @@ mechanism, and one of them a production defect wearing a test's clothes.
   are skipped before the parse, which keeps it under a second), and the sites left in the
   package equal to a vetted list. A checklist item asks a reviewer to notice; the pin
   fails the first run that adds one.
-- **"Let it finish" as two 200 ms sleeps.** `test_overload_integration_glue.py`'s
+- **"Let it finish" as two 200 ms sleeps.** `test_overload_integration_glue_store_off_loop.py`'s
   `test_drain_refill_reads_the_store_off_loop` waited `20 x sleep(0.01)` twice for started
   runs to settle through the writer thread, then asserted a row reached a terminal state; in
   round 3, on a loaded worker, both rows still read `starting`. The pin the test exists for
@@ -3174,7 +3222,7 @@ went red, or the fix lands in the wrong file and the leak stays.
 
 - **A test that plants a fixture under `tmp_path` and asserts a "not under `$HOME`"
   refusal does NOT fire is asserting where the host's `TMPDIR` lives.**
-  `test_dev_fleet_app.py::test_trusted_bin_pins_the_resolved_target_not_the_symlink` built
+  `test_dev_fleet_app_trusted_helpers.py::test_trusted_bin_pins_the_resolved_target_not_the_symlink` built
   a fake Homebrew cellar under `tmp_path` and expected `_trusted_bin` to accept it; on this
   host `TMPDIR` sits under `~/.kiro/crew/scratch`, so the production check that refuses
   anything under `Path.home()` correctly refused the fixture, 5/5, and the same test is
@@ -3199,7 +3247,7 @@ went red, or the fix lands in the wrong file and the leak stays.
   repeat would time `re`'s compile cache rather than the translator, and the cheaper of
   two readings would let a stall that reproduces intermittently pass.
 - **A helper that counts WARNINGs over unfiltered `caplog.records` asserts on every thread
-  in the worker.** `test_taskq_runner_adapter.py`'s `_one_warning` demanded exactly one
+  in the worker.** `test_taskq_runner_adapter_durability.py`'s `_one_warning` demanded exactly one
   record while the test had scoped `at_level` to `kiro_crew.taskq.adapters.runner`; the
   second record was `kiro_crew.sandbox`'s mount-source sweep, finishing on the shared
   `mc-maint` executor seconds after the `SessionManager` test that armed it had torn down
@@ -3224,7 +3272,7 @@ went red, or the fix lands in the wrong file and the leak stays.
   DROPPED the sibling `_gh_prefers_ssh` pin (so `gh config get` ran for real); a
   `functools.lru_cache`d `ssh -V` probe behind `_build_launcher_script` that whichever
   launcher-building test ran first paid (six sandbox files, one autouse pin each, the
-  house pattern from `test_sandbox_argv.py`); the doctor pinning only `shutil.which` while
+  house pattern from `sandbox_argv_helpers.py`); the doctor pinning only `shutil.which` while
   its sections resolved through `platform_compat.trusted_aws_bin` / `trusted_system_bin` /
   `trusted_git_bin`; and `code_fingerprint()`'s lru_cache deciding WHICH test pays a real
   `git` on the developer's checkout, so fixing the flagged tests only moved the spawn to
@@ -3233,7 +3281,7 @@ went red, or the fix lands in the wrong file and the leak stays.
   `monkeypatch.chdir(tmp_path)` in the fixture closes the process-cwd hazard; adding
   `cwd=` to the product would turn git's rc=128 for a missing clone into a Python
   `FileNotFoundError` before git runs, which every caller reads off `returncode`, so that
-  descriptor is deliberately left. One production change: `browser_cli/install.py`'s
+  descriptor is deliberately left. One production change: `browser_cli/install_launcher.py`'s
   staged node launcher now runs from the managed leaf its docstring already promised, and
   `test_browser_cli_install_gateway_command.py` pins the `cwd` it is handed.
 - **`fd_leak` at +3 per unclosed SQLite handle, and why refcounting never reclaims it.**
@@ -3304,8 +3352,8 @@ went red, or the fix lands in the wrong file and the leak stays.
   `/proc/sys/kernel/pid_max` so the kernel's range check, not convention, is what makes
   the number unreachable.
 - **`network`: rank the address before you file the finding.** The UDP `connect` to
-  `198.51.100.1:53` / `2001:db8::1:53` in `argv_floor._own_interface_addresses` is the
-  packet-less local-IP trick over TEST-NET, a hardening item: `test_security.py` now routes
+  `198.51.100.1:53` / `2001:db8::1:53` in `argv_floor_hosts._own_interface_addresses` is the
+  packet-less local-IP trick over TEST-NET, a hardening item: `test_security_denied_commands.py` now routes
   it through an inert `_InertDatagramSocket` at the module's `socket` binding (datagram
   construction only; every other socket kind passes through) that records the peer and
   answers a documentation address from `getsockname`, and asserts the peers it WOULD have
@@ -3420,7 +3468,24 @@ that survives neither is the probe's.
   may get, and `a-ratchet-may-only-tighten` forbids raising it to fit -- concurrency fixes
   the budget, a looser cap would only hide the stall. Every nested run gets `--basetemp`
   under `tmp_path` (the rule from the fifth pass). Why one collect passed 60 s on this host
-  is NOT explained by this pass; the design defect was real regardless.
+  is NOT explained by this pass; the design defect was real regardless. A later pass found
+  most of the child's work: given three file arguments, pytest still walks every sibling in
+  `test/` (about 4,600 entries) through `pytest_ignore_collect` and `pytest_collect_file`.
+  Each child now passes `--ignore-glob=*`, which pytest never applies to a named argument,
+  so it reads only the three files and collects the same nodes in about 60% of the time
+  (Linux, six children in series: 26.3 s -> 15.7 s). The 60 s cap stays.
+  `test_a_nested_collection_reads_only_the_named_files` pins that only the named files
+  reach `pytest_collect_file`. A Windows runner is slower at the per-entry `stat` and
+  `relative_to` work this removes, so the saving is likely larger there; this pass did not
+  measure it on Windows. What kept the Windows children at 44-64 s against about 4 s on
+  Linux was `test/conftest.py`'s Windows `collect_ignore` list (91 names): pytest's own
+  `pytest_ignore_collect` rebuilds a conftest ignore list into absolute paths for every
+  entry it is offered, before it reads `--ignore-glob`, and it walks `test/` (~5,400
+  entries) once per file argument, so each three-file child built ~1.47 million paths, one
+  `GetFullPathNameW` call each. A Linux child given the same list goes from 4 s to 17 s.
+  The list is now a frozenset behind the conftest's own `pytest_ignore_collect`
+  (`platform_collect_ignore_helpers.py`), which builds none, and
+  `test_platform_collect_ignore.py` pins that on every platform. The 60 s cap stays.
 - **Reading a claim's task after the POST names whichever task won the race.**
   `test_cron_manual_run_claim_window.py::test_the_manual_wrappers_backstop_leaves_a_replacement_claim_alone`
   took `first = svc._claims[job.id].task` after the route answered; when the first run's
@@ -3478,10 +3543,10 @@ that survives neither is the probe's.
 
 #### What not to re-derive
 
-`test_plugin_import.py::test_the_frontier_is_bounded_when_no_directory_carries_a_marker`
+`test_plugin_import_bounds.py::test_the_frontier_is_bounded_when_no_directory_carries_a_marker`
 took 101 s once (round 1) and 30-41 s after: a nested-pytest test on a loaded host, the
 same shape as the ipv6 one, left as is.
-`test_instances.py::TestProxyRequest::test_failed_exchange_sends_no_link_and_remints`
+`test_instances_proxy.py::TestProxyRequest::test_failed_exchange_sends_no_link_and_remints`
 failed once in round 1 with `ProxyRequestError: instance is not connected` immediately
 after `connect()`; one occurrence under the round-1 probe is not attributable and is
 recorded here, not fixed. `test_dashboard_files_onloop_fs.py` is green: its red was the
@@ -3788,7 +3853,7 @@ assertion for the host fact it depends on before reading the test for a bug.
   base). The eleventh pass, on macOS, met the same leak from the other side and carries
   the fix in [#14388](https://github.com/kirodotdev/KiroCrew/pull/14388): a rootdir
   conftest floor that hands the next test the two globals it inherited, pinned in
-  `test_host_isolation_floor.py`. This pass adds only the witness the diagnosis needed:
+  `test_host_isolation_floor_restores.py`. This pass adds only the witness the diagnosis needed:
   the revoke tests' status assertions now carry the response body, so the next 409 names
   its branch in the failure instead of `assert 409 == 200`.
 What was flagged and read before being left alone. `slow`/`heavy_cpu` was dominated by the
@@ -3836,17 +3901,18 @@ review finding; the version below is what the lane accepted.
   `value` is the exception -- the same cycle one layer down. The fix is a CLASS whose
   `__exit__` copies `code`/`field`/`message`/`written` into a plain record and returns; its
   frame is the only thing that ever named the exception. The pin moved to the creator:
-  `test_crew_log_core.py`'s autouse fixture asserts `lease._held` empty after every test,
+  the autouse fixture in `crew_log_core_helpers.py`, which `test_crew_log_core.py` and its
+  parts bind, asserts `lease._held` empty after every test,
   WITHOUT `gc.collect()` (release rides the refcount; a lease held there is a retention).
   39 errors under the old helper, none under the new. The old `_raises(code)` also never
   compared its argument, and one site had said `bad_src` for a refusal the product spells
   `event_type_not_owned` (a crew type in a session log); the helper compares now, and the
   site says what it means.
 - **A stubbed releaser leaves a process-global tenancy alive for the worker.**
-  `test_cron_reaper.py::test_a_refused_pid_is_audited_as_a_failed_kill_not_reaped` read
+  `test_cron_reaper_failed_kill.py::test_a_refused_pid_is_audited_as_a_failed_kill_not_reaped` read
   `kill failed: runtime still leased by another tenant` for its fabricated pid 4242 in one
   round of three -- the round xdist placed it after
-  `test_connections_mint.py::test_the_mint_pid_is_protected_while_readiness_is_still_stalled`
+  `test_connections_mint_spec_files.py::test_the_mint_pid_is_protected_while_readiness_is_still_stalled`
   on one worker. That test replaced `_dispose_mint`, the only path that releases the
   `RUNTIME_TENANCY` claim the pid shield takes, with a no-op; and its client stand-in
   answers neither `is_alive` nor `is_process_alive`, which the table reads as alive for
@@ -4008,7 +4074,7 @@ warming to their caps. `slow` was the suite's own budgets, plus the five
 `test_subagent_force_stop_audit.py` cases at 30 s each -- a missing `_RESET_TIMEOUT` pin,
 which the concurrent fourteenth pass (native Windows, three rounds) found and fixes in
 [#15061](https://github.com/kirodotdev/KiroCrew/pull/15061), together with the
-`test_connections_mint.py` tenancy stub behind the same refused-kill wording the conftest
+`test_connections_mint_spec_files.py` tenancy stub behind the same refused-kill wording the conftest
 reset above floors.
 
 ## Running the suite: the defaults, and how to narrow safely
@@ -4645,7 +4711,7 @@ More shapes this class hides, all Windows-only and all green on every Linux run:
   run then fails as whichever later assertion happens to touch it first — a park that
   never happened reported as `assert [] == ['provider:acp']` three lines on.
 - **A silent bounded wait reports a THROUGHPUT shortfall as an ordering defect.**
-  `test_subagent_scale.TestDurableQueueScale::test_queue_survives_manager_loss_and_drains_fifo`
+  `test_subagent_scale_queue.TestDurableQueueScale::test_queue_survives_manager_loss_and_drains_fifo`
   drained 199 recovered queue rows under `while store.count(DONE) < 199 and
   time.monotonic() < deadline`, then asserted `started == ids[1:]`. On the Windows
   shard the deadline expired mid-drain, the loop exited silently, and the run failed
@@ -5020,7 +5086,7 @@ only — the dashboard's `notif-io` pool
 runs. The fix that removes the race rather than draining it is the one in
 [the classes it found](#the-classes-it-found-and-the-one-correct-fix-for-each): resolve
 every path when the work is queued. For the member log that means threading a home
-through `crew_log/store.py`, which derives it at each of the log, lease, segment and
+through `crew_log/store_paths.py`, which derives it at each of the log, lease, segment and
 checkpoint paths; production never moves its home, so only the suite pays. A new
 fire-and-forget writer resolves at queue time AND joins a drain.
 
@@ -5431,7 +5497,7 @@ Two rules close it:
 
 ### A frozen list of a surface other branches keep growing
 
-`test/test_context_composition_contract.py` pins the full signature of
+`test/test_context_composition_contract_facade.py` pins the full signature of
 `ContextBuilder.build_message` as a string. A refactor branch recorded the list; a
 feature branch cut from an older base added one keyword. Each was green alone; on main
 together they were red on every platform and every later pull request inherited it.
@@ -5490,7 +5556,7 @@ measured an hour earlier is not a baseline.
    # 600 trivial tests, with the real conftest vs without it
    python -c "
    for i in range(600): print(f'def test_t{i}(): assert True')" > /tmp/probe/test_p.py
-   cp test/conftest.py /tmp/probe/ && cd /tmp/probe && pytest test_p.py -n0 -q --no-cov
+   cp test/conftest.py test/conftest_*.py /tmp/probe/ && cd /tmp/probe && pytest test_p.py -n0 -q --no-cov
    ```
 
    That probe read 6.35s with the unused `tmp_path` and the repeated `mktemp` calls in
@@ -5611,7 +5677,8 @@ and it refuses to run while a file under proof carries uncommitted edits.
 
 ```bash
 python3 src/kiro_crew/builtin_skills/kirocrew-dev/kirocrew-prepare-pr/scripts/prove.py
-# 0 PROVEN · 20 NOT_PROVEN · 21 INCONCLUSIVE · 10 nothing to prove · 30 baseline red
+# 0 PROVEN · 20 NOT_PROVEN · 21 INCONCLUSIVE · 10 nothing to prove · 11 frontend tests · 30 baseline red
+# it also prints the `Proof:` line a fix PR pastes under `## Tests`
 # add --per-hunk to name the hunks no test catches
 ```
 
@@ -5644,7 +5711,7 @@ using `scripts.ci_file_shards`. Ownership is SHA-256 of the root-relative POSIX
 path, not a duration or test-count balance. Other shards skip the file before
 import, while discovery patterns and platform ignores remain pytest's own.
 
-macOS assigns whole files like the other platforms, in four shards. The shard
+macOS assigns whole files like the other platforms, in five shards. The shard
 count is the knob to reach for there rather than the 40-minute cap, because that
 cap is a spend guard as much as a hang guard on a lane billed at ten times Linux:
 a higher cap bounds a runaway more loosely, while a higher count is what divides

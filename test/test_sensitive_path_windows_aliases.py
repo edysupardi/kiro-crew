@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import ntpath
 import os
+import threading
+from pathlib import Path
 
 import pytest
 
@@ -40,20 +42,59 @@ def _aliases(path: str) -> list[str]:
     return [prefix + path for prefix in PREFIXES] + [_forward(path)]
 
 
-@pytest.fixture
-def windows(monkeypatch: pytest.MonkeyPatch) -> None:
-    for env in ("KIROCREW_HOME", "KIRO_HOME", "KIROCREW_OS_HOME", "XDG_CONFIG_HOME"):
-        monkeypatch.delenv(env, raising=False)
-    monkeypatch.setenv("HOME", HOME)
-    monkeypatch.setenv("USERPROFILE", HOME)
-    monkeypatch.setattr(security.paths.os, "path", ntpath)
-    monkeypatch.setattr(security.paths.os, "sep", ntpath.sep)
+class _WindowsOs:
+    """``security.paths``' private view of ``os``: ``ntpath``, ``\\`` and a fake env.
+
+    Everything else is the real ``os``.
+    """
+
+    path = ntpath
+    sep = ntpath.sep
+
+    def __init__(self, environ: dict[str, str]) -> None:
+        self.environ = environ
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(os, name)
+
+
+def _windows_path_class(home: str) -> type:
+    class _WindowsHomePath(type(Path())):  # type: ignore[misc]
+        @classmethod
+        def home(cls) -> Path:
+            return cls(home)
+
+    return _WindowsHomePath
+
+
+def _enter_windows(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    # Off Windows ``C:\Users\alice`` is a RELATIVE name. So the fake home and the
+    # ``ntpath`` swap are handed to ``security.paths`` alone, never to the process:
+    # ``os.environ``, ``os.path`` and ``Path.home()`` stay real for every other thread.
+    # A thread left over from an earlier test that read a process-wide fake ``HOME``
+    # could ``mkdir`` it after teardown restored the CWD, i.e. in the checkout.
+    # The CWD pin still catches a write the code under test makes itself.
+    monkeypatch.chdir(tmp_path)
+    environ = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("KIROCREW_HOME", "KIRO_HOME", "KIROCREW_OS_HOME", "XDG_CONFIG_HOME")
+    }
+    environ["HOME"] = HOME
+    environ["USERPROFILE"] = HOME
+    monkeypatch.setattr(security.paths, "os", _WindowsOs(environ))
+    monkeypatch.setattr(security.paths, "Path", _windows_path_class(HOME))
     monkeypatch.setattr(security.paths, "_ON_WINDOWS", True)
     monkeypatch.setattr(security.paths, "_resolved_spellings", lambda e: {ntpath.normpath(e)})
     monkeypatch.setattr(
         security.paths, "_realpaths_or_none", lambda ps: [ntpath.normpath(p) for p in ps]
     )
     monkeypatch.setattr(security.paths, "_home_targets_cache", {})
+
+
+@pytest.fixture
+def windows(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    _enter_windows(monkeypatch, tmp_path)
 
 
 @pytest.mark.usefixtures("windows")
@@ -160,6 +201,25 @@ def test_without_the_fold_the_alias_spellings_are_allowed(
     """Mutation check: the fold is what refuses these, not some other candidate."""
     monkeypatch.setattr(security.paths, "_fold_windows_alias", lambda p: p)
     assert not security.is_sensitive_path(path)
+
+
+def test_the_fake_windows_home_never_reaches_the_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Another thread sees the real home and ``os.path`` while the fixture holds."""
+    before = (os.environ.get("HOME"), os.environ.get("USERPROFILE"), os.path, str(Path.home()))
+    _enter_windows(monkeypatch, tmp_path)
+    assert security.paths.Path.home() == security.paths.Path(HOME)
+    assert security.paths.os.path is ntpath
+    seen: list[object] = []
+    reader = threading.Thread(
+        target=lambda: seen.extend(
+            (os.environ.get("HOME"), os.environ.get("USERPROFILE"), os.path, str(Path.home()))
+        )
+    )
+    reader.start()
+    reader.join()
+    assert tuple(seen) == before
 
 
 @pytest.mark.parametrize(

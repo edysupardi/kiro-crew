@@ -642,6 +642,16 @@ def get_pending_skill(self, slug: str) -> dict | None:
     return detail
 
 
+def _restore_redacted(backup: dict[Path, bytes]) -> None:
+    """Write each file in ``backup`` back to its snapshotted bytes. A write that fails is
+    skipped, so one unwritable file does not keep the others from being restored."""
+    for fp, original in backup.items():
+        try:
+            fp.write_bytes(original)
+        except OSError:
+            pass
+
+
 def _validate_and_redact_candidate(self, src: Path, name: str) -> dict[Path, bytes]:
     """Re-validate + redact a candidate's SKILL.md and scripts IN PLACE.
 
@@ -682,16 +692,9 @@ def _validate_and_redact_candidate(self, src: Path, name: str) -> dict[Path, byt
         except OSError:
             pass
 
-    def _restore_redacted() -> None:
-        for _fp, _b in redact_backup.items():
-            try:
-                _fp.write_bytes(_b)
-            except OSError:
-                pass
-
     for fp in redact_targets:
         if not self._redact_file_in_place(fp):
-            _restore_redacted()
+            _restore_redacted(redact_backup)
             logger.warning(
                 "Refusing to approve %s: could not redact %s before promotion", name, fp.name
             )
@@ -701,7 +704,7 @@ def _validate_and_redact_candidate(self, src: Path, name: str) -> dict[Path, byt
     if sdir_src.is_dir():
         ok, report = validate_scripts(self._collect_scripts(sdir_src))
         if not ok:
-            _restore_redacted()
+            _restore_redacted(redact_backup)
             logger.warning(
                 "Refusing to approve %s: scripts invalid after redaction: %s", name, report
             )
@@ -924,19 +927,12 @@ def approve_pending_update_checked(self, slug: str) -> str:
     # fail, raising PendingApprovalRefused with the reason).
     redact_backup = self._validate_and_redact_candidate(src, target_name)
 
-    def _restore_redacted() -> None:
-        for _fp, _b in redact_backup.items():
-            try:
-                _fp.write_bytes(_b)
-            except OSError:
-                pass
-
     # Compute the new live content from the redacted candidate BEFORE any
     # live mutation — a read failure aborts with live + candidate intact.
     try:
         candidate_body = (src / "SKILL.md").read_text(encoding="utf-8")
     except OSError:
-        _restore_redacted()
+        _restore_redacted(redact_backup)
         raise PendingApprovalRefused("promotion_failed")
     # Snapshot under a number that is guaranteed free, so an earlier snapshot
     # can never be destroyed by drifted numbering.
@@ -962,7 +958,7 @@ def approve_pending_update_checked(self, slug: str) -> str:
         # was staged. Redaction already ran in place above; undo it, or the
         # rejected draft is left permanently altered and the diff the reviewer
         # re-opens is not the one they staged.
-        _restore_redacted()
+        _restore_redacted(redact_backup)
         logger.warning(
             "Refusing to approve stale update for %s: candidate based on v%s, live is v%d",
             target_name,
@@ -1008,7 +1004,7 @@ def approve_pending_update_checked(self, slug: str) -> str:
         live_prev = live_skill.read_text(encoding="utf-8")
         atomic_write(snapshot, live_prev)
     except OSError:
-        _restore_redacted()
+        _restore_redacted(redact_backup)
         logger.warning(
             "Refusing to approve update %s: could not snapshot live version", target_name
         )
@@ -1023,7 +1019,7 @@ def approve_pending_update_checked(self, slug: str) -> str:
             snapshot.unlink()
         except OSError:
             pass
-        _restore_redacted()
+        _restore_redacted(redact_backup)
         logger.warning("Refusing to approve update %s: could not write live SKILL.md", target_name)
         raise PendingApprovalRefused("promotion_failed")
     # (g) Promote candidate scripts into the live scripts/ dir (exec bit on
@@ -1093,7 +1089,7 @@ def approve_pending_update_checked(self, slug: str) -> str:
                     snapshot.unlink()
                 except OSError:
                     pass
-            _restore_redacted()
+            _restore_redacted(redact_backup)
             logger.warning(
                 "Refusing to approve update %s: could not promote candidate scripts",
                 target_name,
@@ -1212,13 +1208,6 @@ def approve_pending_skill_checked(self, slug: str) -> str:
     # with the reason). Shared with the update path.
     redact_backup = self._validate_and_redact_candidate(src, name)
 
-    def _restore_redacted() -> None:
-        for _fp, _b in redact_backup.items():
-            try:
-                _fp.write_bytes(_b)
-            except OSError:
-                pass
-
     # Drop pending-only bookkeeping ONLY after every check + redaction has
     # passed and immediately before the move, so a failed approval leaves the
     # candidate — including its .meta.json (description/triggers) — intact in
@@ -1235,7 +1224,7 @@ def approve_pending_skill_checked(self, slug: str) -> str:
     except FileNotFoundError:
         meta_backup = None
     except OSError:
-        _restore_redacted()
+        _restore_redacted(redact_backup)
         logger.warning(
             "Refusing to approve %s: could not read pending .meta.json before promotion", name
         )
@@ -1245,7 +1234,7 @@ def approve_pending_skill_checked(self, slug: str) -> str:
     except FileNotFoundError:
         pass
     except OSError:
-        _restore_redacted()
+        _restore_redacted(redact_backup)
         logger.warning(
             "Refusing to approve %s: could not remove pending .meta.json before promotion",
             name,
@@ -1269,7 +1258,7 @@ def approve_pending_skill_checked(self, slug: str) -> str:
                 meta_path.write_bytes(meta_backup)
             except OSError:
                 pass
-        _restore_redacted()
+        _restore_redacted(redact_backup)
         logger.warning("Refusing to approve %s: could not move candidate live", name)
         raise PendingApprovalRefused("promotion_failed")
     # Mark scripts executable now that a human approved them (recursively).

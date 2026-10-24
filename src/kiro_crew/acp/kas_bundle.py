@@ -18,6 +18,10 @@ What is on disk, under ``<data home>/engines/kas/``::
       bundle/node_modules/@kiro/agent/dist/server/acp-server.js
       node/node-v22.20.0-linux-x64/bin/node
 
+The desktop app stages the same layout into its resources. A universal Mac app
+stages it once, with a Node binary holding both architectures
+(:func:`make_universal_node`), trimmed to what runs (:func:`trim_for_shipping`).
+
 The ``engines`` leaf is sealed READ-ONLY inside Kiro Crew's sandbox
 (``sandbox._CREW_READONLY_LEAVES``) and write-protected at the file-tool gate
 (``security.paths._WRITE_PROTECTED_HOME_PATHS``): a sandboxed agent may read
@@ -80,12 +84,13 @@ import urllib.parse
 import zipfile
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from kiro_crew import asset_downloader, platform_compat
 from kiro_crew.acp.kas_pin import KAS_PIN_MANIFEST_SHA256, KAS_PIN_VERSION, pinned_version
 from kiro_crew.config.paths import data_home
+from kiro_crew.constants import BUNDLED_KAS_DIR_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -101,16 +106,28 @@ __all__ = [
     "host_platform_key",
     "install_bundle",
     "install_pinned",
+    "bundled_kas_root",
     "installed_bundle",
     "installed_versions",
     "kas_engines_root",
+    "make_universal_node",
     "manifest_url_for",
     "parse_manifest",
+    "trim_for_shipping",
 ]
 
 #: Data-home leaf every installed engine lives under. Also named in
 #: ``sandbox._CREW_READONLY_LEAVES`` and ``security.paths`` -- the three must agree.
 KAS_BUNDLE_ENGINES_LEAF = "engines"
+
+# ``BUNDLED_KAS_DIR_ENV`` (imported from ``constants``, where ``sandbox`` reads it to
+# seal the directory) names the desktop app's staged engine root: set by the Electron
+# shell only when the build staged the engine for this architecture
+# (``packaging/build-desktop.sh``, ``BUNDLE_KAS``; ``gateway-env.js``,
+# ``bundledKasEnvironment``). Like ``KIROCREW_BUNDLED_KIRO_DIR``, and read
+# as a SECOND root after the data home's ``engines/kas``: an operator's own
+# ``kirocrew kas install`` (or a ``--unpinned`` test install) wins over the copy the
+# app was built with, exactly as ``KIROCREW_KIRO_BIN`` wins over the bundled kiro-cli.
 
 #: Object names under ``<base>/kas/`` on the publishing host.
 KAS_BUNDLE_MANIFEST_NAME = "manifest.json"
@@ -189,6 +206,9 @@ class InstalledKasBundle:
     root: Path
     node_bin: Path
     acp_server: Path
+    #: True when *root* is the desktop app's own staged copy
+    #: (``BUNDLED_KAS_DIR_ENV``), not the data home's ``engines/kas``.
+    bundled: bool = False
 
 
 # ── host keys ──────────────────────────────────────────────────────────────────
@@ -217,6 +237,41 @@ def _host_arch(machine: str) -> str:
 def host_node_key(system: str | None = None, machine: str | None = None) -> str:
     """``<os>-<arch>`` for the Node runtime: one binary per architecture."""
     return f"{_host_os(system or platform.system())}-{_host_arch(machine or platform.machine())}"
+
+
+def _require_loadable_glibc(system: str | None, machine: str | None) -> None:
+    """Refuse the install on a Linux host whose glibc is too old to run the bundle.
+
+    The published ``linux-x64`` Node build is linked against glibc 2.28, so a host
+    below that floor cannot run the bundled Node at all. The engine also ships a
+    native ``onnxruntime`` library (via ``@huggingface/transformers``) linked
+    against glibc 2.27, so an Amazon Linux 2-era host below glibc 2.27 additionally
+    cannot load that library even with an older Node swapped in. Stop here, before
+    any engine or Node artifact is downloaded or extracted, with one message naming
+    the found glibc, the minimum, and the reason, rather than letting ``_probe_node``
+    surface the raw "GLIBC_2.28 not found" loader line after a download.
+
+    Reuses the glibc reader and floor ``doctor``'s Node remedy uses
+    (:func:`kiro_crew.constants._host_glibc_version`,
+    :data:`kiro_crew.constants._OFFICIAL_NODE_GLIBC_FLOOR`). A no-op on non-Linux,
+    at or above the floor, or when glibc cannot be read.
+    """
+    from kiro_crew import constants
+
+    if _host_os(system or platform.system()) != "linux":
+        return
+    glibc = constants._host_glibc_version()
+    floor = constants._OFFICIAL_NODE_GLIBC_FLOOR
+    if glibc is None or glibc >= floor:
+        return
+    raise KasBundleError(
+        f"this host's glibc ({glibc[0]}.{glibc[1]}) is older than KAS requires "
+        f"(glibc {floor[0]}.{floor[1]}+): the bundled Node build needs glibc "
+        f"{floor[0]}.{floor[1]}, and Amazon Linux 2-era hosts (glibc below 2.27) "
+        f"also lack the glibc 2.27 the engine's onnxruntime library needs. "
+        f"Move to a newer base image (Amazon Linux 2023, Ubuntu 22.04+). "
+        f"Nothing was installed."
+    )
 
 
 def host_platform_key(system: str | None = None, machine: str | None = None) -> str:
@@ -359,6 +414,16 @@ def fetch_manifest(
 def kas_engines_root(home: Path | None = None) -> Path:
     """``<data home>/engines/kas``."""
     return (home or data_home()) / KAS_BUNDLE_ENGINES_LEAF / "kas"
+
+
+def bundled_kas_root() -> Path | None:
+    """The desktop app's staged engine root, or ``None`` when not bundled.
+
+    Read from ``BUNDLED_KAS_DIR_ENV``; whitespace-only and unset both read as "not
+    bundled", the blank an unbundled build leaves behind.
+    """
+    value = os.environ.get(BUNDLED_KAS_DIR_ENV, "").strip()
+    return Path(value) if value else None
 
 
 def _sha256_file(path: Path) -> str:
@@ -537,17 +602,18 @@ def _locate_node(node_dir: Path) -> Path:
 _NODE_PROBE_TIMEOUT_SECS = 30
 
 
-def _probe_node(node_bin: Path, expected_version: str) -> None:
+def _probe_node(node_bin: Path, expected_version: str, *, launcher: tuple[str, ...] = ()) -> None:
     """Run the extracted Node once, the way the harness will, and check its version.
 
     One probe covers every way an archive can be dead on this host: the wrong
     architecture, a libc it cannot link against, an exec bit the archive lost.
     Failing here keeps a broken runtime from being published at its version's name instead of
-    surfacing as a handshake timeout on the first session.
+    surfacing as a handshake timeout on the first session. *launcher* is prepended
+    to the argv (``arch -x86_64``, to run one slice of a universal binary).
     """
     try:
         proc = subprocess.run(
-            [str(node_bin), "--version"],
+            [*launcher, str(node_bin), "--version"],
             capture_output=True,
             encoding="utf-8",
             errors="replace",
@@ -596,6 +662,7 @@ def install_bundle(
     version's name. Raises :class:`KasBundleError`.
     """
     root = root or kas_engines_root()
+    _require_loadable_glibc(system, machine)
     platform_key = host_platform_key(system, machine)
     node_key = host_node_key(system, machine)
     engine_ref = manifest.engine_for(platform_key)
@@ -729,19 +796,230 @@ def install_pinned(
     )
 
 
+# ── shipping a staged copy (packaging/build-desktop.sh) ─────────────────────────
+
+#: Node keys of the two Mac architectures, and the ``arch(1)`` name of each.
+_DARWIN_NODE_SLICES = {"darwin-arm64": "arm64", "darwin-x64": "x86_64"}
+
+#: The one file of the Node distribution kept beside the binary: its license.
+#: The trim lists below were checked against the engine at KAS 0.66.33 (no spawn
+#: of the distribution's npm/npx/corepack, no load of the dropped files); a pin
+#: bump re-reads ``@kiro/agent/dist`` for both before shipping.
+_NODE_KEEP_NAMES = frozenset({"LICENSE"})
+#: Engine files Node never loads: C/C++ sources and headers native addons were
+#: built from, and source maps (the engine runs without ``--enable-source-maps``).
+_ENGINE_DROP_SUFFIXES = (".c", ".cc", ".h", ".map")
+#: Engine directories Node never loads: ``<parent>/<name>``. web-tree-sitter's
+#: debug build is an export the engine does not import.
+_ENGINE_DROP_DIRS = frozenset({("web-tree-sitter", "debug")})
+
+
+def _read_record(home: Path) -> dict[str, Any]:
+    try:
+        record = json.loads((home / _INSTALL_RECORD_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise KasBundleError(f"no readable {_INSTALL_RECORD_NAME} under {home}: {exc}") from exc
+    if not isinstance(record, dict):
+        raise KasBundleError(f"{home / _INSTALL_RECORD_NAME} is not an object")
+    return record
+
+
+def _run_tool(argv: list[str], *, what: str) -> str:
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, encoding="utf-8", errors="replace", timeout=300
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise KasBundleError(f"{what}: {exc}") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        raise KasBundleError(
+            f"{what} exited {proc.returncode}" + (f": {detail[-1]}" if detail else "")
+        )
+    return proc.stdout
+
+
+def make_universal_node(
+    manifest: KasBundleManifest,
+    installed: InstalledKasBundle,
+    *,
+    source: str,
+    lipo: str = "lipo",
+    arch: str = "arch",
+) -> InstalledKasBundle:
+    """Turn a Mac install's Node into one binary that runs on both architectures.
+
+    *installed* was laid down by :func:`install_bundle` for one Mac architecture;
+    the other architecture's Node build is fetched (sha256-pinned by *manifest*,
+    from *source*), and ``lipo -create`` writes one Mach-O holding both slices
+    over the installed binary's path. The engine is already one darwin-universal
+    tree, so the version directory then serves either architecture with no
+    second copy of anything. Each slice is probed through ``arch -<name>``. The
+    record is left as :func:`install_bundle` wrote it: its ``node_bin`` is the
+    same path, so every reader of it is unchanged. Raises :class:`KasBundleError`.
+    """
+    home = installed.root
+    record = _read_record(home)
+    have = record.get("node_key")
+    if have not in _DARWIN_NODE_SLICES:
+        raise KasBundleError(
+            f"{home} holds Node for {have!r}; a universal Node needs one of "
+            f"{', '.join(sorted(_DARWIN_NODE_SLICES))} to start from"
+        )
+    other = next(k for k in _DARWIN_NODE_SLICES if k != have)
+    other_ref = manifest.node_for(other)
+    node_bin = installed.node_bin
+
+    work = Path(tempfile.mkdtemp(prefix=f"{_STAGING_PREFIX}lipo-", dir=home.parent))
+    try:
+        archive = work / other_ref.file
+        _fetch_artifact(
+            other_ref,
+            source=source,
+            dest=archive,
+            label=f"Node runtime ({other})",
+            on_progress=None,
+        )
+        _extract_archive(archive, work / "node")
+        other_bin = _locate_node(work / "node")
+        merged = node_bin.with_name(f".{node_bin.name}.universal")
+        want = set(_DARWIN_NODE_SLICES.values())
+        try:
+            _run_tool(
+                [lipo, "-create", "-output", str(merged), str(node_bin), str(other_bin)],
+                what="lipo -create",
+            )
+            archs = set(_run_tool([lipo, "-archs", str(merged)], what="lipo -archs").split())
+            if not want <= archs:
+                raise KasBundleError(
+                    f"lipo wrote a Node with slices {sorted(archs)}, expected {sorted(want)}"
+                )
+            merged.chmod(0o755)
+            os.replace(merged, node_bin)
+        except BaseException:
+            merged.unlink(missing_ok=True)
+            raise
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    for slice_name in sorted(want):
+        _probe_node(node_bin, manifest.node_version, launcher=(arch, f"-{slice_name}"))
+    again = _read_installed(home.parent, installed.version, bundled=installed.bundled)
+    if again is None or again.node_bin != node_bin:
+        raise KasBundleError(f"{home} does not read back after the universal Node was written")
+    return again
+
+
+def _remove(path: Path) -> int:
+    """Delete *path* (a file, a link, or a whole directory); return the bytes freed."""
+    if path.is_symlink() or not path.is_dir():
+        size = path.lstat().st_size
+        path.unlink()
+        return size
+    size = sum(p.lstat().st_size for p in path.rglob("*") if not p.is_dir() or p.is_symlink())
+    shutil.rmtree(path)
+    return size
+
+
+def _prune_node_dist(node_bin: Path, node_root: Path) -> int:
+    """Keep only *node_bin* and the distribution's license under *node_root*."""
+    rel = node_bin.relative_to(node_root).parts
+    dist_root = node_root / rel[0] if len(rel) > 1 else node_root
+    keep = {node_bin} | {dist_root / name for name in _NODE_KEEP_NAMES}
+    # The directories on the way down to the binary are walked, never removed.
+    path_dirs = {dist_root, *(p for p in node_bin.parents if dist_root in p.parents)}
+    freed = 0
+    pending = [dist_root]
+    while pending:
+        here = pending.pop()
+        for entry in here.iterdir():
+            if entry in keep:
+                continue
+            if entry in path_dirs and not entry.is_symlink():
+                pending.append(entry)
+                continue
+            freed += _remove(entry)
+    return freed
+
+
+def _prune_engine(bundle_dir: Path, acp_server: Path) -> int:
+    freed = 0
+    for dirpath, dirnames, filenames in os.walk(bundle_dir):
+        here = Path(dirpath)
+        for name in list(dirnames):
+            if (here.name, name) in _ENGINE_DROP_DIRS:
+                dirnames.remove(name)
+                freed += _remove(here / name)
+        for name in filenames:
+            path = here / name
+            if name.endswith(_ENGINE_DROP_SUFFIXES) and path != acp_server:
+                freed += _remove(path)
+    return freed
+
+
+def trim_for_shipping(installed: InstalledKasBundle) -> int:
+    """Remove what the engine never runs from an installed tree; return bytes freed.
+
+    For a copy that ships inside an app. The Node distribution keeps its binary
+    and its license: the harness spawns ``node`` directly and the engine starts
+    every child it runs through ``process.execPath`` or the user's own ``PATH``,
+    never through the distribution's npm, npx or corepack. The engine loses its
+    C/C++ sources, headers and source maps, and web-tree-sitter's debug build.
+    Nothing reads these files at run time and no reader re-hashes the extracted
+    tree, so the record stays valid as written. Raises :class:`KasBundleError`.
+    """
+    home = installed.root
+    freed = _prune_node_dist(installed.node_bin, home / "node")
+    freed += _prune_engine(home / "bundle", installed.acp_server)
+    again = _read_installed(home.parent, installed.version, bundled=installed.bundled)
+    if again is None or again != installed:
+        raise KasBundleError(f"{home} does not read back after trimming")
+    return freed
+
+
 def installed_bundle(
     *, root: Path | None = None, version: str | None = None
 ) -> InstalledKasBundle | None:
     """The engine this release runs (*version*, default the pin), or ``None``.
 
+    With no *root*, two roots are asked in order: the data home's ``engines/kas``
+    (an operator's own install, which wins), then the desktop app's staged copy
+    (:func:`bundled_kas_root`) when the shell exported one. An explicit *root* is
+    asked alone.
+
     Never raises: a damaged record reads as "not installed" and is logged, so a
     spawn path can ask without a try/except.
     """
-    root = root or kas_engines_root()
     version = version or pinned_version()
     if not _VERSION_RE.match(version):
         logger.warning("KAS engine version %r is not a version name; ignoring it", version)
         return None
+    if root is not None:
+        return _read_installed(root, version, bundled=False)
+    found = _read_installed(kas_engines_root(), version, bundled=False)
+    if found is not None:
+        return found
+    bundled = bundled_kas_root()
+    if bundled is None:
+        return None
+    return _read_installed(bundled, version, bundled=True)
+
+
+def _stays_inside(rel: str) -> bool:
+    """Whether the record entry *rel*, joined onto its version directory, stays in it.
+
+    ``home / rel`` discards ``home`` for an absolute *rel*, so an absolute form is
+    refused in every spelling a record could carry whatever the host: POSIX, a
+    drive letter or a rooted Windows path. A ``..`` segment is refused too.
+    """
+    if not rel or PurePosixPath(rel).is_absolute() or PureWindowsPath(rel).drive:
+        return False
+    if rel.startswith(("/", "\\")):
+        return False
+    return ".." not in PureWindowsPath(rel).parts
+
+
+def _read_installed(root: Path, version: str, *, bundled: bool) -> InstalledKasBundle | None:
     try:
         home = root / version
         record = json.loads((home / _INSTALL_RECORD_NAME).read_text(encoding="utf-8"))
@@ -753,7 +1031,10 @@ def installed_bundle(
         node_version = record.get("node_version")
         if not (isinstance(acp_rel, str) and isinstance(node_rel, str)):
             return None
-        if ".." in acp_rel or ".." in node_rel:
+        if not (_stays_inside(acp_rel) and _stays_inside(node_rel)):
+            logger.warning(
+                "KAS bundle record under %s names an entry outside its root; ignoring it", home
+            )
             return None
         acp_server = home / acp_rel
         node_bin = home / node_rel
@@ -766,6 +1047,7 @@ def installed_bundle(
             root=home,
             node_bin=node_bin,
             acp_server=acp_server,
+            bundled=bundled,
         )
     except FileNotFoundError:
         return None

@@ -41,6 +41,7 @@ import { useAppActions } from './useAppActions'
 import { useAppUpdates } from './useAppUpdates'
 import UpdatesList from './UpdatesList'
 import { cardDataKey } from './cardDataKey'
+import { registryRefreshFailureMessage } from '../../components/appstore/registryRefreshMessage'
 
 /**
  * Which app in a featured card has an action in flight, or null.
@@ -157,7 +158,7 @@ function DiscoverPageBody() {
   const {
     apps, appsError, registryError, loading,
     browseApps, featuredSections, categories, sources, updatables,
-    announceAppsChanged,
+    announceAppsChanged, registriesUnknown,
   } = useAppsData()
 
   useEffect(() => {
@@ -168,8 +169,10 @@ function DiscoverPageBody() {
 
   const {
     setError, displayError, dismissError,
-    openDetail, getApp, updateApp, trustTarget, runEnable, trust,
-  } = useAppActions({ apps, browseApps, appsError, registryError, announceAppsChanged })
+    openDetail, getApp, updateApp, trustTarget, consentTarget, runEnable, trust,
+  } = useAppActions({
+    apps, browseApps, appsError, registryError, announceAppsChanged, sources, registriesUnknown,
+  })
 
   // Transient success surface for the shared update hook: the hook reports
   // outcomes, this page owns display + auto-dismiss (the Library's 4s).
@@ -253,16 +256,10 @@ function DiscoverPageBody() {
         reportRefreshOutcome(rejection.reason instanceof Error && rejection.reason.message
           ? rejection.reason.message
           : i18nT('components.registryManager.failed_to_refresh_registries'))
-      } else if (
-        registriesResult.status === 'fulfilled'
-        && registriesResult.value.ok === false
-        && registriesResult.value.failed && registriesResult.value.failed.length > 0
-      ) {
-        reportRefreshOutcome(
-          i18nT('components.registryManager.could_not_refresh_still_showing_last_synced',
-            { names: registriesResult.value.failed.join(', ') }))
       } else {
-        reportRefreshOutcome('')
+        reportRefreshOutcome(registriesResult.status === 'fulfilled'
+          ? registryRefreshFailureMessage(registriesResult.value)
+          : '')
       }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['registry'] }),
@@ -464,7 +461,7 @@ function DiscoverPageBody() {
             refused with code `app_execution_denied`, instead of surfacing the
             raw backend string in the error card above. */}
         <TrustAppModal
-          app={trust.target}
+          app={consentTarget}
           pending={trust.pending}
           failed={trust.failed}
           detail={trust.detail}

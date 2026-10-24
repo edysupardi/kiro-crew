@@ -136,7 +136,7 @@ On the `kirocrew-mate` server from #19258:
 | `set_goal(long_term)` | proposes a new long-term goal | a change card the user confirms (#19240) |
 | `set_key_results(items)` | proposes the key results, replacing the current set | a change card the user confirms |
 | `key_result_progress(id, current)` | records a new reading for one key result | none |
-| `save_goal_report(kind, title, markdown)` | files a weekly report or monthly review | none |
+| `save_goal_report(kind, title, html \| markdown)` | files a weekly report or monthly review, as one self-contained page or as Markdown | none |
 
 The long-term goal is what the user asked the crewmate to work toward, so the
 crewmate cannot change it without the user's button. A reading is the crewmate's
@@ -234,13 +234,25 @@ came from a messaging channel still cannot, every other card kind stays refused,
 and `propose_change`, which names its crewmate in the request, stays user-turn
 only. As always, nothing changes until the user presses it.
 
+> **Accepted 2026-10-20 (product owner, rayrayxu):** a `capabilities` card whose
+> additions are only servers this gateway already runs joins the three kinds above,
+> so a worker report that names a missing capability can raise its card from a
+> turn the user did not send; a registry install, a skill or a raw draft stays
+> user-turn only.
+
 This amends [rfc-crewmate-guides-and-mate.md](rfc-crewmate-guides-and-mate.md)'s
-rule that a turn the user did not send gets `not_user_turn`, for these three card
+rule that a turn the user did not send gets `not_user_turn`, for these four card
 kinds in the crewmate's own thread. It is acceptable because a card is a
 proposal, not a change: the turn may have read untrusted content, but whatever it
 proposes is shown to the user as a before-and-after card and does nothing until
-they press Apply, the card can only name the crewmate's own goal, milestones and
-check-ins, and every other kind stays refused.
+they press Apply, and every other kind stays refused. The three goal kinds can
+only name the crewmate's own goal, milestones and check-ins. The `capabilities`
+case widens what the crewmate's worker can call, so it is held tighter: its
+additions are limited to servers this gateway already runs (nothing is installed
+or fetched), the grant stays bounded by `POLICY ∩ PROFILE` like any other, the
+card shows the worker's grants before and after, an approval it would widen
+keeps its acknowledgement, and a turn from a messaging channel is still
+refused.
 
 The weekly report says what moved; the monthly review asks whether the direction
 is still right. Without the monthly step, key results set once would never be
@@ -257,6 +269,14 @@ revisited.
   artifact, filed under `Crewmates/<name>/Reports`, so past reports stay
   browsable and shareable. The thread and the notification link to it; the chat
   does not carry the report's full text.
+
+> **Revision pending acceptance (2026-10-21, #22962):** a report is sent as
+> `html` (one self-contained page) or `markdown`, one of the two. The printable
+> page is the default the check-in prompts ask for: A4 sheets with a header band,
+> numbered sections and a footer, the conclusion first, charts drawn from the
+> readings, static and readable on paper. Markdown stays available for a plain
+> report. A report opens in the same sandbox as the crewmate's Dashboard page,
+> and its own scripts never run there: the page is a static snapshot.
 
 ### 3.6 The goal in the crewmate's context
 
@@ -435,3 +455,10 @@ lives in `trust/member-goals/`, out of the crewmate's file tools' reach.
 
 Crewmates created before this change are left as they are. Their `description`
 is not moved, and they start with no goal and the reminder off.
+
+## History
+
+| Date | Status | Change |
+|---|---|---|
+| 2026-10-12 | accepted | The goal, key results, check-ins and reports as described above. |
+| 2026-10-21 | revision pending acceptance | `save_goal_report` takes `html` or `markdown`; reports default to a printable page (§ 3.3, § 3.5a; #22962). |

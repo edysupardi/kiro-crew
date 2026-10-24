@@ -64,6 +64,7 @@ from kiro_crew.apps.registry import (
     _store_art_cache_path,
 )
 from kiro_crew.subprocess_utf8 import UTF8_TEXT
+from kiro_crew.testing.wait import finished
 
 # ---------------------------------------------------------------------------
 # What lands where
@@ -980,7 +981,7 @@ def _grammar_identities_in_a_fresh_interpreter(tmp_path: Path) -> dict[str, bool
     """Which consumers share the store-art compiled grammars, read in a child interpreter.
 
     The sharing is an import-time binding, and this worker's own modules are not a
-    reliable witness of it: ``test_external_registry.py`` reloads the registry facade,
+    reliable witness of it: ``test_external_registry_clone_diagnostics.py`` reloads the registry facade,
     which re-executes ``store_art`` but not ``routes``, and once ``re``'s cache has
     dropped the pattern the reload compiles a NEW object, so an in-process identity
     check reads whichever tests ran before it. A child imports each module once.
@@ -1125,7 +1126,7 @@ class TestWarmth:
 
         Row A lands at once; row B's clone never returns. The prewarm must come back
         once the budget is spent with the count of what landed, and the stalled row's
-        task must be cancelled, not abandoned. The outer ``wait_for`` turns a missing
+        task must be cancelled, not abandoned. The outer bound turns a missing
         budget into a red test rather than a hang.
         """
         import asyncio
@@ -1151,7 +1152,9 @@ class TestWarmth:
         ]
 
         with caplog.at_level("WARNING", logger="kiro_crew.apps.registry"):
-            fetched = await asyncio.wait_for(_prewarm_owner_tier_store_assets(reg, rows), timeout=3)
+            fetched = await finished(
+                _prewarm_owner_tier_store_assets(reg, rows), "the prewarm returning at its budget"
+            )
 
         assert fetched == 1
         assert cancelled == ["b"]

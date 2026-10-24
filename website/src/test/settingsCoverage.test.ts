@@ -66,10 +66,12 @@ function readPanel(file: string): string {
  * an unlisted file fails, so the choice is always conscious.
  */
 const UNMAPPED_PANELS: Record<string, string> = {
+  'KiroHarnessFallbackNote.tsx': 'informational note ChatPanel mounts above the fallback pickers on a Kiro harness, zero controls',
   'BrowserInstallStatus.tsx': 'read-only install progress region BrowserPanel mounts above its sections, zero controls',
   'ChannelDisabledPanel.tsx': 'informational placeholder (locked/loading/error states), zero controls',
   'ChannelFolderBackfill.tsx': 'one action button shared by the channel panels; files existing conversations into the folder the OWNING panel configures, and holds no setting of its own',
   'CustomSoundsSection.tsx': 'the Notifications tab\'s add-a-sound form (name + tones) and the list of saved sounds; it creates entries rather than holding settings, and the sounds it saves are chosen through the per-category pickers NotificationsPanel already indexes',
+  'FollowDefaultModelAction.tsx': 'one action button under the Chat tab\'s Default Model that counts, then clears, the model older chats keep; it holds no setting of its own',
   'ChannelsPanel.tsx': 'list-detail shell routing to per-channel panels; carries no controls of its own',
   'CrewVersionStatus.tsx': "a connected Remote Crew row's version badge and its Update action; it reports and acts on one crew, and holds no setting",
   'DecisionsProviderPicker.tsx': 'the Decisions card\'s provider choice writes a preset id through the owner-only PUT /api/decisions/provider, not a config path, so there is no configKey to index; it is reached through the card the developer.decisions-jev entry deep-links to',
@@ -88,6 +90,7 @@ const UNMAPPED_PANELS: Record<string, string> = {
   'ReleasesPanel.tsx': 'read-only changelog viewer, zero persistent settings',
   'ReportProblemCard.tsx': 'feedback action card, no settings',
   'SettingsSearch.tsx': 'the settings search box itself — indexing it would be self-referential',
+  'SttRetentionNote.tsx': "read-only \"Is my audio kept?\" line under SttSettings' provider picker; an info tip and a docs link, zero controls",
   'ThemeDroppedRulesNotice.tsx': 'informational notice, zero controls',
   'TranslucentPanelsPreview.tsx': 'aria-hidden illustration under the Translucent panels switch (registry id display.translucent-panels, on DisplayPanel); it holds no control of its own',
   'WebhooksPanel.tsx': 'status summary card; the real controls live on the /webhooks page',
@@ -261,26 +264,38 @@ const WAIVED_BARE_CONTROLS: Record<string, { counts: BareCounts; reason: string 
     reason: 'backup-restore form: the export\'s include-chat-history, include-agent-templates and memory-only boxes, the export zip file picker, the import\'s memory-only box, the import preview\'s per-template install box (one control rendered once per bundled template) and the merge/replace mode for that one import — per-export and per-import arguments, not persistent settings',
   },
   'RemoteCrewPanel.tsx': {
-    counts: { input: 7, Toggle: 1 },
+    counts: { input: 7 },
     reason:
       'setup-wizard AWS profile/region convenience fields (localStorage) behind a ' +
       'non-URL sub-tab a deep link cannot mount; plus the launch form\'s identity ' +
       'choice (2 radios), Identity Center start-URL/region and subnet ID fields — per-launch ' +
-      'arguments sent with the launch request, not persistent settings; the Toggle is the ' +
-      'per-crew on/off switch rendered once per runtime-fetched crew row, a field of that ' +
+      'arguments sent with the launch request, not persistent settings',
+  },
+  'RemoteCrewPanelCrewRow.tsx': {
+    counts: { Toggle: 1 },
+    reason:
+      'the per-crew on/off switch rendered once per runtime-fetched crew row, a field of that ' +
       'crew\'s record, not a global setting',
   },
   'SecretsPanel.tsx': {
     counts: { Input: 2 },
     reason: 'add-secret name/value form — transient CRUD, not persistent knobs',
   },
-  'SecurityPanel.tsx': {
-    counts: { Toggle: 5, Checkbox: 2, Input: 3 },
+  'SecurityPanelDeniedCommands.tsx': {
+    counts: { Toggle: 4, Checkbox: 1, Input: 3 },
     reason:
       'disable-all + per-rule + custom-rule Toggles are data-driven table rows ' +
-      '(manual: security.denied-commands); Checkboxes are confirm-modal acks; ' +
+      '(manual: security.denied-commands); the Checkbox is a confirm-modal ack; ' +
       'Inputs are the rule search filter and the add-custom-deny form ' +
       '(manual: security.your-custom-denies)',
+  },
+  'SecurityPanelTailnet.tsx': {
+    counts: { Toggle: 1 },
+    reason: 'the tailnet-name trust switch (manual: security.trust-this-machine-s-tailnet-name)',
+  },
+  'SecurityPanelTrust.tsx': {
+    counts: { Checkbox: 1 },
+    reason: 'a confirm-modal ack (blanket third-party app trust)',
   },
   'SettingsSearch.tsx': {
     counts: { input: 1 },

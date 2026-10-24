@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         KiroCrewConfig,
         LLMProvider,
         _app_cancel_denied,
+        _append_session_switch_notice,
         _ChatSlot,
         _remember_reasoning_effort_for_restore,
         _reset_slot_session_or_warn,
@@ -310,8 +311,9 @@ async def api_chat_slot_reasoning_effort(request: web.Request) -> web.Response:
                 status=409,
             )
         if _updated_live:
-            # The live pick supersedes the allocation's recorded effort override.
-            state.sessions.retire_effort_override(session_key)
+            # The live pick replaces the allocation's recorded effort override, so
+            # a restart or reset successor starts on the level this session runs.
+            state.sessions.record_effort_override(session_key, effort)
 
         if effective_session_key(slot) != session_key and _updated_live:
             # The slot was bound to a different session while change_effort /
@@ -482,6 +484,12 @@ async def api_chat_slot_reasoning_effort(request: web.Request) -> web.Response:
                     },
                     status=409,
                 )
+            # The reset path is committed: mark the boundary in the
+            # transcript, inside both locks. The live-push, deferral and
+            # not-effort-capable paths reset nothing and append nothing, and so
+            # does a same-level re-pick that only normalizes a legacy pin.
+            if prior_effort != effort:
+                await _append_session_switch_notice(slot, "reasoning_effort", effort or "default")
             if teardown_incomplete:
                 normalized = normalize_legacy_model()
                 state.push_slots_update()

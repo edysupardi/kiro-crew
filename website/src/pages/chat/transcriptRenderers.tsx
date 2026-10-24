@@ -39,8 +39,9 @@ import ConversationCard, { CARD_ROLE } from '../../cards/ConversationCard'
 import RecoveryCard, { opensTurn, resolveInjectCard } from './RecoveryCard'
 import { SystemNoticeRow, isSystemNoticeRow } from './CompactionCard'
 import SkillLoadCard, { isSkillLoadRow } from './SkillLoadCard'
-import { ErrorCard, SESSION_START_REPEAT_REFUSAL_AT, isAppAgentRefused, isAuthRequired, isCapabilitiesChanged, isContextOverflow, isModelUnentitled, isSessionStartFailed, isTurnTimeout, isUsageLimit, sessionStartFailureStreak, type FreshSessionState } from './ErrorCard'
-import { FEATURE_REQUEST_FORM_URL, isFeatureRequestRow } from '../../prompts/featureRequest'
+import { ErrorCard, SESSION_START_REPEAT_REFUSAL_AT, capabilityRefusal, isAppAgentRefused, isAuthRequired, isContextOverflow, isKiroCliMissing, isModelUnentitled, isSessionStartFailed, isTurnTimeout, isUsageLimit, sessionStartFailureStreak, type CapabilityFix, type FreshSessionState } from './ErrorCard'
+import { isFeatureRequestRow } from '../../prompts/featureRequest'
+import { feedbackTracker } from '../../feedbackTracker'
 import NoticeCard from './NoticeCard'
 import { resolveTransientNotice } from './transientNotice'
 import WorkflowRunCard, { extractWorkflowRunId, isWorkflowRunTool } from './WorkflowRunCard'
@@ -116,10 +117,6 @@ export interface TranscriptRendererOptions {
   onFolderOpen?: (path: string) => void
   /** "Show in side panel" on a sub-agent completion card. Same #3300 blocker. */
   onOpenSubagentPanel?: (parsed: ParsedSubagentCompletion) => void
-  /** How this host opens its Subagents view, for the `spawn_run` launch card.
-   *  Unset on the chat page (the card drives the chat store itself); the
-   *  Members page passes its own panel's opener. */
-  onOpenSubagents?: () => void
   /** Expanded-state map for tool rows, held ABOVE the row: a virtualised or
    *  remounted transcript unmounts the row and would otherwise forget it. */
   toolDisclosure?: Record<string, boolean>
@@ -161,9 +158,10 @@ export interface TranscriptRendererOptions {
   /** Fix affordance for an `auth_required` row: deep-link to the Kiro sign-in
    *  card in Settings. Omitted on a surface with no settings route. */
   onOpenSignIn?: () => void
-  /** Fix affordance for a `materialization_changed` row: open the named crew
-   *  member's Capabilities pane. Omitted on a surface with no crew editor. */
-  onOpenCapabilities?: (member: string) => void
+  /** Fix affordance for a capability refusal row (`capabilityRefusal`): open
+   *  the named crew member where that code's fix lives. Omitted on a surface
+   *  with no crew editor. */
+  onOpenCapabilities?: (member: string, fix: CapabilityFix) => void
   /** Fix affordance for a `turn_timeout` row: deep-link to the Turn Time Limit
    *  setting. Omitted on a surface with no settings route. */
   onOpenTurnLimit?: () => void
@@ -222,8 +220,9 @@ export function isFeatureRequestRefusal(messages: readonly ChatMessage[], index:
 }
 
 /** True when the composer's Resume would replay the feature-request refusal:
- *  the newest error row is a `usage_limit` row that `isFeatureRequestRefusal`
- *  claims, and neither an assistant row nor a turn opener (`opensTurn`) follows
+ *  the newest error row is a `usage_limit` or `kiro_cli_missing` row that
+ *  `isFeatureRequestRefusal` claims, and neither an assistant row nor a turn
+ *  opener (`opensTurn`) follows
  *  it (a later turn is the composer's business, not this row's).
  *  `newestErrorOwnsRecovery` reads it to suppress the composer's Resume and its
  *  "press Resume" hint beside a card that has just withheld Resume for the same
@@ -235,7 +234,15 @@ export function featureRequestRefusalIsNewest(messages: readonly ChatMessage[]):
     const row = messages[j]
     if (row.role === 'assistant' || opensTurn(row)) return false
   }
-  return isUsageLimit(messages[idx]) && isFeatureRequestRefusal(messages, idx)
+  return offersFeatureRequestForm(messages[idx]) && isFeatureRequestRefusal(messages, idx)
+}
+
+/** True for the error kinds where a feature-request turn cannot run at all, so
+ *  its row offers the repository's form instead of Resume: a spent allowance
+ *  (`usage_limit`) and a kiro-cli that is not installed (`kiro_cli_missing`).
+ *  The card and the composer's Resume gate both read this, so they agree. */
+function offersFeatureRequestForm(m: ChatMessage): boolean {
+  return isUsageLimit(m) || isKiroCliMissing(m)
 }
 
 /** True when the transcript's newest state is a session start that failed
@@ -286,15 +293,30 @@ export function appAgentRefusalIsNewest(messages: readonly ChatMessage[]): boole
   return isAppAgentRefused(messages[idx])
 }
 
-/** True when the newest error row is one of the four above: its card has
+/** True when the transcript's newest state is a capability start refusal
+ *  (`capabilityRefusal`): the newest error row is one, and nothing after it
+ *  opens a new turn. A retry runs the same check, so the composer's Resume
+ *  yields to the card's own fix. */
+function capabilityRefusalIsNewest(messages: readonly ChatMessage[]): boolean {
+  const idx = lastErrorIndex(messages)
+  if (idx < 0) return false
+  for (let j = idx + 1; j < messages.length; j++) {
+    const row = messages[j]
+    if (row.role === 'assistant' || opensTurn(row)) return false
+  }
+  return capabilityRefusal(messages[idx]) !== undefined
+}
+
+/** True when the newest error row is one of the five above: its card has
  *  withheld Resume (a retry replays the rejection) and names a remedy of its
  *  own, so the composer must not urge the press beneath it either. The one
  *  place that spells the set for the composer: ChatPage's and every pane's
- *  (`useChatPaneContinue`) both read this, so a fifth remedy card joins the
+ *  (`useChatPaneContinue`) both read this, so another remedy card joins the
  *  composer's gate by joining it here. Typing still works. */
 export function newestErrorOwnsRecovery(messages: readonly ChatMessage[]): boolean {
   return featureRequestRefusalIsNewest(messages) || sessionStartRepeatIsNewest(messages)
     || contextOverflowIsNewest(messages) || appAgentRefusalIsNewest(messages)
+    || capabilityRefusalIsNewest(messages)
 }
 
 /** Index of the last `error` row, so only that one offers Continue. Derived
@@ -334,6 +356,12 @@ export function createTranscriptRenderers(
   const crewmateTranscriptOf = (): ChatMessage[] | undefined => o.crewmateTranscript?.()
 
   return [
+    {
+      id: 'warm_task_brief_claim',
+      roles: ['notice'],
+      match: m => m.meta?.kind === 'warm_task_brief_claim',
+      render: () => null,
+    },
     // ── Shape-matched rows, ahead of anything keyed only by role ──
     {
       // A dollar-picked skill is gateway-authored context, not a conversational
@@ -392,7 +420,7 @@ export function createTranscriptRenderers(
       render: (m, ctx) => {
         const launch = extractSpawnRunLaunch(m)
         if (!launch) return toolLine(m, ctx)
-        return ctx.row(<SubagentRunCard key={ctx.key} launch={launch} slot={o.slot ?? ''} onOpenPanel={o.onOpenSubagents} />, true)
+        return ctx.row(<SubagentRunCard key={ctx.key} launch={launch} slot={o.slot ?? ''} />, true)
       },
     },
     {
@@ -614,19 +642,23 @@ export function createTranscriptRenderers(
         }
         const unentitled = isModelUnentitled(m)
         const authRequired = isAuthRequired(m)
-        const capabilitiesMember = isCapabilitiesChanged(m) ? String((m.meta as { member?: unknown } | undefined)?.member ?? '') : ''
-        const openCapabilities = isCapabilitiesChanged(m) && o.onOpenCapabilities
-          ? () => o.onOpenCapabilities!(capabilitiesMember)
+        const refusal = capabilityRefusal(m)
+        const capabilitiesMember = refusal ? String((m.meta as { member?: unknown } | undefined)?.member ?? '') : ''
+        // The editor fix opens the named crewmate, so it needs a name to open.
+        const refusalFix = refusal?.fix === 'member' && !capabilitiesMember ? undefined : refusal?.fix
+        const openCapabilities = refusalFix && o.onOpenCapabilities
+          ? () => o.onOpenCapabilities!(capabilitiesMember, refusalFix)
           : undefined
         // The form is offered on the seeded turn's own refusal and nowhere else:
         // a #4198 refused-send row in the same slot carries no kind (the send
         // never went out, so a retry CAN help); a usage limit under a user row
         // the pill did not stamp is some other turn's; and a limit hit after
         // the user typed on in the same slot belongs to THAT turn, so it keeps
-        // today's card, Continue included. The route is a constant of the flow,
-        // never read from the row: the stamp only selects it.
+        // today's card, Continue included. The route is the tracker's, fixed
+        // for the page load (`feedbackTracker`), never read from the row: the
+        // stamp only selects it.
         const featureRequestFormUrl =
-          isUsageLimit(m) && isFeatureRequestRefusal(ctx.messages, ctx.index) ? FEATURE_REQUEST_FORM_URL : undefined
+          offersFeatureRequestForm(m) && isFeatureRequestRefusal(ctx.messages, ctx.index) ? feedbackTracker().formUrl : undefined
         const newest = ctx.index === lastErrorIndex(ctx.messages)
         // The same session start failed twice in a row (Resume between them
         // re-issued it): a third press would fail the same way, and the server
@@ -652,7 +684,7 @@ export function createTranscriptRenderers(
             // signed-out wall, or the same spent allowance, or the same start
             // that already failed twice).
             onContinue={
-              !unentitled && !authRequired && !overflow && !featureRequestFormUrl && !sessionStartRepeat && !isCapabilitiesChanged(m) && !isAppAgentRefused(m) && o.onContinue && o.continuable && o.interrupted && newest
+              !unentitled && !authRequired && !overflow && !featureRequestFormUrl && !sessionStartRepeat && !refusal && !isAppAgentRefused(m) && o.onContinue && o.continuable && o.interrupted && newest
                 ? o.onContinue
                 : undefined
             }
@@ -664,6 +696,7 @@ export function createTranscriptRenderers(
             onOpenSignIn={authRequired ? o.onOpenSignIn : undefined}
             unentitledElsewhere={unentitled}
             featureRequestFormUrl={featureRequestFormUrl}
+            kiroCliMissing={featureRequestFormUrl ? isKiroCliMissing(m) : undefined}
             onOpenCapabilities={openCapabilities}
             onOpenTurnLimit={isTurnTimeout(m) ? o.onOpenTurnLimit : undefined}
             turnLimitSlot={isTurnTimeout(m) ? o.slot : undefined}

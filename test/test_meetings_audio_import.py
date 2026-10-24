@@ -37,6 +37,7 @@ from kiro_crew.apps.builtins.meetings.backend.domain import audio
 from kiro_crew.apps.builtins.meetings.backend.routes import _common
 from kiro_crew.apps.builtins.meetings.backend.routes import audio_import as ai
 from kiro_crew.pinned_fs import supports_pinned_walk
+from kiro_crew.testing.wait import await_until
 
 BASE = k.API_BASE
 
@@ -875,7 +876,7 @@ class TestRefusals:
                 client.post(f"{BASE}/meetings/standup/import", json={"audio_path": "/tmp/a.wav"})
             )
             try:
-                await asyncio.wait_for(started.wait(), timeout=5.0)
+                await await_until(started, what="the first import reaching transcribe")
                 second = await client.post(
                     f"{BASE}/meetings/standup/import", json={"audio_path": "/tmp/b.wav"}
                 )
@@ -1497,7 +1498,7 @@ class TestNoPinnedWalkBackstop:
         the ``os.open`` itself follows an ancestor junction planted after any
         check, and a UNC target fires outbound SMB authentication as a side
         effect of the open, which no after-open check can undo. Per the repo
-        ruling recorded in ``snapshot.py``'s notification copy, the branch now
+        ruling recorded in ``snapshot_merge_driver.py``'s notification copy, the branch now
         refuses outright: nothing is opened, nothing is copied, even for an
         honest file. The route answers 501 before this is ever reached; this
         pins the backstop."""

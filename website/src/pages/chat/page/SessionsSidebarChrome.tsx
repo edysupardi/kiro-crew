@@ -40,7 +40,9 @@ interface SessionsSidebarChromeProps {
   topbarTrailSlot: HTMLElement | null
   vv: VisualViewport
   activityOpen: boolean
-  clearSplitOnSelect: () => void
+  /** ChatSidebar's `onSelectSlot`: leaves split view and, with "Open Sidebar
+   *  Sessions in a Session Tab" on, gives the session its own tab. */
+  selectFromSidebar: (key: string) => void
   history: SessionInfo[]
   historyHasMore: boolean
   navigateToEmbeddedSlot: (key: string) => void | Promise<void>
@@ -49,6 +51,8 @@ interface SessionsSidebarChromeProps {
   defaultAgent: string
   installedAgents: KiroCrewAgent[]
   sidebarAgents: KiroCrewAgent[]
+  /** The picker's unfolded rows, for the session list's same-name memory mark. */
+  sidebarChoices: KiroCrewAgent[]
   setActionError: ReturnType<typeof useSteerDelivery>['setActionError']
   showActionError: (message: string, title?: string, report?: ErrorReport) => void
   canStageSessionRef: boolean
@@ -104,7 +108,7 @@ interface SessionsSidebarChromeProps {
  */
 export default function SessionsSidebarChrome({
   embedMode, mode, activeSlot, connected, creatingSlot, dispatch, filteredSlots, isMobile, keyboardInset, mobileNavRail, surfaceUnreadSlots, titleInTopbar, topbarSlot, topbarTrailSlot, vv,
-  activityOpen, clearSplitOnSelect, history, historyHasMore, navigateToEmbeddedSlot, openEmbeddedCrewWindow, splitMode, defaultAgent, installedAgents, sidebarAgents, setActionError, showActionError,
+  activityOpen, selectFromSidebar, history, historyHasMore, navigateToEmbeddedSlot, openEmbeddedCrewWindow, splitMode, defaultAgent, installedAgents, sidebarAgents, sidebarChoices, setActionError, showActionError,
   canStageSessionRef, chatPaneEl, stageSessionRef, openSlotInNewTab, ownsSessionTabs, activePoppedOut, focusActivePopout, openActivePopout, splitFeatureEnabled, currentSlot, effectiveMode, title,
   activeIsSplitAnchor, editingTitle, enterSplit, setEditingTitleSlot, setSidebarDragging, setSidebarWidth, sidebarAutoHidden, sidebarDragging, splitAnchorForActive, effectiveSidebarWidth, toggleAct,
   winW, closeSidebar, containerH, drawerDragging, drawerMounted, drawerPanelRef, drawerScrim, drawerScrimRef, drawerX, expandFrom, expandSidebar, flyout, flyoutEligible, flyoutSurfaceRef,
@@ -118,7 +122,7 @@ export default function SessionsSidebarChrome({
             key="sessions-backdrop"
             data-testid="sessions-backdrop"
             className="fixed inset-0 z-[46] bg-black/50 backdrop-blur-xs"
-            // ^ Frosted, matching every other scrim in the app (App.tsx's own
+            // ^ Frosted, matching every other scrim in the app (navRail.tsx's own
             // mobile nav backdrop is the same three classes). Kept adjacent to
             // `key` — the composer-chrome occlusion guard anchors its z-order
             // regex on that proximity. A full-viewport `backdrop-filter` does
@@ -208,6 +212,7 @@ export default function SessionsSidebarChrome({
             defaultAgent={defaultAgent}
             installedAgents={installedAgents}
             rowAgents={sidebarAgents}
+            rowChoices={sidebarChoices}
             mode={mode}
             onWidthChange={setSidebarWidth}
             onDragChange={setSidebarDragging}
@@ -265,27 +270,20 @@ export default function SessionsSidebarChrome({
           defaultAgent={defaultAgent}
           installedAgents={installedAgents}
           rowAgents={sidebarAgents}
+          rowChoices={sidebarChoices}
           mode={mode}
           onWidthChange={setSidebarWidth}
           onDragChange={setSidebarDragging}
           fillsHost={isMobile}
           collapsible={!isMobile}
           staticRows={isMobile}
-          onSelectSlot={clearSplitOnSelect}
+          onSelectSlot={selectFromSidebar}
           onOpenSlotInNewTab={ownsSessionTabs ? openSlotInNewTab : undefined}
           onOpenSource={revealSourceLink}
           // Only offer the pane as a drop target when a composer exists to show
           // the chip — see canStageSessionRef for why this is a named predicate.
           chatDropTarget={canStageSessionRef ? chatPaneEl : null}
           onDropSessionRef={stageSessionRef}
-          // Desktop-only by design (the narrow-viewport-required exemption):
-          // the scroll peek draws a clipped title in full past the sidebar's
-          // edge, over the chat beside it. On a phone the sessions pane is a
-          // near-full-width drawer with no chat beside it, so titles are not
-          // clipped by a narrow sidebar and there is nothing to draw over; the
-          // full title stays reachable there through the row's title tooltip
-          // and the rename box.
-          scrollPeek={!isMobile}
         />
         )
         return isMobile && mobileNavRail ? (

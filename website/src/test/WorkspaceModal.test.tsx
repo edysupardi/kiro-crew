@@ -32,8 +32,9 @@ const mockApi = vi.hoisted(() => ({
    and Radix commits discrete events with `ReactDOM.flushSync(...)`, which React
    refuses inside Testing Library's `act()` ("Should not already be working").
    The select is only the DOOR to the modal here — the modal's own lifecycle is
-   what these tests are about. The real Radix path is driven end-to-end by
-   scripts/verify-crews-dialog-select.mjs. */
+   what these tests are about. The real Radix path is driven by
+   scripts/verify-crews-dialog-select.mjs, which runs on demand only
+   (`npm run verify:crews-dialog-select`); no CI lane runs it. */
 vi.mock('../components/SimpleSelect', () => ({
   default: ({
     options, value, onChange, action, clearLabel, 'aria-label': ariaLabel,
@@ -116,7 +117,7 @@ beforeEach(() => {
  *  settings, so every workspace-modal path goes through here first. */
 async function openCrewSheet(): Promise<HTMLElement> {
   fireEvent.click(screen.getByTestId('new-crew'))
-  const dlg = await screen.findByRole('dialog', { name: 'New crewmate' })
+  const dlg = await screen.findByRole('dialog', { name: 'New mate' })
   // The crew manager's door opens with Advanced settings already unfolded.
   expect(within(dlg).getByTestId('crewmate-create-advanced-toggle')).toHaveAttribute('aria-expanded', 'true')
   await within(dlg).findByRole('combobox', { name: 'Workspace' })
@@ -137,7 +138,7 @@ describe('WorkspaceModal — StyledSelect trigger and modal lifecycle', () => {
   it('workspace dropdown contains "+ New workspace…" action', async () => {
     renderPage()
     await waitFor(() => expect(mockApi.kirocrewAgents).toHaveBeenCalled())
-    await waitFor(() => expect(mockApi.workspaces).toHaveBeenCalled())
+    await screen.findByTestId('crew-card')
     const sheet = await openCrewSheet()
     fireEvent.click(within(sheet).getByRole('combobox', { name: 'Workspace' }))
     expect(await screen.findByText('+ New workspace…')).toBeInTheDocument()
@@ -145,14 +146,14 @@ describe('WorkspaceModal — StyledSelect trigger and modal lifecycle', () => {
 
   it('opens modal when "+ New workspace…" is clicked', async () => {
     renderPage()
-    await waitFor(() => expect(mockApi.workspaces).toHaveBeenCalled())
+    await screen.findByTestId('crew-card')
     await openModalViaWorkspaceDropdown()
     expect(screen.getByText('Create Workspace')).toBeInTheDocument()
   })
 
   it('closes modal on Escape key', async () => {
     renderPage()
-    await waitFor(() => expect(mockApi.workspaces).toHaveBeenCalled())
+    await screen.findByTestId('crew-card')
     await openModalViaWorkspaceDropdown()
     expect(screen.getByText('Create Workspace')).toBeInTheDocument()
     fireEvent.keyDown(document, { key: 'Escape' })
@@ -161,7 +162,7 @@ describe('WorkspaceModal — StyledSelect trigger and modal lifecycle', () => {
 
   it('closes modal from its close button', async () => {
     renderPage()
-    await waitFor(() => expect(mockApi.workspaces).toHaveBeenCalled())
+    await screen.findByTestId('crew-card')
     await openModalViaWorkspaceDropdown()
     expect(screen.getByText('Create Workspace')).toBeInTheDocument()
     // Radix supplies the overlay and dismisses on an outside POINTERDOWN, so the
@@ -178,7 +179,7 @@ describe('WorkspaceModal — creation flow', () => {
   it('calls api.createWorkspace() on submit', async () => {
     mockApi.createWorkspace.mockResolvedValue({ ok: true, name: 'staging' })
     renderPage()
-    await waitFor(() => expect(mockApi.workspaces).toHaveBeenCalled())
+    await screen.findByTestId('crew-card')
     await openModalViaWorkspaceDropdown()
 
     const modal = screen.getByText('Create Workspace').closest('.fixed')!
@@ -199,7 +200,7 @@ describe('WorkspaceModal — creation flow', () => {
   it('displays error on creation failure', async () => {
     mockApi.createWorkspace.mockRejectedValue(new Error('Workspace already exists'))
     renderPage()
-    await waitFor(() => expect(mockApi.workspaces).toHaveBeenCalled())
+    await screen.findByTestId('crew-card')
     await openModalViaWorkspaceDropdown()
 
     const modal = screen.getByText('Create Workspace').closest('.fixed')!
@@ -218,7 +219,7 @@ describe('WorkspaceModal — creation flow', () => {
 
   it('"Copy from" StyledSelect shows existing workspaces', async () => {
     renderPage()
-    await waitFor(() => expect(mockApi.workspaces).toHaveBeenCalled())
+    await screen.findByTestId('crew-card')
     await openModalViaWorkspaceDropdown()
 
     // The "Copy from" select shows "— none —" as its clear row / trigger text

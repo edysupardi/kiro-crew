@@ -27,6 +27,7 @@ from kiro_crew.dashboard.state import (
     _slots_serialization_note,
 )
 from kiro_crew.dashboard.status_counts import cached_status_snapshot
+from kiro_crew.dashboard.warm_task_brief import handle_focus_frame, note_view_closed
 from kiro_crew.dashboard.websocket_hub import SLOT_PATCH_CAPABILITY, SLOT_PATCH_WS_FLAG
 from kiro_crew.dashboard.ws_event_scope import (
     DASHBOARD_USER_AUDITEE,
@@ -525,6 +526,7 @@ def build_subagent_snapshot(a: Any, *, now: float | None = None) -> dict:
         "child_session": getattr(a, "conversation_key", "") or f"subagent:{a.id}",
         "task": _r(a.task),
         "agent": _r(a.agent),
+        "label": _r(getattr(a, "label", "") or ""),
         "model": a.resolved_model,
         "requested_model": _r(a.requested_model),
         "streaming": _r(a.streaming_text),
@@ -597,6 +599,7 @@ def broadcast_side_result(
     final: bool = False,
     ts: float | None = None,
     steer: bool = False,
+    message_id: str = "",
 ) -> None:
     """Broadcast a side conversation event on the dedicated side channel.
 
@@ -614,6 +617,11 @@ def broadcast_side_result(
     Set final=True on the terminal frame of a side turn so the frontend
     can flip the streaming flag off cleanly.
 
+    ``message_id`` names the sidecar row the frame announces (a question, a
+    steer, a final answer, a stop row). A panel restored from ``GET .../side``
+    already holds that row, and the id is how it knows. Streaming deltas and
+    the error notices the sidecar does not store carry none.
+
     No payload field is persisted — sidecar-only, ephemeral.
     """
     payload: dict[str, object] = {
@@ -630,6 +638,8 @@ def broadcast_side_result(
         payload["final"] = True
     if steer:
         payload["steer"] = True
+    if message_id:
+        payload["message_id"] = message_id
     # Owner-only, matching the queue frame and `_check_slot_ownership`: side answers and
     # steer echoes are the owner's own conversation, and an app that asks the HTTP API
     # about a slot it does not own gets a 404.
@@ -1031,7 +1041,14 @@ async def _serve_ws(
             # detectable as a change rather than as a first sighting.
             "gitlabHostsGeneration": gitlab_hosts_generation(),
             "governanceGeneration": initial_answer_generation,
+            "slotsPartial": getattr(state, "slot_list_rebuilding", False) is True,
         }
+        if is_dashboard_user:
+            held_keys = list(state.slot_list_held_keys())
+            if held_keys:
+                snapshot_frame["slotsHeldKeys"] = held_keys
+            if state.slot_list_hold_channels() is True:
+                snapshot_frame["slotsHoldChannels"] = True
         # Same offender diagnostic as the slots broadcast.
         # ``send_json`` is ``send_str(dumps(data))``, so dumping here is
         # byte-identical on the healthy path. This whole connect block sits
@@ -1345,7 +1362,7 @@ async def _serve_ws(
                         # this replays the whole ring, so a scope revoked (or an
                         # app disabled) after connect must not be able to pull
                         # the buffered history. Mirrors the per-send re-check in
-                        # handlers/updates._safe_ws_send.
+                        # handlers/updates_streams._safe_ws_send.
                         _live = effective_allowed_events(ws_app, allowed_events)
                         if not ws.get("_is_dashboard_user", False) and not (
                             "log" in _live or "log:all" in _live
@@ -1496,6 +1513,7 @@ async def _serve_ws(
                                                 "outcome": a.outcome,
                                                 "task": _r(a.task),
                                                 "agent": _r(a.agent),
+                                                "label": _r(getattr(a, "label", "") or ""),
                                                 "model": a.resolved_model,
                                                 "requested_model": _r(a.requested_model),
                                             },
@@ -1744,6 +1762,14 @@ async def _serve_ws(
                             state, data.get("slot"), _focus_task, owner=owner_request
                         )
                         if owner_request:
+                            # The warm brief reads the registry's PREVIOUS row, so
+                            # it must run before retention applies this frame.
+                            handle_focus_frame(
+                                state,
+                                id(ws),
+                                data.get("slot"),
+                                announce=data.get("announce") is True,
+                            )
                             note_foreground(state, id(ws), data.get("slot"))
                     elif msg_type == "slot_read":
                         _relayed = _handle_slot_read(
@@ -1791,6 +1817,7 @@ async def _serve_ws(
         # A prefetch still debouncing for a closed dashboard serves nobody.
         if _focus_task is not None and not _focus_task.done():
             _focus_task.cancel()
+        note_view_closed(state, id(ws))
         note_foreground(state, id(ws), None)
         state.unsubscribe_logs(ws)
         state.unsubscribe_subagents(ws)

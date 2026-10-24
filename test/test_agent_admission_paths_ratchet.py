@@ -63,11 +63,11 @@ Site = tuple[str, str]
 
 # (module path under src/kiro_crew, dotted enclosing function) -> gates referenced.
 ADMISSION_SITES: dict[Site, frozenset[str]] = {
-    ("acp/client.py", "AcpClient._spawn"): frozenset({FORK, FRESH}),
+    ("acp/client_start.py", "_spawn"): frozenset({FORK, FRESH}),
     ("acp/harness/kas.py", "KasHarness.session_extras._build"): frozenset({FORK, FRESH}),
     ("acp/harness/kiro.py", "KiroHarness.resolve_spawn"): frozenset({FORK}),
-    ("acp/runtime.py", "AcpRuntime._resolve_spawn_plan"): frozenset({FRESH}),
-    ("acp/runtime.py", "AcpRuntime._activate_mode_bracketed"): frozenset({FRESH}),
+    ("acp/runtime_mode_activation.py", "_activate_mode_bracketed"): frozenset({FRESH}),
+    ("acp/runtime_spawn_launch.py", "_resolve_spawn_plan"): frozenset({FRESH}),
     ("acp/session_mcp.py", "_agent_spec_and_snapshot_for"): frozenset({FRESH}),
 }
 
@@ -78,17 +78,17 @@ KNOWN_GAPS: dict[Site, tuple[frozenset[str], str]] = {
         "covered: AcpRuntime._resolve_spawn_plan runs the freshness gate after this "
         "method returns, as the last check before the process is created",
     ),
-    ("acp/runtime.py", "AcpRuntime._resolve_spawn_plan"): (
-        frozenset({FORK}),
-        "covered for the kiro host only, by KiroHarness.resolve_spawn; every other "
-        "harness this runtime drives reaches no fork-governance check",
-    ),
-    ("acp/runtime.py", "AcpRuntime._activate_mode_bracketed"): (
+    ("acp/runtime_mode_activation.py", "_activate_mode_bracketed"): (
         frozenset({FORK}),
         "UNCOVERED: a shared runtime spawned as one agent and switched to another "
         "here passes no fork-governance check for the agent it switched to; a "
         "project copy of a managed name is refused at the spawn, whichever agent "
         "the spawn names",
+    ),
+    ("acp/runtime_spawn_launch.py", "_resolve_spawn_plan"): (
+        frozenset({FORK}),
+        "covered for the kiro host only, by KiroHarness.resolve_spawn; every other "
+        "harness this runtime drives reaches no fork-governance check",
     ),
     ("acp/session_mcp.py", "_agent_spec_and_snapshot_for"): (
         frozenset({FORK}),
@@ -100,22 +100,22 @@ KNOWN_GAPS: dict[Site, tuple[frozenset[str], str]] = {
 # (module, function) -> the admission sites that govern the spawn it builds, or a
 # string stating why no admission gate applies.
 AGENT_ARGV_SITES: dict[Site, tuple[Site, ...] | str] = {
-    ("acp/client.py", "AcpClient._spawn"): (("acp/client.py", "AcpClient._spawn"),),
+    ("acp/client_start.py", "_spawn"): (("acp/client_start.py", "_spawn"),),
     ("acp/harness/kiro.py", "KiroHarness.resolve_spawn"): (
         ("acp/harness/kiro.py", "KiroHarness.resolve_spawn"),
-        ("acp/runtime.py", "AcpRuntime._resolve_spawn_plan"),
+        ("acp/runtime_spawn_launch.py", "_resolve_spawn_plan"),
     ),
     # Rewrites the agent in the argv of the plan ``_resolve_spawn_plan`` returned.
-    ("acp/runtime.py", "AcpRuntime._spawn_admitted"): (
+    ("acp/runtime_spawn_launch.py", "_spawn_admitted"): (
         ("acp/harness/kiro.py", "KiroHarness.resolve_spawn"),
-        ("acp/runtime.py", "AcpRuntime._resolve_spawn_plan"),
+        ("acp/runtime_spawn_launch.py", "_resolve_spawn_plan"),
     ),
-    ("dashboard/handlers/sessions.py", "_usage_scrape_argv"): (
+    ("dashboard/handlers/sessions_parts/usage_scrape.py", "_usage_scrape_argv"): (
         "UNGATED: a one-shot `/usage` read on the fixed kirocrew-lite service agent, "
         "spawned with no cwd argument, so the child resolves --agent against the "
         "gateway process's own working directory rather than a session checkout"
     ),
-    ("mcp_gateway/rewriter.py", "_build_stub_entry"): (
+    ("mcp_gateway/rewriter_spec.py", "_build_stub_entry"): (
         "not a kiro-cli spawn: the agent name is an argument to the MCP gateway stub"
     ),
     ("testing/workflow_memory_scenario.py", "respond"): (
@@ -127,7 +127,7 @@ AGENT_ARGV_SITES: dict[Site, tuple[Site, ...] | str] = {
 # site must name one of them among its governors (see the last test below).
 SHADOW_SITES: frozenset[Site] = frozenset(
     {
-        ("acp/client.py", "AcpClient._spawn"),
+        ("acp/client_start.py", "_spawn"),
         ("acp/harness/kiro.py", "KiroHarness.resolve_spawn"),
     }
 )

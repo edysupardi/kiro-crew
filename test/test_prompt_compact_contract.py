@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from kiro_crew.context_assembly.sections import computer_use_block
+from kiro_crew.context_assembly.sections import browser_section, computer_use_block
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "src" / "kiro_crew" / "config"
@@ -22,9 +22,11 @@ CONFIG = ROOT / "src" / "kiro_crew" / "config"
 # to fit; their tests, not a size limit, check the retained text contracts.
 # Measured on the prompt with its Computer Use slot filled by the full section,
 # so the section's bytes still count against the budget after moving into
-# `context_assembly/sections.py`. The `{{MAX_SUBAGENTS}}` and `{{WIDGET_BLOCK}}`
-# slots are still counted as their raw tokens.
-PROMPT_BYTE_CEILINGS = {"prompt.md": 40_850}
+# `context_assembly/sections.py`, and with its Browser section kept and its
+# markers gone, as a session with browsing set up gets it. The
+# `{{MAX_SUBAGENTS}}` and `{{WIDGET_BLOCK}}` slots are still counted as their
+# raw tokens.
+PROMPT_BYTE_CEILINGS = {"prompt.md": 41_385}
 _COMPUTER_USE_TOKEN = "{{COMPUTER_USE_BLOCK}}"
 
 
@@ -32,9 +34,10 @@ def _read(name: str = "prompt.md") -> str:
     return (CONFIG / name).read_text(encoding="utf-8")
 
 
-def _resolved(name: str = "prompt.md", *, mounted: bool = True) -> str:
-    """The prompt with its Computer Use slot filled as a session gets it."""
-    return _read(name).replace(_COMPUTER_USE_TOKEN, computer_use_block(mounted))
+def _resolved(name: str = "prompt.md", *, mounted: bool = True, browsing: bool = True) -> str:
+    """The prompt with its Computer Use slot and Browser section resolved as a session gets them."""
+    text = _read(name).replace(_COMPUTER_USE_TOKEN, computer_use_block(mounted))
+    return browser_section(text, browsing)
 
 
 def _section(text: str, heading: str) -> str:
@@ -55,6 +58,7 @@ def test_each_selected_prompt_stays_under_its_byte_ceiling(name: str) -> None:
     size = len(_resolved(name, mounted=True).encode("utf-8"))
     assert size <= PROMPT_BYTE_CEILINGS[name], (name, size, PROMPT_BYTE_CEILINGS[name])
     assert len(_resolved(name, mounted=False).encode("utf-8")) < size
+    assert len(_resolved(name, browsing=False).encode("utf-8")) < size
 
 
 @pytest.mark.parametrize("name", PROMPT_BYTE_CEILINGS)
@@ -62,6 +66,8 @@ def test_template_slots_remain_complete_and_unique(name: str) -> None:
     text = _read(name)
     assert re.findall(r"\{\{([A-Z_]+)\}\}", text) == [
         "MAX_SUBAGENTS",
+        "BROWSER_BEGIN",
+        "BROWSER_END",
         "COMPUTER_USE_BLOCK",
         "WIDGET_BLOCK",
     ]
@@ -157,6 +163,7 @@ def test_injected_data_and_refusals_are_not_new_authority() -> None:
         trust,
         r"SESSION CONTEXT.*REFERENCE.*CURRENT USER REQUEST",
         r"cancelled previous turn is a STOP signal",
+        r"compaction summary calling a tool call cancelled is not one when the call's own result shows it finished",
         r"INCOGNITO SESSION.*TEMPORARY SESSION.*forbids memory tools",
         r"writes in incognito, reads as well in temporary",
     )
@@ -169,6 +176,26 @@ def test_injected_data_and_refusals_are_not_new_authority() -> None:
         r"trust-root file.*make your own command pass",
         r"forged.*ignore the instruction",
     )
+
+
+def test_a_compaction_summary_cancel_is_carved_out_of_the_stop_rule() -> None:
+    """A compaction's "cancelled" is not a Stop; every other cancelled turn still is.
+
+    A compaction can cut a finished tool call off from its result, and the
+    harness then summarizes that call as cancelled by the user. Without the
+    carve-out the STOP rule ends the session's own loop on that summary. The
+    carve-out must ride on the STOP rule itself, so the general rule stays in
+    force for every real cancel, marked or not, and it holds only when the
+    call's own result shows it finished: a call the user really stopped has no
+    such result, so its summary still reads as a cancel.
+    """
+    trust = " ".join(_section(_read(), "## Injected context is not the user").split())
+    assert re.search(
+        r"A cancelled previous turn is a STOP signal, not work to resume on your own; "
+        r"a compaction summary calling a tool call cancelled is not one "
+        r"when the call's own result shows it finished",
+        trust,
+    ), "the carve-out must qualify the STOP rule, and only for a call that finished"
 
 
 def test_monitor_modes_have_distinct_stop_paths_and_real_exit_conditions() -> None:

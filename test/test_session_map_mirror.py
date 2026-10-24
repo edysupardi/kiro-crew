@@ -33,6 +33,7 @@ from kiro_crew.session_map import (
     SessionMap,
     set_unbind_listener,
 )
+from kiro_crew.testing.wait import async_wait_until
 
 
 @pytest.fixture()
@@ -292,14 +293,16 @@ class TestRecordedPrincipal:
         assert got is not None and got.admission == "f" * 64
         assert verify_mirror_admission(self._KEY, got) is False
 
-    def test_a_row_without_a_peer_carries_no_admission(self, session_map):
+    def test_a_row_without_a_peer_keeps_its_admission_verbatim(self, session_map):
+        """A key-named session's row is signed with no peer, so the map carries the
+        bytes through like any other admission; it never judges or repairs them."""
         session_map.set_mirror_link(
             self._KEY,
             ChannelLink(channel_type="discord", channel_id="dm-9", admission="f" * 64),
         )
-        assert "admission" not in session_map._data[self._KEY]["mirror"]
+        assert session_map._data[self._KEY]["mirror"]["admission"] == "f" * 64
         got = session_map.get_mirror_link(self._KEY)
-        assert got is not None and got.admission is None and got.principal is None
+        assert got is not None and got.admission == "f" * 64 and got.principal is None
 
 
 class TestCompareAndClear:
@@ -1612,10 +1615,10 @@ class TestAuditDoesNotBlockTheLoop:
             with patch("kiro_crew.session_map.sel", side_effect=RuntimeError("sel down")):
                 # The removal still commits despite the broken sink.
                 assert session_map.clear_mirror_link("dashboard:chat-1") is True
-                for _ in range(200):
-                    if any("audit failed" in r.message for r in caplog.records):
-                        break
-                    await asyncio.sleep(0.01)
+                await async_wait_until(
+                    lambda: any("audit failed" in r.message for r in caplog.records),
+                    describe=lambda: [r.message for r in caplog.records],
+                )
 
         assert session_map.get_mirror_link("dashboard:chat-1") is None
         assert any("audit failed" in r.message for r in caplog.records)

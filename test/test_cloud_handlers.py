@@ -204,6 +204,7 @@ class TestReadEndpoints:
             lambda p, r: {"reachable": True, "account": "123", "ec2_reachable": True},
         )
         monkeypatch.setattr(hc.ssm, "session_manager_plugin_installed", lambda: False)
+        monkeypatch.setattr(hc.ssm, "session_manager_plugin_refusal", lambda: None)
         monkeypatch.setattr(hc.ssm, "session_manager_plugin_install_command", lambda: "sudo dnf x")
         resp = await hc.api_cloud_preflight(
             _req("GET", "/api/cloud/preflight?profile=dev", state=_state(tmp_path))
@@ -215,6 +216,102 @@ class TestReadEndpoints:
         # The remedy is resolved server-side, because only this process knows which
         # OS the check ran on.
         assert body["session_manager_plugin_command"] == "sudo dnf x"
+        assert body["session_manager_plugin_refused_path"] == ""
+        assert body["session_manager_plugin_refused_reason"] == ""
+        assert body["session_manager_plugin_refused_code"] == ""
+        assert body["session_manager_plugin_refused_owner"] == ""
+        assert body["session_manager_plugin_refused_owner_uid"] is None
+
+    async def test_preflight_reports_a_refused_plugin_with_its_reason(self, tmp_path, monkeypatch):
+        # A plugin the provenance check refused is installed: the row carries the
+        # refusal and its remedy, never the install command, which would
+        # reinstall the same refused file.
+        monkeypatch.setattr(hc.iam, "reachability_check", lambda p, r: {"reachable": True})
+        monkeypatch.setattr(hc.ssm, "session_manager_plugin_installed", lambda: False)
+        monkeypatch.setattr(
+            hc.ssm,
+            "session_manager_plugin_refusal",
+            lambda: hc.ssm.PluginRefusal(
+                path="/usr/local/sessionmanagerplugin/bin/session-manager-plugin",
+                reason="executable parent is owned by another user (uid 1501)",
+                remedy_command="sudo chown -R root:wheel /usr/local/sessionmanagerplugin",
+                code="other_owner",
+                owner="",
+                owner_uid=1501,
+            ),
+        )
+
+        def _no_install_command() -> str:
+            raise AssertionError("a refused plugin must not be offered the install command")
+
+        monkeypatch.setattr(hc.ssm, "session_manager_plugin_install_command", _no_install_command)
+        resp = await hc.api_cloud_preflight(
+            _req("GET", "/api/cloud/preflight", state=_state(tmp_path))
+        )
+        body = _body(resp)
+        assert body["session_manager_plugin"] is False
+        assert body["session_manager_plugin_refused_path"] == (
+            "/usr/local/sessionmanagerplugin/bin/session-manager-plugin"
+        )
+        assert "owned by another user (uid 1501)" in body["session_manager_plugin_refused_reason"]
+        assert body["session_manager_plugin_refused_code"] == "other_owner"
+        assert body["session_manager_plugin_refused_owner"] == ""
+        assert body["session_manager_plugin_refused_owner_uid"] == 1501
+        assert body["session_manager_plugin_command"] == (
+            "sudo chown -R root:wheel /usr/local/sessionmanagerplugin"
+        )
+
+    async def test_preflight_reports_a_refused_aws_cli_when_credentials_fail(
+        self, tmp_path, monkeypatch
+    ):
+        # A refused CLI is not a missing one, so the credentials row gets
+        # the path and the reason instead of the CLI's "not found" error.
+        monkeypatch.setattr(
+            hc.iam,
+            "reachability_check",
+            lambda p, r: {"reachable": False, "detail": "aws CLI not found"},
+        )
+        monkeypatch.setattr(hc.ssm, "session_manager_plugin_installed", lambda: True)
+        monkeypatch.setattr(
+            hc.ssm,
+            "aws_cli_refusal",
+            lambda: hc.ssm.PluginRefusal(
+                path="/opt/homebrew/bin/aws",
+                reason="executable is owned by another user (uid 502)",
+                remedy_command="",
+                code="other_owner",
+                owner="workbrew",
+                owner_uid=502,
+            ),
+        )
+        resp = await hc.api_cloud_preflight(
+            _req("GET", "/api/cloud/preflight", state=_state(tmp_path))
+        )
+        body = _body(resp)
+        assert body["aws_cli_refused_path"] == "/opt/homebrew/bin/aws"
+        assert body["aws_cli_refused_reason"] == "executable is owned by another user (uid 502)"
+        assert body["aws_cli_refused_code"] == "other_owner"
+        assert body["aws_cli_refused_owner"] == "workbrew"
+        assert body["aws_cli_refused_owner_uid"] == 502
+
+    async def test_preflight_skips_the_cli_refusal_once_credentials_resolve(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            hc.iam, "reachability_check", lambda p, r: {"reachable": True, "account": "123"}
+        )
+        monkeypatch.setattr(hc.ssm, "session_manager_plugin_installed", lambda: True)
+
+        def _not_read() -> None:
+            raise AssertionError("a CLI that answered has no refusal to explain")
+
+        monkeypatch.setattr(hc.ssm, "aws_cli_refusal", _not_read)
+        resp = await hc.api_cloud_preflight(
+            _req("GET", "/api/cloud/preflight", state=_state(tmp_path))
+        )
+        body = _body(resp)
+        assert body["aws_cli_refused_path"] == ""
+        assert body["aws_cli_refused_owner_uid"] is None
 
     async def test_preflight_omits_the_remedy_once_the_plugin_is_present(
         self, tmp_path, monkeypatch

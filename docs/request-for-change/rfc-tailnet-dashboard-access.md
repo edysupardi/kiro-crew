@@ -97,7 +97,7 @@ correctly treated as remote and the config-write surfaces return `read_only`
 
 ### Problem 1 — the IP pin is inert behind every recommended tunnel
 
-`check_token_ip()` (`token_auth.py`) compares against the value captured at
+`check_token_ip()` (`token_auth_tokens.py`) compares against the value captured at
 session creation, which is `request.remote`. For cloudflared, ngrok, and
 `tailscale serve` alike the immediate peer is `127.0.0.1`, so:
 
@@ -352,7 +352,7 @@ manage cron. You cannot reveal a stored credential or rewrite channel config.
 
 `link_unfurl.py` rejects non-`is_global` addresses, which covers
 `100.64.0.0/10`, so tailnet URLs pasted into chat do not unfurl.
-`test/test_link_unfurl.py` pins that rejection against a table of IANA
+`test/test_link_unfurl_vet_and_extraction.py` pins that rejection against a table of IANA
 special-purpose prefixes.
 
 Allowing it is a **deliberate widening of the agent's egress surface** — a chat
@@ -392,7 +392,7 @@ Exit criteria:
   same-host-proxied path — cloudflared, ngrok and Tailscale alike — and says
   plainly what the pin does and does not bind to behind a local proxy.
 - Security Posture reports what the session pin is bound to, via a
-  `_token_auth_items()` entry (`security_posture.py`), distinguishing
+  `_token_auth_items()` entry (`security_posture_controls.py`), distinguishing
   "pinned to peer address" from "pinned to a local proxy".
 - A test asserts that entry reports the proxy-pinned state when the request
   carries `X-Forwarded-For` from a loopback peer.
@@ -471,7 +471,7 @@ Blocked on OQ3 and may be refused outright without affecting Phases 1–3.
 
 Exit criteria, if pursued:
 
-- The `test/test_link_unfurl.py` special-purpose-prefix table still passes
+- The `test/test_link_unfurl_vet_and_extraction.py` special-purpose-prefix table still passes
   unchanged: the default remains denial.
 - A `100.64.0.0/10` address unfurls **only** when tailnet trust is enabled and
   the daemon confirms the address belongs to this tailnet.

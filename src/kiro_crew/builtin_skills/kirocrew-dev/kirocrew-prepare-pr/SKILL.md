@@ -47,23 +47,9 @@ Every PR names an issue of this repository on a line of its own: `Closes #N` (th
 merge closes it) or `Part of #N` (it stays open). The `Issue Gate` lane checks it.
 It is paused today (`GATE_ENFORCED: "false"`); write the line anyway.
 
-1. No issue yet? Open one from `.github/ISSUE_TEMPLATE/` BEFORE Phase 1.
-2. The Captain — the maintainers' triage crew — scans issues with no tier, writes
-   one tier label and marks the issue `pending-triage`.
-3. The tier says how big the work is:
-
-| Tier | Means | Before you build |
-|---|---|---|
-| `tier:T1` | a bug; the fix keeps the design | go |
-| `tier:T2` | a small additive feature | go |
-| `tier:T3` | a change to an existing experience; needs a one-pager | wait for `triaged` |
-| `tier:T4` | a new concept; needs a design review | wait for `triaged` |
-
-A person flips a T3/T4 issue from `pending-triage` to `triaged` after reading it.
-Unsure of the size? Pick the higher tier. Only a maintainer applies
-`issue-gate: waived` (a production fire, a release PR). The older `needs-triage`
-and verdict labels (`auto-fixable`, `needs-investigation`, `needs-human`) drive
-Issue Radar's dispatch; the gate does not read them.
+No issue yet? Open one from `.github/ISSUE_TEMPLATE/` BEFORE Phase 1. The tier
+table (T1-T4; T3 and T4 wait for `triaged`) and the Captain's triage are in
+`references/ci.md` § Issue tiers.
 
 ### Lanes
 
@@ -87,8 +73,7 @@ All five, together:
 4. One clean commit on a feature branch (when the profile sets `single_commit`).
 5. **Every raised concern answered on the PR** — see "Dispositions" below. A
    red `macOS Tests (on demand)` run on the current head counts as a concern:
-   it is not required, but fix it or show the same test red on main. #12925
-   merged over its own red shard 2 and reddened that shard on every open PR.
+   it is not required, but fix it or show the same test red on main.
 
 When the diff adds or changes a test, review-ready also means the body carries that
 test's determinism proof: the repeats and a shuffled order, and for a fix to a flaky
@@ -96,8 +81,7 @@ test the forced condition red on the parent and green on the fix (testing-conven
 § Proving a determinism fix). `AUTOSDE.yaml`'s `tests-are-deterministic` rule is what
 review holds the test itself to.
 
-Advisory findings may remain *unfixed*. They may not remain *unanswered*.
-A green rollup with an unanswered `CONCERNS` verdict is **not** converged.
+A BLOCK is fixed, rebutted with evidence, or overridden. It never stays unanswered.
 
 ## Three questions per finding
 
@@ -121,7 +105,7 @@ data-loss defect must not be dismissed as speculative. A missing sibling branch
 is an incomplete fix, not optional scope (see Phase 4).
 
 Legitimate Critical/High and applicable blocking AUTOSDE violations block
-readiness. Medium/Low remain advisory unless a human escalates them; do not widen
+readiness. Medium/Low do not block unless a human escalates them; do not widen
 the PR for advice. With no stated severity, correctness/security/build failures
 are High-equivalent and style is Low. Severity governs changes, never whether
 a concern gets a reply.
@@ -182,8 +166,7 @@ Answering is prose work. It never needs a push and never widens the diff.
 
 **What must be answered:**
 
-- Non-PASS verdicts from the **whole-design lanes** — Design, First Principles, UX: every Watch item, Suggestion and Subtraction, each with its own `target=design` / `target=first-principles` / `target=ux` comment naming its `span=`. Their **BLOCK** verdict blocks readiness, and so does an **unanswered CONCERNS** for the current head: `pr_status.py` exits `20` on it even when the rollup is green, and it clears the moment one `target=<lane> head=<current sha>` disposition exists. Under the `--reviewers` pin, a CONCERNS in the `Whole-design punchlines` block is that stop (`references/rationale.md`). PASS is advisory and must still be answered: its punchline is the ask. `pr_findings.py` prints each item with its `span=` and `Clears when:` line, above the line-level findings.
-- Non-blocking observations in the GPT / Opus bodies.
+- A **BLOCK** from the **whole-design lanes** — Design, First Principles, UX: every Blocker, each with its own `target=design` / `target=first-principles` / `target=ux` comment naming its `span=`. It blocks readiness. `pr_findings.py` prints each item with its `span=`, `Trigger:`, `Outcome:` and `Clears when:` line, above the line-level findings. A PASS, and every `Notes:` bullet, needs no reply.
 - One-way-door concerns from Design Review — fix or justify in writing.
 - Human review comments and inline threads.
 
@@ -213,8 +196,11 @@ A **writer** of the repository may record a judgment that turns a lane green for
 one head:
 
 ```
-/ai-review override <fable|gpt|design|ux|first-principles|scope|all> <current-head-sha>: <one-sentence reason>
+/ai-review override <fable|gpt|design|ux|first-principles|scope|all> <current-head-sha> <class>[ #N]: <reason, 20 to 500 characters>
 ```
+
+Use `false-positive` or `not-applicable` for what follows; the other classes need an
+issue or a link ([Risk release records](docs/ci/ci-and-reviews.md#risk-release-records)).
 
 `fable` is the Opus lane; `scope` is Security Scope Review. Decide it yourself —
 do not ask — when all four hold:
@@ -264,15 +250,17 @@ their module docstring instead.
 |---|---|---|---|
 | `preflight.py` | 0 | repo/branch/base/auth/permission/dirty/divergence/existing-PR blockers; fails closed on fetch failure | 0 ready · 30 blocker · 2 env |
 | `resolve_profile.py [root] [base_ref]` | 0 | the project profile as JSON | 0 · 2 env/parse |
-| `diff_signals.py [base] [--check-body]` | 1 / 2 / 3 | changed files + flagged signals; `--check-body` adds the two body checks and CI's template check on `<git-dir>/prepare-pr-body.md` | **0 · 20 unaccounted area · 21 `What changed` over `WORD_LIMIT` · 22 template section (all `--check-body` only) · 2 env / body file missing** |
+| `diff_signals.py [base] [--check-body]` | 1 / 2 / 3 | changed files + flagged signals; `--check-body` adds the two body checks and CI's template check on `<git-dir>/prepare-pr-body.md` | **0 · 20 unaccounted area · 21 `What changed` over `WORD_LIMIT` · 22 template section · 23 sibling list · 24 proof line · 25 a `Gate proof:` line the recorded proof contradicts (all `--check-body` only) · 2 env / body file missing** |
 | `push_guard.py` | 1 / 2 / 3 | builds every commit and guards every push; each mode is shown at the step that runs it, and each refusal names its fix | **0 safe · 40 refused · 41 stray staged paths / op mid-way · 2 env · 64 usage** |
+| `pre_push_gate.py` | 2 / 3 | **optional, advisory**: runs the cheap CI gates on the diff, prints every failure, records a proof for the tree; nothing refuses a push (`references/pre-push-gate.md`) | **0 proof written · 50 a gate failed · 51 a gate could not run, no skip, or a dirty tree · 52 `--verify` found no proof · 2 env** |
 | `pr_status.py [pr#]` | 3 | readiness, rollup, threads, current-head runs and reviewer stamps; `--reviewers` pins the fleet; `--json` appends a machine line | **0 clean · 10 running · 20 failing/findings · 2 env** |
+| `regen_shared.py [base]` | 1 | rebuild shared generated files after the rebase (`references/split-and-regen.md`) | **0 · 20 rewrote · 2 env** |
 | `green_age.py [--base B] [--pr N]` | 3 | has the base moved in this PR's files since its CI ran? Information, never a gate | **0 fresh · 30 STALE · 2 env** |
 | `pr_findings.py [pr#]` | 3 | failing log tails, unresolved threads, reviewer findings with stable `span=` ids, whole-design items first | 0 · 2 env |
 | `pr_findings.py [pr#] --rounds` | 1 / 3 | the loop's cross-round memory, read from the PR thread: goal, dispositions per judged head, spans, self-added code, mechanisms, recurrence | **0 · 30 retrospective due · 2 env** |
 | `local_review.py --base origin/<base>` | 2 | writes one review brief per profile reviewer, extracted from CI's own workflow | 0 · 40 parity failure · 2 env |
 | `monitor_armed.py [--pr N]` | 3 | did a `monitor_start` loop actually arm? | **0 armed · 20 not armed · 2 unreadable (treat as 20)** |
-| `prove.py [--base B] [--per-hunk]` | any | do the tests catch the bug? reverts production hunks in a throwaway worktree and re-runs the changed tests | **0 PROVEN · 20 NOT_PROVEN · 21 INCONCLUSIVE · 10 nothing · 30 baseline red · 2 env** |
+| `prove.py [--base B] [--per-hunk]` | any | do the tests catch the bug? reverts production hunks in a throwaway worktree and re-runs the changed tests; prints the `Proof:` line and records it | **0 PROVEN · 20 NOT_PROVEN · 21 INCONCLUSIVE · 10 nothing · 11 frontend tests · 30 baseline red · 2 env** |
 | `enable_automerge.py [pr#] [method]` | 4 | `gh pr merge --auto` (default `squash`); idempotent | 0 enabled · 20 could-not-enable · 2 env |
 
 `pr_status.py` and `pr_findings.py` need the sibling `_review_contract.py`, and
@@ -345,18 +333,16 @@ that view; no local round log is needed.
   each: remove / smaller replacement / keep / revert to `<head sha>` and redo via
   a smaller path.
 - **The retrospective is a step, not a stop.** Rule on every mechanism and continue
-  Phase 1 → 2 → 3 in the same turn. First that holds: **remove** (goal survives,
-  defect stays fixed); **revert** (mostly beyond the goal since that head);
-  **smaller replacement** (removal reopens the defect); **keep** plus the one
-  invariant that makes the span unreachable. In doubt, smaller wins. Post a
-  class-level `> ` disposition for each subtraction.
+  Phase 1 → 2 → 3 in the same turn. The pick order (remove, revert, smaller
+  replacement, keep) is in `references/retrospective.md`. Post a class-level `> `
+  disposition for each subtraction.
 - **Pause for the user only on these four**, each needing something only a
   human supplies: a user-visible, UI-placement or public-contract change the
   frozen goal did not settle; every option breaks the frozen goal; an
   ambiguous large conflict; a hard external blocker (infra, permissions, a check
   that never runs). Recurrence, round count, a re-raised finding or self-added
   code is never one. When you pause, name the option you would take.
-- `monitor_start` is bounded to `max_cycles=280` and `max_runtime_secs=86400`
+- `monitor_start` is bounded to `max_cycles=288` and `max_runtime_secs=86400`
   (24 hours, Phase 4's watch included); the agent never raises either. At
   exhaustion, hand over `--rounds` and open findings. Phase 2 separately caps
   local review at 10 passes.
@@ -394,7 +380,7 @@ may edit it.
 2. **Sync base.** `git fetch origin` — **this MUST succeed**; on failure, STOP and report it. Then `git rebase refs/remotes/origin/<base>` (full name: a local `origin/<base>` branch would win). Resolve unambiguous conflicts yourself; ask about an ambiguous large one. Before each `git rebase --continue`, `push_guard.py --check-index` must exit **0**.
 3. **Pre-squash guard** (`single_commit` only). `--squash` (step 4) runs it first, before the commit-count signal is gone.
 4. **Squash to one commit** (`single_commit` only). Write the message (subject, then detail) to `$(git rev-parse --absolute-git-dir)/prepare-pr-commit-msg-<branch>.txt` (`/` as `-`; consumed), or pass `--squash FILE` (kept), then `python3 $SKILL_DIR/scripts/push_guard.py --base <base> --squash`. It commits the branch's **tree**, never an index, with hooks and signing. **0** → squashed; **40** → STOP, read stderr: commits ahead, all yours → its `--max-ahead N`, once; paths it did not commit → read each diff, name them after `--` only if all yours; **41**/**64** → follow the remedy; **2** → env.
-5. **Reconcile code and description.** Run `python3 $SKILL_DIR/scripts/diff_signals.py` and `git diff origin/<base>...HEAD`. **First read *Writing register: Age 5* below** — the body says what changed and why; the diff is the evidence, and the body never restates it. Make the body **complete** (covers every flagged `!` signal), **accurate** (no claim the diff does not support), and shaped to the PR description contract. **Scaffold it from the template:** `cat "$(git rev-parse --show-toplevel)/.github/PULL_REQUEST_TEMPLATE.md"`, fill every section, never from memory; drop the CLA placeholder. A `fix`/`revert` PR fills `## Pattern harvest`; a diff that takes something away lists one `Reader:` line per reader — PR Hygiene checks both and `--check-body` does not. **A tightening diff makes `## Backwards compatibility` a `Breaking:` line with a writer sweep re-run on fresh `origin/<base>` before the final push.** Write the body to `$(git rev-parse --absolute-git-dir)/prepare-pr-body.md` — the one file the check reads, never committed — then run `python3 $SKILL_DIR/scripts/diff_signals.py --check-body`: **20** names a changed area the body never mentions — name it or drop it from the diff, never pad the prose to hide it. **21** means `What changed` is over `WORD_LIMIT` words — cut the recital, not the facts. **22**: add the template sections it names. If the diff itself is wrong, fix it and amend by name: `push_guard.py --amend -- <path>...`.
+5. **Reconcile code and description.** Run `python3 $SKILL_DIR/scripts/diff_signals.py` and `git diff origin/<base>...HEAD`. **First read *Writing register: Age 5* below** — the body says what changed and why; the diff is the evidence, and the body never restates it. Make the body **complete** (covers every flagged `!` signal), **accurate** (no claim the diff does not support), and shaped to the PR description contract. **Scaffold it from the template:** `cat "$(git rev-parse --show-toplevel)/.github/PULL_REQUEST_TEMPLATE.md"`, fill every section, never from memory; drop the CLA placeholder. A `fix`/`revert` PR fills `## Pattern harvest`; a `fix:` PR runs `prove.py` and pastes the `Proof:` line it prints under `## Tests`; a diff that takes something away lists one `Reader:` line per reader — PR Hygiene checks both and `--check-body` does not. **A tightening diff makes `## Backwards compatibility` a `Breaking:` line with a writer sweep re-run on fresh `origin/<base>` before the final push.** Write the body to `$(git rev-parse --absolute-git-dir)/prepare-pr-body.md` — the one file the check reads, never committed — then run `python3 $SKILL_DIR/scripts/diff_signals.py --check-body`: **20** names a changed area the body never mentions — name it or drop it from the diff, never pad the prose to hide it. **21** means `What changed` has too many words or table rows — cut the recital, not the facts. **22**: add the template sections it names. **24**: fix or re-run `prove.py` for the `Proof:` line it prints. If the diff itself is wrong, fix it and amend by name: `push_guard.py --amend -- <path>...`.
 
    **Cold reader.** Once `--check-body` exits 0, hand ONLY the `What changed` text to one tool-less subagent (`spawn_run`, agent `kirocrew-lite`) and ask: *"In two sentences, what does this PR change for a user, and why?"* No answer, or one that leads with a mechanism the section does not, means rewrite and re-check. One round, nothing recorded.
 
@@ -415,8 +401,7 @@ full suites are CI's job and the Phase 3 poll is the authority on them.
    reports failing tests**: reproduce EXACTLY the node ids from
    `gh run view <run-id> --log-failed`; fix; push.
 
-   **The setup and gate lists are data** in `profiles/kirocrew.json`;
-   `test/test_prepare_pr_profiles.py` pins the floor to `ci.yml` and `fast-gate.yml`. **Before you add,
+   **The setup and gate lists are data** in `profiles/kirocrew.json`. **Before you add,
    change or remove setup or a gate, read `references/gate-floor.md`.**
 
    - **Check exit codes, never piped output.** `cmd | tail` makes `$?` tail's status. Redirect to a file and test `$?`.
@@ -424,6 +409,7 @@ full suites are CI's job and the Phase 3 poll is the authority on them.
    - **Every new guard or validator helper must have a non-test caller.** `grep` outside `test/`. A change under `src/kiro_crew/deploy/` must be diffed against its `scripts/*.sh` counterpart, and vice versa.
    - **Run the flake-pattern ratchet** when the diff adds or changes a test: `python -m pytest -n0 test/test_flake_pattern_ratchet.py`. It counts the flaky shapes the semgrep rules below miss and compares each changed file with your merge-base, so first fetch the remote your branch was cut from (`upstream` for a fork). CI's Backend Tests run the same comparison and fail on a rise; the related-test runner does not select it, so run it here to see that first.
    - **Run the repository's semgrep rules on the diff** when it adds or changes code or tests: `semgrep scan --config semgrep/ --baseline-commit "$(git merge-base origin/<base> HEAD)" --error`. CI's SAST job runs the same rules diff-scoped and blocking (alongside the registry packs), and none of them is in `gates[]`.
+   - **Split a code file the diff takes past 1,600 lines**: `docs/system-specs/common/code-style.md` § Splitting a file.
 
 2. **Local review — one subagent per profile reviewer**, briefed from CI's own workflows. Run `python3 $SKILL_DIR/scripts/local_review.py --base origin/<base>` from the worktree: it resolves both SHAs itself and writes one task file per reviewer (`local-review-<name>.md`) with that reviewer's prompt **extracted literally from its `contract` workflow**, plus the base-ref `AUTOSDE.yaml` snapshots, the `BASE...HEAD` diff and the PR intent inside the workflow's own UNTRUSTED framing. It never calls a model.
 
@@ -437,7 +423,7 @@ full suites are CI's job and the Phase 3 poll is the authority on them.
    `rubric`. Local reviewers are read-only, unlike repair subagents.
 
    **Exit 40 is a PARITY FAILURE** — a reviewer workflow no longer has the shape the
-   extractor reads. Only then brief each reviewer from its charter in
+   extractor reads. Unless it names a stale copy, brief each reviewer from its charter in
    `references/fallback-charters.md`, and say so:
    `WARNING: local review ran on hand-written charters, not the extracted CI contract — they may have drifted.` Fix the extractor.
 
@@ -538,38 +524,19 @@ comes after a record, never instead of one:
    runs discovery mode, where a lane that never posted passes silently.
 
    - **0** → answer its punchlines, then Phase 4.
-   - **20** → run `pr_findings.py` and **TRIAGE before re-pushing**. An `unanswered CONCERNS from <LANE>` reason is cleared by POSTING dispositions, not by pushing. `pr_status.py` already reads only the current head's rollup and drops rows a newer run of the same check displaced; never dedupe check rows by name by hand, which drops live rows. **(d) Superseded or unpublished verdict** (`superseded verdict`, `verdict not published, re-run this lane`) → re-run that lane, or override at this head. **(a) CI/build/test failure** → read `gh run view <run-id> --log-failed`. If the same check also fails on main, follow *When main is red*. Otherwise, once you decide to fix, cancel the head's in-flight runs, reproduce the **exact failing node ids** locally, and fix the **root cause**; a flake confirmed and recorded per *Before you rerun a red test* gets `gh run rerun <run-id> --failed` (or `--job <job-id>`) once, never a whole-run replay. **(b) Review finding** → whole-design verdicts first, then the three questions. For Kiro Crew Opus-family or GPT 6.1 findings that need code changes, MUST execute [Review repair routing](#review-repair-routing): delegate the minimal fix and self-review to the model-pinned subagent, then verify in the parent. Otherwise rebut with evidence (never dismiss a CodeQL alert merely to pass), override it per *Overriding a false positive*, or ask a maintainer. **(c) Conflict / behind base** → Phase 1 handles it. Then **loop back to Phase 1** → 2 → 3 carrying those fixes.
+   - **20** → run `pr_findings.py` and **TRIAGE before re-pushing**. `pr_status.py` already reads only the current head's rollup and drops rows a newer run of the same check displaced; never dedupe check rows by name by hand, which drops live rows. **(d) Superseded or unpublished verdict** (`superseded verdict`, `verdict not published, re-run this lane`) → re-run that lane, or override at this head. **(a) CI/build/test failure** → read `gh run view <run-id> --log-failed`. If the same check also fails on main, follow *When main is red*. Otherwise, once you decide to fix, cancel the head's in-flight runs, reproduce the **exact failing node ids** locally, and fix the **root cause**; a flake confirmed and recorded per *Before you rerun a red test* gets `gh run rerun <run-id> --failed` (or `--job <job-id>`) once, never a whole-run replay. **(b) Review finding** → whole-design verdicts first, then the three questions. For Kiro Crew Opus-family or GPT 6.1 findings that need code changes, MUST execute [Review repair routing](#review-repair-routing): delegate the minimal fix and self-review to the model-pinned subagent, then verify in the parent. Otherwise rebut with evidence (never dismiss a CodeQL alert merely to pass), override it per *Overriding a false positive*, or ask a maintainer. **(c) Conflict / behind base** → Phase 1 handles it. Then **loop back to Phase 1** → 2 → 3 carrying those fixes.
    - **10** → still running. In a chat slot, load `kirocrew-core::monitor_start`
      through `tool_search`, request a finite same-session loop, then END THE TURN.
      Slot-less subagent, cron, webhook and task-runner turns cannot arm one: use
      bounded in-turn `wait` + re-poll and disclose that fallback.
 
-     ```
-     monitor_start(
-       message="Check https://github.com/owner/repo/pull/123 with green_age.py "
-               "--pr 123 then pr_status.py --reviewers <profile reviewer names>. "
-               "green_age 30: re-sync, run the related tests, push, post one "
-               "Rebased comment. pr_status 10: stay silent. Exit 20: read "
-               "pr_findings.py and triage; a red main follows When main is red; "
-               "Kiro Crew AI repairs MUST follow kirocrew-prepare-pr Review repair routing "
-               "with model-pinned subagents, then parent verification and Phases "
-               "1 -> 2 -> 3. Push only if authorized. Exit 0: Phase 4, arm "
-               "auto-merge (omit when the merge is on hold), keep watching; "
-               "on a conflict rebase, push, re-arm. "
-               "Merged, terminal state, user stop, blocker or spent budget: "
-               "report the outcome, overrides and open findings, then call "
-               "autonudge_stop.",
-       interval_secs=300, max_cycles=280, max_runtime_secs=86400, gate=False,
-       banner="kirocrew-prepare-pr: polling PR #123")
-     ```
-
-     Replace the example URL with the real one. Under a merge hold, rewrite the
-     `Exit 0` clause to `Exit 0: report review-ready and keep watching; do NOT arm
-     auto-merge` — the message is re-injected verbatim every cycle and outlives
-     the turn that heard the hold. A hold heard after arming goes in with
-     `monitor_update(message=...)` that turn (`references/rationale.md`). Keep `gate=False`: comments and
-     advisory findings are outside the typed provider's evidence. Omit `banner` on
-     Slack/Discord/Webex. Loop mechanics belong to the `babysit` skill.
+     Arm it with the call in `references/monitor-loop.md` (read it first, swap in the
+     real PR URL): `interval_secs=300, max_cycles=288, max_runtime_secs=86400,
+     judge=False`. The loop is gated: an unchanged PR costs no turn and any change
+     wakes it. Under a merge hold, rewrite its `Exit 0` clause as that file says; a
+     hold heard after arming goes in with `monitor_update(message=...)` that turn
+     (`references/rationale.md`). Omit `banner` on Slack/Discord/Webex. Loop mechanics
+     belong to the `babysit` skill.
 
      A create-only refusal means a loop may already be active: inspect it on a
      later turn; never start another driver beside it. Missing hosting context
@@ -602,9 +569,10 @@ outside author asks a maintainer to merge.
   fix it, or rerun it once after *Before you rerun a red test*, then re-arm.
 - **Merged** → report and call `autonudge_stop`.
 
-**Report:** the full PR URL, one-line status, commit SHA, whether auto-merge armed
-or why not, **every override** (lane, span, SHA, reason), every red-main fix PR
-opened, and any Low/nit left on purpose **plus how each was answered**.
+**Report** on the converged turn: the full PR URL, one-line status, commit SHA,
+whether auto-merge armed or why not, **every override** (lane, span, SHA,
+reason), every red-main fix PR opened, and any Low/nit left on purpose **plus
+how each was answered**.
 
 **Escalate** only on the four pause reasons under "Iteration budget", or on a spent
 budget with the PR still open. Hand over: what is red and why, unresolved
@@ -640,20 +608,8 @@ outage is a rerun later, not a code fix.
 
 ## PR description contract
 
-Use these sections only when `.github/PULL_REQUEST_TEMPLATE.md` is absent. Phase 1.5
-checks them against the diff.
-
-1. **Problem / Motivation** — `**Goal:** <one sentence>`, then the symptom, or the gap for a feature.
-2. **Why it matters** — impact if left unfixed. Then **Not a goal**, one bullet per scope.
-3. **What changed (motivation → approach → change)** — symptom → root cause → the specific change. Three short paragraphs at most — one per arrow, well under 500 words of prose; `--check-body` stops past that (exit 21, `WORD_LIMIT`). It describes the **whole diff on this head**, never one round's fix. Write it in the register below.
-4. **Backwards compatibility** — `Compatible:` or `Breaking:`. A diff that tightens a contract (new required field, a validator that raises on input the base accepts, narrowed type, removed kind, renamed key) cannot be `Compatible:`; it takes `Breaking:` plus a writer sweep re-run on FRESH `origin/<base>` before the final push, with that sha in the body. A diff that takes something away lists its readers as `Reader:` lines.
-5. **Tests** — what was added/updated and what each locks in.
-6. **Manual verification** — steps done/needed, or "N/A — unit coverage sufficient" with a one-line why.
-7. **Screenshots / video — MANDATORY for any user-visible UI change**, uploaded as GitHub attachments with `gh ... --attach`, never committed, bar one scoped exception. See below.
-8. **Issue link** — `Closes #<n>` on a line of its own. See *Issue first*.
-9. **Pattern harvest** — `fix`/`revert` PRs only: `Rule candidate:` + `Pattern:`, or `Not generalizable:`.
-
-Omit a section only when truly not applicable, and say so.
+Phase 1.5 checks the body against the diff. When `.github/PULL_REQUEST_TEMPLATE.md`
+is absent, the nine sections are in `references/pr-description-contract.md`.
 
 ### Two checks, two strengths
 
@@ -663,10 +619,13 @@ finished body. Both stop the loop (why: `references/rationale.md`):
 | check | what it measures | on breach |
 |---|---|---|
 | Accounting | every changed area (the `pr-scope.yml` unit: a module directory under `src/kiro_crew/` or `website/src/`, the top-level component elsewhere) is named in the body — by the area, a changed path or its `dir/file` tail, or a unique non-generic file name | **exit 20** — stop, fix the body or the diff |
-| Length | words of prose in `What changed` (fenced blocks, table rows, image lines excluded) against the 500 of section 3's paragraph rule | **exit 21** — stop, compress the prose |
+| Length | prose words in `What changed` (fences, tables, images excluded) against the 500 of section 3's paragraph rule; table rows against a picture's eight | **exit 21** — stop, compress the prose |
 
 The template check runs CI's `.github/scripts/pr-description-check.sh` from
-`origin/<base>`: a missing section is **exit 22**. The lowest code wins.
+`origin/<base>`: a missing section is **exit 22**. A `fix:` body's `Proof:` line is
+judged by `proof_line_check.py` the same way, and a `PROVEN` line is compared with
+`prove.py`'s record: findings print, and are **exit 24** once CI enforces them. The
+lowest code wins.
 
 ### Snapshot, not changelog
 

@@ -41,7 +41,7 @@ index, first-time setup, and connecting messaging channels.
 | [Agent Questions](agent-questions.md) | Let an agent pause mid-turn and ask you a clickable multiple-choice question |
 | [Chat Channels](#chat-channels) | DM-based chat with tool approval on ten messaging platforms; the list and per-channel guides are under [Chat Channels](#chat-channels) below |
 | [Agents](agents.md) | Switch between specialized agents per conversation, thread, or cron job |
-| [Crew Members](crew-members.md) | Keep named crewmates — each with its own workspace, memory, template and model — talk to each in a standing thread, and route work to one |
+| [Crew Members](crew-members.md) | Keep named mates — each with its own workspace, memory, template and model — talk to each in a standing thread, and route work to one |
 | [Remote Crew](remote-crew.md) | Reach other machines running their own Kiro Crew gateway from one hub — switch panes, run a session on one, and search every connected machine's history |
 | [Skills](skills.md) | Drop-in markdown knowledge packs for domain-specific workflows |
 | [Steering, Prompts & Hooks](steering-and-hooks.md) | Standing markdown conventions the agent reads every session, saved prompts you call up by name, and shell commands that fire on chat lifecycle events |
@@ -49,7 +49,7 @@ index, first-time setup, and connecting messaging channels.
 | [Artifacts](artifacts.md) | Save, version, and revert generated UI and documents so they outlive the chat scrollback |
 | [Monitor Loops](monitor-loops.md) | Keep one session checking something on an interval — a pull request, a CI run, a deployment — until an exit condition fires |
 | [Session Ledger](session-ledger.md) | A durable per-session record of goal, phase, and next step that survives context compaction |
-| [Session Control](session-control.md) | Let one chat session open, fork, seed, watch, broadcast to, stop, retry, continue, switch models on, reload, rename, retitle, close, list and revive another one — the 36 `kirocrew-dashboard` MCP tools, plus the sidebar folders, tags, board columns and pins that keep them findable |
+| [Session Control](session-control.md) | Let one chat session open, fork, seed, watch, broadcast to, stop, retry, continue, switch models on, reload, rename, retitle, close, list and revive another one — the 37 `kirocrew-dashboard` MCP tools, plus the sidebar folders, tags, board columns and pins that keep them findable |
 | [Work Ledger](work-ledger.md) | Split a goal across one session per item: a conductor dispatches workers, reads their status as data, and settles every completion claim against an acceptance condition |
 | [Browser Control](browser-control.md) | Drive a real web page from the dashboard's Browser panel: navigate, snapshot, click, type, screenshot |
 | [Computer Use](computer-use.md) | Read and drive native desktop applications through the accessibility layer; opt-in and off by default |

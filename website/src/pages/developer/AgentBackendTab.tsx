@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { useInRouterContext, useSearchParams } from 'react-router-dom'
+import { Link, useInRouterContext, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Bot, Boxes, Check, CircleHelp, Sparkles, Terminal, X } from 'lucide-react'
+import { Check, CircleHelp, X } from 'lucide-react'
 
-import { ACP_BACKEND_KAS, ACP_BACKEND_KIRO, acpBackendName, acpProbeBlocksUse, agentChoiceSaved, configuredAcpBackend, DEFAULT_ACP_BACKEND, setupMarkerErrorBody, setupMarkerErrorMessage } from '../../api/acpBackend'
+import { ACP_BACKEND_KAS, ACP_BACKEND_KIRO, acpBackendName, acpProbeBlocksUse, agentChoiceSaved, configuredAcpBackend, DEFAULT_ACP_BACKEND, mcpWholeServerDeny, setupMarkerErrorBody, setupMarkerErrorMessage } from '../../api/acpBackend'
 import { api } from '../../api/client'
 import type { AcpBackendProbe } from '../../api/client'
 import ErrorBoundary from '../../components/ErrorBoundary'
@@ -20,9 +20,10 @@ import { useConfigSchema } from '../../components/settingRef/useConfigSchema'
 import { KIRO_SIGN_IN_HIGHLIGHT_ANCHOR } from '../../hooks/useSettingHighlight'
 import { i18nT } from '../../i18n/t'
 import { clearCachedModels } from '../../providers/adapters/acp'
-import { KasBundleCard } from './KasBundleCard'
 import { KiroSignInCard } from './KiroSignInCard'
+import { MCP_SERVERS_HREF } from '../connections/useConnectionsSubTab'
 import { KIRO_SIGN_IN_BACKEND } from './kiroSignInLink'
+import { HarnessLogo } from '../../components/HarnessLogo'
 
 /** The config field the switch owns. Also the schema path the options are gated on. */
 const CONFIG_KEY = 'agent.acp_backend'
@@ -762,12 +763,6 @@ export function AgentBackendTab() {
     return lines
   }
 
-  const ICON: Record<string, React.ReactNode> = {
-    [KIRO]: <Terminal size={14} />,
-    [CLAUDE]: <Sparkles size={14} />,
-    [KAS]: <Bot size={14} />,
-  }
-
   /**
    * One label per CAPABILITY, keyed by the id the server sends.
    *
@@ -857,10 +852,7 @@ export function AgentBackendTab() {
    * Only the reaches that can cost a whole server get a line. `settings-file` stops
    * the tool it names and nothing else, which costs the reader nothing to know.
    */
-  const mcpDenyRule = (value: string): string => {
-    if (!mcpCanCostWholeServer(value)) return ''
-    return i18nT('pages.developer.agentBackendTab.mcp_deny_rule', { name: nameOf(value) })
-  }
+  const mcpDenyRule = (value: string): string => mcpWholeServerDeny(probe(value)).rule
 
   /**
    * The EXCEPTION to that rule, where the agent has one, or `''`.
@@ -870,13 +862,11 @@ export function AgentBackendTab() {
    * still reply. Rendered directly under the rule and labelled as its exception,
    * because two sentences that qualify each other without saying so read as a
    * contradiction.
+   *
+   * Both sentences come from `mcpWholeServerDeny`, which the MCP Servers tool list
+   * reads too, so the card and the toggle cannot disagree.
    */
-  const mcpDenyException = (value: string): string => {
-    if (probe(value)?.mcp?.per_tool_deny !== 'per-call') return ''
-    return i18nT('pages.developer.agentBackendTab.mcp_deny_exception', {
-      name: nameOf(value),
-    })
-  }
+  const mcpDenyException = (value: string): string => mcpWholeServerDeny(probe(value)).exception
 
   /**
    * The settings in the reader's agent config file that will not take effect here.
@@ -943,8 +933,8 @@ export function AgentBackendTab() {
    */
   const nameOf = (value: string): string => acpBackendName({ id: value, policy_id: probe(value)?.policy_id })
 
-  /** Generic mark for an agent this frontend has no icon for. */
-  const iconOf = (value: string): React.ReactNode => ICON[value] ?? <Boxes size={14} />
+  /** The harness's own brand mark, or the generic one for an agent with none here. */
+  const iconOf = (value: string): React.ReactNode => <HarnessLogo id={value} size={14} />
 
   /**
    * The card's capability lines for one agent, dropping ids with no label here.
@@ -1043,29 +1033,6 @@ export function AgentBackendTab() {
     const mechanism = probe(value)?.tool_approval
     return (mechanism && APPROVAL_LABEL[mechanism]) || ''
   }
-
-
-
-  /**
-   * Whether a tool-off on this agent can cost a WHOLE server rather than the tool.
-   *
-   * The SERVER's classification, read off the payload rather than re-derived here.
-   * `agent_sdk/backend_mcp_ability.COSTS_WHOLE_SERVER` holds which reaches cost a
-   * whole server, beside the record of which concerns reach a card at all, and a
-   * completeness test holds it against the vocabulary — so a reach added to the core
-   * arrives already classified instead of rendering as ordinary until someone edits
-   * this file. It holds for two of the three today: `whole-server`, and the case that
-   * hid, `per-call`, which stays per tool on Crew's OWN servers and withholds any
-   * other server whole.
-   *
-   * `false` when the payload carried no flag — an older gateway, a 403, a query in
-   * flight — which renders the deny line inside the disclosure, where it sat before
-   * any of this. Compared against `true` rather than coerced, so a reach this
-   * frontend has no label for is never promoted on the strength of a truthy string.
-   */
-  const mcpCanCostWholeServer = (value: string): boolean =>
-    probe(value)?.mcp?.costs_whole_server === true
-
 
   /**
    * The one status sentence a harness carries, derived rather than authored per agent.
@@ -1342,6 +1309,15 @@ export function AgentBackendTab() {
         {mcpDenyRule(value) && (
           <p className="mt-3 mb-0 text-[12px] leading-relaxed text-text-strong">
             {mcpDenyRule(value)}
+            {/* The list where a reader acts on the rule (#21303). */}
+            {inRouter && (
+              <>
+                {' '}
+                <Link to={MCP_SERVERS_HREF} className="font-normal text-accent hover:underline">
+                  {i18nT('pages.developer.agentBackendTab.mcp_deny_manage_link')}
+                </Link>
+              </>
+            )}
           </p>
         )}
         {mcpDenyException(value) && (
@@ -1549,14 +1525,6 @@ export function AgentBackendTab() {
                     {value === KIRO_SIGN_IN_BACKEND && offered.includes(KIRO_SIGN_IN_BACKEND) && (
                       <ErrorBoundary scope="developer-kiro-sign-in" fallback={null}>
                         <KiroSignInCard compact />
-                      </ErrorBoundary>
-                    )}
-                    {/* Kiro Crew's own engine for the same harness, under the sign-in it
-                        runs on: on this route the engine takes its credential from that
-                        card and nothing else. Same gate and the same isolation. */}
-                    {value === KIRO_SIGN_IN_BACKEND && offered.includes(KIRO_SIGN_IN_BACKEND) && (
-                      <ErrorBoundary scope="developer-kas-bundle" fallback={null}>
-                        <KasBundleCard />
                       </ErrorBoundary>
                     )}
                     {facts(value)}

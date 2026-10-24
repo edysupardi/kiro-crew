@@ -112,6 +112,7 @@ def test_every_crew_log_off_refusal_names_the_env_file_the_gateway_reads(
     monkeypatch, tmp_path, refusal
 ):
     """The same file, spelled once, in every place that tells an operator to edit it."""
+    import importlib
     import inspect
 
     from kiro_crew import session_ledger
@@ -126,6 +127,8 @@ def test_every_crew_log_off_refusal_names_the_env_file_the_gateway_reads(
         "mcp_ledger": mcp_ledger,
     }[refusal]
     source = inspect.getsource(module)
+    if refusal in ("crew_store", "work_ledger"):  # mirror facades: code is in their owners
+        source += "".join(inspect.getsource(importlib.import_module(o)) for o in module._OWNERS)
     assert "~/.kiro/crew/.env" not in source
     assert "env_file_display()" in source
 
@@ -1270,9 +1273,14 @@ class TestTheGrantIsRecheckedAfterTheRead:
         the route's own shaping ever runs.
         """
         import ast
+        import importlib
         import inspect
 
-        tree = ast.parse(inspect.getsource(routes))
+        # a mirror facade: its code is in the owners it lists
+        tree = ast.parse(
+            inspect.getsource(routes)
+            + "".join(inspect.getsource(importlib.import_module(o)) for o in routes._OWNERS)
+        )
         functions = [
             node
             for node in ast.walk(tree)

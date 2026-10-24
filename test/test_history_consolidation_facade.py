@@ -38,6 +38,10 @@ from kiro_crew.history_consolidation import HistoryConsolidator
 
 pytestmark = pytest.mark.xdist_group(name="tree_scan_history_consolidation_facade")
 
+#: Checks ``test_facade_shared_checks.py`` runs against this module's helpers; each is
+#: the same for every facade, so it is written once there and parametrized per module.
+SHARED_FACADE_CHECKS = ("class_body_check_can_fail",)
+
 _SRC = Path(kiro_crew.__file__).resolve().parent
 _ROOT = _SRC.parents[1]
 _FACADE = "kiro_crew.history_consolidation"
@@ -56,7 +60,8 @@ _BASE_MODULE_NAMES = frozenset("""
     _CONSOLIDATION_SUBOFFSET_META_KEYS _CONSOLIDATION_THRESHOLD
     _ConsolidationNotDispatched _ConsolidationRefusedSentinel _CountClaim
     _EMBED_BUDGET_SECS_PER_PASS _EmbedBudget _HISTORY_LOGGER _INHERIT_GLOBAL
-    _InheritGlobal _LessonDeleteDecision _MAX_EPISODIC_PER_CONSOLIDATION
+    _InheritGlobal _LessonDeleteDecision _LESSON_PASSTHROUGH_FIELDS
+    _MAX_EPISODIC_PER_CONSOLIDATION
     _MAX_LESSONS_PER_CONSOLIDATION _MAX_SEMANTIC_PER_CONSOLIDATION _PLACEHOLDER_BODIES
     _PersistenceDisabledMidRun _RunCommitState _SEEDED_PER_SWEEP _SEED_MAX_AGE_SECS
     _SEMANTIC_OMISSION_NOTICE _SEMANTIC_PROMPT_CAP_PER_CONSOLIDATION
@@ -65,7 +70,7 @@ _BASE_MODULE_NAMES = frozenset("""
     _facade_metadata_dedupe_verdict _facade_sel _facade_stream_and_collect
     _facade_stream_and_collect_json _fmt_message _frontmatter_value _head_exceeds_budget
     _head_slice_ceiling_reached _is_plausible_memory_file _lesson_extraction_disabled
-    _merge_trigger_lists _persistence_disabled _prompt_rows _recency _session_facets
+    _merge_trigger_lists _persistence_disabled _prompt_rows _recency _reroute_lesson_semantic_keys _session_facets
     _session_touched_sensitive _slice_boundary _slice_head_for_budget _strip_code_fence
     _strip_skill_frontmatter _time _withhold_unseen_deletes annotations asyncio
     authored_lesson_applies background_turn contextlib copy datetime
@@ -619,11 +624,6 @@ def test_no_bound_member_depends_on_the_class_body_it_left() -> None:
         if (deps := _class_body_dependencies(inspect.getsource(inspect.unwrap(fn))))
     }
     assert offenders == {}
-
-
-def test_the_class_body_check_can_fail() -> None:
-    source = "def f(self):\n    super().f()\n    print(__class__)\n    return self.__hidden\n"
-    assert sorted(_class_body_dependencies(source)) == ["__class__", "mangled __hidden", "super()"]
 
 
 # -- patch reach -----------------------------------------------------------------------

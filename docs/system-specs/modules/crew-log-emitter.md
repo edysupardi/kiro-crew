@@ -6,13 +6,34 @@ only**: it owns which facts matter and where they are known, not storage or its 
 
 ## Who owns what
 
-The emitter is three modules, and the line between them is where new work goes:
+The emitter is three parts, and the line between them is where new work goes:
 
 | Module | Owns | New work that belongs there |
 |---|---|---|
-| `crew_log/emit.py` | every `on_*` entry point and what each fact records; the open-handle cache that is the writer's `open_unit` adapter; the child-origin pins; the supersede repair, and the settlement of a job the writer rejected at its ceiling; `reset_caches`, `flush`, `drain_for_shutdown`, `live_turn` and the loss counters as the public surface | a new lifecycle fact, field or emitter |
+| `crew_log/emit.py` and its `crew_log/emit_*.py` owners | every `on_*` entry point and what each fact records; the open-handle cache that is the writer's `open_unit` adapter; the child-origin pins; the supersede repair, and the settlement of a job the writer rejected at its ceiling; `reset_caches`, `flush`, `drain_for_shutdown`, `live_turn` and the loss counters as the public surface | a new lifecycle fact, field or emitter, in the owner the table below names |
 | `crew_log/writer.py` | `CrewLogWriter`: the per-unit buffer and its order, retention and backoff, the refusal rule, the memory ceilings, the `write/dropped` loss marker, the inline path, stall reporting and the shutdown drain, all paced by one frozen `WriterLimits`; `WriteJob`, whose named constructors (`append`, `opening`, `follow_on`) select a row of the writer's policy table; and `WarningBudget`, the one rate-limited failure report the writer and the emitter share | how an append reaches the file |
 | `crew_log/turn_tracker.py` | `TurnTracker`: each live turn's record (its step and call ordinals, whether its closer is owed), the settle-once tool registry, the attempt counts, the supersede repair's debt, and the never-evict-a-live-turn rule the emitter's own caches are trimmed by | per-turn bookkeeping |
+
+`crew_log/emit.py` is the emitter's import path and patch surface: a `kiro_crew._facade_mirror`
+facade over the owners below, lowest layer first. It binds every name they define and serves the
+nine module globals they rebind with `global`, so `kiro_crew.crew_log.emit.<name>` is the object
+the code reads and a patch through it reaches every owner holding the name
+(`test/test_emit_facade.py`). A function that rebinds or reads the installed writer, tracker or
+warning budget (`_writer_instance`, `_tracker_instance`, `_warnings_instance`, `_next_limits`),
+the child-origin loss counters or `_child_liveness` belongs in `emit_runtime`, because a
+`global` write lands in one module's namespace.
+
+| Owner | Owns |
+|---|---|
+| `crew_log/emit_state.py` | `enabled`; the boot-path import gates `_crew_log` (storage) and `_note_eager` (the eager fold's wake); the session kind and the two sources; `session_id_of`; the process-wide maps and `_lock`, which guards them |
+| `crew_log/emit_tree.py` | a slot's lineage (`slot_previous_store`, `_durable_previous`, `_candidate_is_same_slot`, `_parent_citation`); the `_record_session_tree_*` folds that advance the in-memory session tree after a commit; the settled signal `_TreeSettle` and `awaiting_commit` |
+| `crew_log/emit_runtime.py` | the installed writer, turn tracker and warning budget and every function that rebinds or reads them: `reset_caches`; the handle cache that is the writer's `open_unit` adapter; `_write`, `_submit`, `_hand_over` and the settlement of a job the writer rejected at its ceiling; the supersede repair; `flush`, `drain_for_shutdown` and the loss counters; `live_turn`; the child-origin pins; `on_session_closed` |
+| `crew_log/emit_text.py` | `_safe_text` and `safe_work_fields` (redaction), `_clip`, the one-line fit checks, `_append_body_entry`'s `message/chunk` slicing, `_payload_digest` |
+| `crew_log/emit_session.py` | `on_session_opened`, `on_session_adopted`, `on_session_released`, `on_session_spawned`, `on_class_observed` and `on_open_tab_unrestored` |
+| `crew_log/emit_turn.py` | a turn's start and end; messages, request configuration, the composed context, steps, tool calls, approvals, the plan, model selection and compaction; `close_open_tool_calls`; `background/completed` |
+| `crew_log/emit_children.py` | `subagent/*` entries on the dispatching session's log, and `dismiss_child` |
+| `crew_log/emit_surfaces.py` | ledger, radar, object, work, panel and dashboard entries, change cards and guides, and their `*_entry_fits` checks |
+| `crew_log/emit_crew.py` | the crew kind: `on_crew_dispatch` and `on_crew_report` |
 
 Both collaborators are built on first use and never at import, for the boot-path rule
 under "Storage runs off the event loop"; `reset_caches()` retires both -- the writer through
@@ -199,18 +220,18 @@ unset here -- see "Reconnect is not resume" below for what it is for.
 | `turn/completed` | the `EVENT_COMPLETE` arm, beside `_emit_turn_metric`; the turn's `finally` when no terminal event arrived | the four `TurnUsage` token counts (only when some count is above zero, then all four), credits (only when positive and finite), `duration_ms`, `stop_reason`, model, provider, and `context {used, window}` (the provider's context occupancy, only when either is above zero) -- or `stop_reason: "failed"` with `error` and no usage |
 | `tool/called` | `EVENT_TOOL_CALL` | `call_id`, trusted `name`, `server`, and `kind`; optional `step`, `call_index`, and argument digest/size |
 | `tool/completed` | `EVENT_TOOL_RESULT` when `tool_final` | `call_id`, remembered `name` and `server`, `status`; optional `elapsed_ms`, `is_error`, `step`, `call_index`, and result digest/size |
-| `model/selected` | the fallback swap in `_run_chat`, after the pick lock is released | model id, source, turn |
+| `model/selected` | the fallback swap's arm, `_on_acp_transient_exhausted` (`chat_turn/acp_recovery.py`), after the pick lock is released | model id, source, turn |
 | `compaction/applied` | `_settle_compact_cooldown` when the after-reading is confirmed; `_compaction_gate_decision` when a deferred verdict settles | `pct_before`, `pct_after`, freed |
 | `session/closed` | `SessionLifecycle.reset` and `SessionLifecycle.destroy`; `chat_api.slot_lifecycle._close_slot` for a deliberate tab close, awaited to commit (`awaiting_commit`) before the conductor is woken | the gateway's own teardown reason (`reset`, `destroyed`, `destroyed_sid_retained`, or `removed` for the tab close) |
-| `message/received` | `_run_chat`, before the dispatch gates | turn, role, redacted text, surface, attachment ids |
-| `message/sent` | `_flush_segment`, beside the assistant `slot.append`; `_persist_partial_reply` on a recovery path | turn, step, redacted text or cited `chunks`, `interrupted` |
+| `message/received` | `_turn_dispatch_gates` (`chat_turn/turn_dispatch_gates.py`), before the dispatch gates; `_turn_admit` (`chat_turn/turn_admission.py`) for a refused `@prompt` expansion | turn, role, redacted text, surface, attachment ids |
+| `message/sent` | `_flush_segment`, beside the assistant `slot.append`; `_persist_partial_reply` on a recovery path; `_log_given_back` for the last run of text a tool call or approval prompt held off its row and later gave back (same turn and step as that row's entry) | turn, step, redacted text or cited `chunks`, `interrupted` |
 | `message/chunk` | the overflow split ONLY | turn, step, one slice of an already-redacted body |
-| `request/configured` | `_run_chat`, on change only | turn, model, provider, `context_window` |
-| `context/composed` | `_run_chat`, from `slot_ctx_blocks` | turn, per-block `sources`, chars, estimated tokens, `phase` (`session_start` or `per_turn`) when known, and `omitted` (the budget cuts `context_omissions.collect` gathered around the build) when anything was cut |
+| `request/configured` | `_turn_dispatch_gates` (`chat_turn/turn_dispatch_gates.py`), on change only | turn, model, provider, `context_window` |
+| `context/composed` | `_turn_dispatch_gates` (`chat_turn/turn_dispatch_gates.py`), from `slot_ctx_blocks` | turn, per-block `sources`, chars, estimated tokens, `phase` (`session_start` or `per_turn`) when known, and `omitted` (the budget cuts `context_omissions.collect` gathered around the build) when anything was cut |
 | `step/started` | the stream opening, and each tool-group-to-text transition | turn, step |
 | `step/completed` | the next transition, and `EVENT_COMPLETE` | turn, step, ms |
 | `message/queued` | `chat_delivery.queue_for_next_turn` | source, bytes, queue id -- no turn |
-| `approval/requested` | `_run_chat`, one statement before the try whose `finally` records the decision | turn, request id, tool name and the redacted title the human is shown, each omitted when the frame named neither |
+| `approval/requested` | `_on_permission_prompt` (`chat_turn/permission_prompt.py`), one statement before the try whose `finally` records the decision | turn, request id, tool name and the redacted title the human is shown, each omitted when the frame named neither |
 | `approval/decided` | the same prompt's `finally`, where every exit converges | turn, request id, decision, `by: host` and the host's `cause` for an auto-decline |
 | `approval/requested` / `approval/decided` (subagent spawn gate) | `_spawn_with_approval_impl` in `subagent_manager/admission/pump.py`, when a spawn needs approval, through the writer in `subagent_manager/admission/gate_reporting.py`; decided in a `finally`, including a host-attributed cancel | in the PARENT's log under the turn that asked (`dispatch_origin`): approval id `spawn:<agent_id>`, tool `spawn_run` |
 | `approval/requested` / `approval/decided` (a running child's tool prompt) | `subagent_manager/run.py`, when a child asks for a tool | in the PARENT's log under the turn that asked (`child_origin`): approval id `<child_id>:<request_id>` |
@@ -261,8 +282,8 @@ pin this account cannot run is withheld at spawn and the session runs on the bac
 default, while the pin is deliberately KEPT -- the composer chip still shows it, and
 clearing it would delete an explicit user setting on the evidence of one session's
 advertised list. An unpinned slot is the mirror case: it names no model of its own,
-and the model it runs on is known only after the handle exists (when every tier
-defers to the backend, its pin is backfilled from the provider then).
+and the model it runs on is known only after the handle exists (when only its
+mate pins a model, its pin is backfilled from the provider then).
 
 So `session/opened` and `request/configured` read `served_model`, the session fact,
 through one helper. It is empty when the backend serves its own default, and the entry
@@ -807,7 +828,7 @@ mean nothing. The parameter exists and is tested for a caller that has a real
 system prompt; no ACP site supplies one.
 
 `context/composed` reports CHARACTERS as measured and tokens as an ESTIMATE, at
-four characters per token, the same figure `dashboard/handlers/usage.py` uses. The
+four characters per token, the same figure `dashboard/handlers/usage_sessions.py` uses. The
 entry says so in `tokens_estimated`. The only exact tokenizer available is the
 wrong one for the served model, and a fabricated exact count would be worse than
 an admitted estimate. Three blocks the design names -- steering, tool specs and
@@ -884,9 +905,9 @@ behind; one that files a fact under the wrong session is wrong, and nothing down
 
 The previous revision of this document said approvals had no emitter because "the approval
 coordinator carries a slot key, not a session id". That is true of `ApprovalCoordinator` and false
-of the site that actually raises the prompt: the permission-request arm lives inside `_run_chat`,
-where `_crew_log_sid` and `_crew_log_turn_no` have been in scope since the turn began. No resolver is
-involved.
+of the site that actually raises the prompt: the permission-request arm's prompt phase,
+`_on_permission_prompt` (`chat_turn/permission_prompt.py`), reads `_crew_log_sid` and
+`_crew_log_turn_no` off the turn, set since the turn began. No resolver is involved.
 
 The request is recorded ONE STATEMENT before the `try` whose `finally` records the decision, and
 deliberately not at the future's registration further up. Everything between those two points is
@@ -1143,7 +1164,7 @@ the finding: an unnamed site records `user`.
 | `slack/gateway` sub-agent injection | a sub-agent completion | `subagent` |
 | `slack/gateway._retrigger_recovery` | re-injected sub-agent completions | `subagent` |
 | `chat_runner` synthesis dispatch | the sub-agent synthesis prompt | `subagent` |
-| `issue_radar.crew_runtime` | a crew-composed prompt | `crew` |
+| `issue_radar.crew_runtime_session` | a crew-composed prompt | `crew` |
 | `handlers/taskrunner` (plan, result) | a task-runner summary | `gateway` |
 
 One shared helper passes no actor on purpose: `spec_builder.runtime.enqueue_or_run_prompt`
@@ -1157,9 +1178,9 @@ fallback fills it in, and the log states a person typed a message no person touc
 
 `approval/requested` and `approval/decided` ARE emitted, and no plumbing was needed for
 them -- see "Approvals were never a resolver problem" above. `ApprovalCoordinator` does
-carry only a slot key, but it is not the site that raises the prompt: that arm lives inside
-`_run_chat`, where the session id and the turn ordinal have been in scope since the turn
-began.
+carry only a slot key, but it is not the site that raises the prompt: that site is
+`_on_permission_prompt` (`chat_turn/permission_prompt.py`), which reads the session id and
+the turn ordinal off the turn, set since the turn began.
 
 ## What is deliberately not recorded
 
@@ -1227,8 +1248,8 @@ error code -- never the unit) per window, and demoted to debug inside the window
 broken crew log cannot flood the log; one `WarningBudget` governs the writer's reports and
 the emitter's alike. This matters at three sites: the approval decision resolves on the
 websocket handler task, so an exception there would break the click handler and hang the
-waiting turn; `_default_session_model` runs inside `asyncio.to_thread` behind a
-swallow-all `except`; and `_fallback_swap_for_turn` holds `slot._model_pick_lock`. The
+waiting turn; `_inherited_default_model` runs the session resolver inside
+`asyncio.to_thread`, behind that resolver's swallow-all `except`; and `_fallback_swap_for_turn` holds `slot._model_pick_lock`. The
 emitter is called from the callers of the last two, never inside them.
 
 ### Retention: a failed append is retried, a refused one is not

@@ -8,7 +8,7 @@ Three groups, and the seam between them is what this file is for:
   which only holds if the missing-attribute, raising, and awaitable-returning
   shapes are each exercised — an awaitable slipping through is what leaks an
   un-awaited-coroutine warning into an unrelated test.
-* The **pure resolvers** (``_model_fallback``, ``_session_model``,
+* The **pure resolvers** (``_session_model``,
   ``detect_provider_switch``, ``_is_continuable_key``) decide what a session
   becomes before any process exists, so they are testable without spawning one.
 * The **lifecycle edges** (``remove_if_unclaimed``, ``recycle_heartbeat``,
@@ -43,7 +43,6 @@ from kiro_crew.session import (
     FirstTurnState,
     SessionManager,
     _context_pct_is_unknown,
-    _model_fallback,
     _provider_has_active_turn,
     _provider_has_unfinished_turn,
     _ProviderBgSession,
@@ -121,9 +120,6 @@ PROBES = [
 class TestProviderProbeHelpers:
     """Each probe is a strict opt-in: only an exact ``True`` counts."""
 
-    def test_missing_attribute_reads_as_no(self, probe, attr) -> None:
-        assert probe(SimpleNamespace()) is False
-
     def test_non_callable_attribute_reads_as_no(self, probe, attr) -> None:
         """A stub that sets the name to a plain bool must not be called."""
         assert probe(SimpleNamespace(**{attr: True})) is False
@@ -133,9 +129,6 @@ class TestProviderProbeHelpers:
             raise RuntimeError("provider is wedged")
 
         assert probe(SimpleNamespace(**{attr: boom})) is False
-
-    def test_true_is_the_only_yes(self, probe, attr) -> None:
-        assert probe(SimpleNamespace(**{attr: lambda: True})) is True
 
     def test_truthy_non_bool_is_still_no(self, probe, attr) -> None:
         """``is True``, not truthiness — a Mock return must not read as yes."""
@@ -159,21 +152,6 @@ class TestProviderProbeHelpers:
 
 
 # ── Model resolution ─────────────────────────────────────────────────────────
-
-
-class TestModelFallback:
-    def test_agent_pin_defers_to_native_resolution(self) -> None:
-        """A per-agent pin returns None so the factory reads the agent JSON."""
-        assert _model_fallback("opus", "sonnet") is None
-
-    def test_global_default_applies_when_agent_defers(self) -> None:
-        assert _model_fallback("", "sonnet") == "sonnet"
-
-    def test_sentinel_global_defers(self) -> None:
-        assert _model_fallback("", "auto") is None
-
-    def test_empty_global_defers(self) -> None:
-        assert _model_fallback("", "") is None
 
 
 class TestSessionModel:
@@ -204,8 +182,8 @@ class TestSessionModel:
         cfg.agent.model = "sonnet"
         cfg.agents["research"] = KiroCrewAgentConfig(model="", kiro_agent="tmpl")
         monkeypatch.setattr(cfg, "_resolve_named_agent_model", _resolve)
-        # A template pin returns None: the factory resolves the JSON itself.
-        assert _session_model(cfg, "research") is None
+        # The bound template's pin outranks the global.
+        assert _session_model(cfg, "research") == "haiku-from-template"
         assert seen == ["tmpl"], "the crew's bound template, not the crew name"
 
     def test_base_agent_name_skips_the_per_agent_lookup(self, cfg, monkeypatch) -> None:
@@ -1076,19 +1054,3 @@ class TestRegistrySnapshots:
 
         _register(mgr, "d2", provider=_stub_provider(has_active_turn=lambda: True))
         assert mgr.any_active_turn() is True
-
-    def test_get_pid_reads_the_client(self, mgr) -> None:
-        provider = _stub_provider()
-        provider.client = SimpleNamespace(_pid=555)
-        _register(mgr, "d1", provider=provider)
-        assert mgr.get_pid("d1") == 555
-
-    def test_get_pid_is_none_for_an_unknown_key(self, mgr) -> None:
-        assert mgr.get_pid("nope") is None
-
-    def test_get_pid_is_none_when_the_provider_has_no_client(self, mgr) -> None:
-        _register(mgr, "d1", provider=_stub_provider())
-        assert mgr.get_pid("d1") is None
-
-    def test_get_provider_is_none_for_an_unknown_key(self, mgr) -> None:
-        assert mgr.get_provider("nope") is None

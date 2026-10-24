@@ -11,7 +11,14 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from kiro_crew.dashboard import chat, chat_threads, handlers, session_export, session_transfer
+from kiro_crew.dashboard import (
+    chat,
+    chat_follow_default,
+    chat_threads,
+    handlers,
+    session_export,
+    session_transfer,
+)
 from kiro_crew.dashboard.handlers._shared import require_owner_dashboard_request
 from kiro_crew.dashboard.handlers.source_providers import (
     api_app_contributors,
@@ -29,6 +36,7 @@ from kiro_crew.dashboard.handlers.source_providers import (
     api_pull_request_unresolve,
 )
 from kiro_crew.dashboard.handlers.worktree import api_worktree_create
+from kiro_crew.dashboard.slot_ownership import slot_not_found
 
 
 async def api_dashboard_card(request: web.Request) -> web.Response:
@@ -39,7 +47,7 @@ async def api_dashboard_card(request: web.Request) -> web.Response:
     state = request.app["state"]
     slot = state._slots.get(request.match_info["slot"])
     if slot is None:
-        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+        return slot_not_found()
     lifecycle = getattr(state, "_dynamic_cards", None)
     if lifecycle is None:
         return web.json_response(
@@ -75,6 +83,14 @@ def register(app: web.Application) -> None:
     app.router.add_post("/api/chat/slots", chat.api_chat_slot_create)
     app.router.add_post("/api/chat/slots/cleanup", chat.api_chat_slots_cleanup)
     app.router.add_post("/api/chat/slots/model", chat.api_chat_slots_model)
+    # Settings > Chat > Models: count, then clear, the chats that keep a model of
+    # their own. Static segment, so it sits before the ``{slot}`` routes below.
+    app.router.add_get(
+        "/api/chat/slots/follow-default", chat_follow_default.api_chat_slots_follow_default
+    )
+    app.router.add_post(
+        "/api/chat/slots/follow-default", chat_follow_default.api_chat_slots_follow_default
+    )
     # Static segment BEFORE the ``/api/chat/slots/{slot}`` GET below, for the reason
     # the import route's own note gives: aiohttp resolves in registration order, so a
     # later wildcard would shadow this path and answer it as a slot detail read.
@@ -157,6 +173,7 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/chat/threads/{mid}", chat_threads.api_chat_thread_detail)
     app.router.add_post("/api/chat/threads/{mid}/reply", chat_threads.api_chat_thread_reply)
     app.router.add_get("/api/chat/side/tools", handlers.api_side_tools)
+    app.router.add_get("/api/chat/slots/{slot}/side", handlers.api_side_state)
     app.router.add_post("/api/chat/slots/{slot}/side/open", handlers.api_side_open)
     app.router.add_post("/api/chat/slots/{slot}/side/turn", handlers.api_side_turn)
     app.router.add_post("/api/chat/slots/{slot}/side/stop", handlers.api_side_stop)

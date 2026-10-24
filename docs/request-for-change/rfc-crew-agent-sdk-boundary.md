@@ -117,9 +117,9 @@ are not domain facts:
 | `raw_params_trusted`, `shell_classified`, `mcp_identity_trusted`, `mcp_identity_ambiguous` | Driver-internal provenance/cache flags |
 
 The `request_id` leak is the sharpest instance. `approve_tool(request_id)` /
-`reject_tool(request_id)` take the wire id straight through; `chat_runner.py:7300`
-keys `slot._approval_futures` on `str(event.request_id)`, and
-`chat_runner.py:7487` ships `{"id": str(event.request_id)}` to the browser. A raw
+`reject_tool(request_id)` take the wire id straight through; `_on_permission_prompt`
+(`dashboard/chat_turn/permission_prompt.py`) keys `slot._approval_futures` on
+`str(event.request_id)` and ships `{"id": str(event.request_id)}` to the browser. A raw
 JSON-RPC id is part of the frontend contract.
 
 The first domain vocabulary now owned by `kiro_crew.agent_sdk` is the minimal
@@ -169,8 +169,9 @@ the shape the rest should have.
 **This subsection was structurally wrong in v3 and is rewritten.** It cited
 `acp/types.py` as the home of the backend constants and "seven opt-in
 frozensets in the same file". `acp/types.py` holds **zero** of either. Every
-backend id, every capability set and the `Routing` tables live in
-`src/kiro_crew/agent_sdk/backends.py` (PR 3a), and the tool-gate verdict lives in
+backend id lives in `src/kiro_crew/agent_sdk/backends.py` (PR 3a), which re-exports
+every capability set and the `Routing` tables from the `backends_*` owner that
+defines each, and the tool-gate verdict lives in
 `src/kiro_crew/agent_sdk/tool_gate.py` (PR 3). `src/kiro_crew/acp_backends.py` and
 `src/kiro_crew/acp_tool_gate.py` are re-export shims, and `acp/types.py` re-exports
 the ids, so existing call sites keep their import path.
@@ -225,13 +226,13 @@ consolidates this one into `agent_sdk` and closes those two gaps.
 **Three of the four concerns v3 listed have since moved**, and `session.py` only
 forwards to them. The state is no longer where this subsection said it was:
 
-- `_warm_pool` is a forwarding property at `session.py` onto
+- `_warm_pool` is a forwarding property at `session_parts/state_views.py` onto
   `session_pool.py`, which owns the pre-spawned process pool.
-- `_bg_runtime` and `_bg_runtime_lock` forward from `session.py`
+- `_bg_runtime` and `_bg_runtime_lock` forward from `session_parts/state_views.py`
   onto `session_background.py`.
-- `_subagent_runtimes` forwards from `session.py` onto
+- `_subagent_runtimes` forwards from `session_parts/state_views.py` onto
   `session_allocation.py`.
-- `_rss_max_mb` forwards from `session.py` onto `session_cleanup.py`. Its
+- `_rss_max_mb` forwards from `session_parts/state_views.py` onto `session_cleanup.py`. Its
   settings loader is still imported from *inside* the ACP package.
 
 Those four are now a boundary question about where the SDK reads them, not a
@@ -322,8 +323,8 @@ kinds of undeclared hole:
 |---|---|---|
 | `getattr`-by-name seams whose target the core never defines — `getattr(self, "_write_claude_local_settings", None)` (`AcpClient._write_claude_local_settings`) | 2 | Silent: no permission mode, and the context window collapses from 1M to 200K |
 | Methods returning a neutral value purely so a companion can override them — `_session_mcp_servers() -> []` (`AcpClient._session_mcp_servers`) is the type case | 6 | Silent: a CC session gets **zero MCP tools**, as the docstring itself states |
-| `ClaudeCodeProvider is not None and isinstance(...)` guards against a name hard-coded to `None` (`session.py:170`, `subagent.py:131`) | 11 sites | Statically unreachable; nine `session.py` branches and two `subagent.py` branches are dead-but-maintained |
-| Defensive attribute probes across the provider boundary (`session_pid.py` (`_collect_active_pids`) probes `_proc` and `_active_proc`, `chat_runner.py:867`, `knowledge/llm_pool.py:325`) | 4 | Duck typing in place of a type |
+| `ClaudeCodeProvider is not None and isinstance(...)` guards against a name hard-coded to `None` (`ClaudeCodeProvider` in `session_parts/provider_probes.py`, `subagent.py:131`) | 11 sites | Statically unreachable; nine `session.py` branches and two `subagent.py` branches are dead-but-maintained |
+| Defensive attribute probes across the provider boundary (`session_pid_tracking.py` (`_collect_active_pids`) probes `_proc` and `_active_proc`, `chat_runner.py:867`, `knowledge/llm_pool.py:325`) | 4 | Duck typing in place of a type |
 | Comment clusters naming the companion or a deleted module as the supplier of behaviour | 19 | The seam's real contract lives in prose |
 | Refusal / downgrade mechanisms, including the degrade log in `acp_backends.resolve_selected_backend()` and five capability non-memberships | 9 | — |
 | Live `_is_claude` branches inside `acp/` | 13 | — |
@@ -530,7 +531,7 @@ reflow — re-derive them rather than trusting a line number here.
 That is why the fourth row reads *do not cross **as fields***. It does not mean
 the values are unused: `raw_tool_params` is passed as a security-decision argument
 at 20 sites in 12 non-ACP files — `hooks.on_tool_call(raw_params=…)`
-(`chat_runner.py:6637`), `approval_command(raw_tool_params=…)`, and so on — so it crosses as an opaque `Mapping | None` for
+(`chat_turn/tool_approval.py`), `approval_command(raw_tool_params=…)`, and so on — so it crosses as an opaque `Mapping | None` for
 the duration of PRs 2-5 and is deleted per-file by PR 5 alongside its last
 consumer. The other three are consumed by the driver only; their read count
 outside `acp/` is zero, which is exactly why an earlier draft missed that four
@@ -544,7 +545,7 @@ the driver asserts equality with the ACP ones in a parity test.
 **`ApprovalToken`.** An opaque, stable-serializable string minted by the SDK when
 it emits a permission event, valid only for the live turn on the session that
 minted it. Chosen over an integer handle or a structured object specifically so
-`chat_runner.py:7487`'s `{"id": "..."}` payload to the browser does not change
+`chat_turn/permission_prompt.py`'s `{"id": "..."}` payload to the browser does not change
 shape. The driver keeps the private token → JSON-RPC id map. Consumers never see
 a wire id again.
 
@@ -621,7 +622,7 @@ land is PR 3's to settle (§7).
 **Not every backend question is a session question, and one of these is not.**
 `SessionCapabilities` is read off a live session, which makes it the wrong home for
 a question asked in order to decide *how to build* that session.
-`ACP_BACKENDS_ACP_RUNTIME` is exactly that case: a helper in `session.py`
+`ACP_BACKENDS_ACP_RUNTIME` is exactly that case: a helper in `session_parts/policy.py`
 (spelled `_bg_runtime_backends()` today) computes
 `ACP_BACKENDS_ACP_RUNTIME & selectable_backends()` per call, and its callers
 consult the result against the configured `agent.acp_backend` **string** to choose
@@ -659,7 +660,7 @@ every call site; and the fact being reported is about the deployment, not about 
 supervisor instance, so hanging it off the supervisor would imply per-instance
 variation that does not exist.
 
-`cli_doctor.py` compares `== ACP_BACKEND_KAS` against a config load with no
+`cli_doctor_parts/kas_relay.py` compares `== ACP_BACKEND_KAS` against a config load with no
 session, and is the same pre-session shape. Both it and `session.py`'s reads route
 through this function; §7 records which phase pays each off.
 
@@ -733,7 +734,7 @@ privilege when it is absent.
 | `health`, pool operations | §5.4. |
 
 `SessionRequest` is one frozen record, replacing the 19-kwarg
-`AcpProvider.__init__` and the two `_acp` closures in `config/loader.py`. Its
+`AcpProvider.__init__` and the two `_acp` closures in `config/loader_config.py`. Its
 field list is taken from the only factory that has been exercised against a
 foreign vendor (the companion’s session factory) rather than
 invented: `session_key`, `agent`, `channel_id`, `cwd`, `extra_env`, plus a
@@ -752,10 +753,10 @@ would-be driver — so nothing outside loses access.
 
 ### 5.4 The supervisor owns process and session lifecycle
 
-Moved into the SDK: the warm pool (`session.py:1108`), the shared background
+Moved into the SDK: the warm pool (`session_pool.py`), the shared background
 runtime, the per-parent subagent runtime map, the RSS
 watchdog threshold and its settings loader, provider adoption
-(`session.py`), and agent-process PID tracking, sweeping and reaping (currently
+(`_Session.adopt_provider` in `session_parts/record.py`), and agent-process PID tracking, sweeping and reaping (currently
 `session_pid.py`).
 
 This is the step that makes the boundary real. Without it `SessionManager` still
@@ -764,13 +765,13 @@ supervisor owns process supervision**, and `session_pid.py`'s agent-process half
 moves in.
 
 What that has to accomplish is the cycle `session_pid → acp.client → session →
-session_pid`, whose two live sites are `session_pid.py:311` and `:1888` (both a
+session_pid`, whose two live sites are `_kill_pid_tree` and `_kill_orphan_work_tree` (both a
 lazy `from kiro_crew.acp.client import _get_child_pids`). Deleting the
 `worker_pool.py:49` guard is a *consequence* of the move, not the proof it worked —
 that edge is one-way and the guard exists for standalone importability (§2.4). The
 move must therefore place two pieces of shared surface: `_get_child_pids`, or a
 PID-enumeration primitive it can be replaced by, so `session_pid.py` retains no
-`kiro_crew.acp` import at any scope; and `_kill_pid_tree` (`session_pid.py:300`)
+`kiro_crew.acp` import at any scope; and `_kill_pid_tree` (`session_pid.py`)
 plus the `_MANAGED_AGENT_MARKERS` vocabulary, both of which are consulted
 from the agent half and the work half. The non-agent sweeps gate their kill sets
 *negatively* on that marker vocabulary and consume the protected
@@ -1083,12 +1084,12 @@ What moved:
   translation of a table that already existed, so no membership changed.
   `AcpProvider.capabilities` is where a live session's record comes from.
 - Each of the six identity checks now reads a field: the model-id namespace
-  (`config/loader.py`, `dashboard/chat_handlers.py`), whether the backend's own
+  (`config/loader_config.py`, `dashboard/chat_handlers.py`), whether the backend's own
   advertised list must be read back (`dashboard/handlers/agents.py`,
   `dashboard/chat_turn/model_fallback.py`'s pinned-model verdict), which provider seam serves
   the session (`dashboard/chat_runner.py`'s billing label, `subagent.py`'s
-  session-file cleanup), whether compaction finishes inline
-  (`dashboard/chat_runner.py`), and which channel carries an effort change
+  session-file cleanup), whether compaction finishes inline (`_turn_compact_command`
+  in `dashboard/chat_turn/slash_commands.py`), and which channel carries an effort change
   (`knowledge/llm_pool.py`, which had been reading `AcpClient`'s private
   `_is_claude`).
 - One capability set is new, `ACP_BACKENDS_INLINE_COMPACTION`, because the
@@ -1114,7 +1115,7 @@ Codex rather than translated. It is pinned by enclosing function in
   importing them from `acp_backends.py` satisfies it while changing nothing.
 - Exit: the six surviving identity checks outside the boundary are gone, each
   replaced by a capability question, not relocated:
-  `config/loader.py` (`== ACP_BACKEND_CLAUDE` off a config load),
+  `config/loader_config.py` (`== ACP_BACKEND_CLAUDE` off a config load),
   `dashboard/chat_handlers.py` (`provider.is_claude_backend`),
   `dashboard/chat_runner.py` (`getattr(client, "is_claude_backend", False)`) and `is_claude_backend(client)`), and
   `knowledge/llm_pool.py` — which reads `AcpClient`'s **private** `_is_claude`
@@ -1233,8 +1234,8 @@ chase `kiro_crew.acp`, PR 6 arrives with that whole half still pointing at a
 package it is supposed to delete. The gate prints the live split on every run —
 read it there rather than from this paragraph.
 
-One spelling deserves naming because it is easy to miss: `config/loader.py`
-constructs `AcpProvider` directly, and that construction **is**
+One spelling deserves naming because it is easy to miss: `config/loader_config.py`
+constructs `AcpProvider` (through `agent_sdk.drivers.acp.build_acp_provider()`), and that construction **is**
 `create_provider_factory`. Other files import the name without constructing it,
 so "route it through the factory" is already true — what PR 5 has to change is
 which module they import the name *from*, not how they build it.
@@ -1757,7 +1758,7 @@ reopens it.
    DECIDED: a `ChildAttribution | None` value object,** non-`None` only on
    subagent-related events.
    Measured rather than assumed. Outside `acp/` and `providers/`, the three
-   fields have **10 references across 4 files**: `dashboard/chat_runner.py:6624`; `subagent.py`;
+   fields have **10 references across 4 files**: `_on_permission_request` in `dashboard/chat_turn/tool_approval.py`; `subagent.py`;
    `messaging/driver.py:468`; plus two comment lines. `mcp_identity_ambiguous`
    has **zero** external readers. The 466-usage figure in §2.1 counts the whole
    `EVENT_*` / `STOP_REASON_*` vocabulary; almost none of it reads attribution.

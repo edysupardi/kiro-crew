@@ -686,6 +686,19 @@ function connect(): void {
         if (!isRenderableChatRole(data.role)) break
         for (const cb of messageListeners) cb(normaliseChatMessage(data))
         break
+      case 'chat_message_update': {
+        // New content for a row the panel already committed, named by its
+        // `mid`: the gateway holds the last run of text before a tool call or
+        // an approval prompt off that row until the text after it shows the run
+        // is not half of a credential, then gives it back as this patch. A
+        // frame keyed by `tool_call_id` patches a tool row, which the panel
+        // does not render.
+        const mid = data.mid
+        if (typeof mid === 'string' && mid && typeof data.content === 'string') {
+          for (const cb of messageListeners) cb({ _patch: mid, content: data.content })
+        }
+        break
+      }
       case 'chat_done':
         reportPetEvent('task_complete')
         for (const cb of doneListeners) cb()
@@ -1634,12 +1647,14 @@ export async function getSlotModel(): Promise<string> {
 /**
  * Result of a slot-model switch. `ok: false` alone is a generic failure;
  * `code` carries the gateway's machine-readable refusal when the body names
- * one (`turn_in_flight`: a turn is running mid-switch, retry after it ends).
+ * one. A pick made while a response runs is `ok: true`: the gateway commits
+ * it and applies it from the next message (`deferred: true` in its body), so
+ * the pet's running reply finishes on the model it started with.
  *
- * This deliberately widens the original preload's bare-boolean signature: the
- * gateway refuses a mid-turn switch with a 409 whose only useful content is
- * the structured code, and a bare `false` collapsed that into "failed for no
- * stated reason". Truthiness call sites keep working (`{ ok: true }` vs
+ * This deliberately widens the original preload's bare-boolean signature: a
+ * gateway refusal (`turn_in_flight` from the route's last-instant busy
+ * re-check, for one) is a 409 whose only useful content is the structured
+ * code, and a bare `false` collapsed that into "failed for no stated reason". Truthiness call sites keep working (`{ ok: true }` vs
  * `{ ok: false }` is what the one caller reads).
  */
 export interface SetModelResult {

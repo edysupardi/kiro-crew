@@ -2,7 +2,7 @@
 
 ``ui.show`` points at one indexed UI location. Its plan (version 2: one step
 list per placement, each step with an id) is generated with the find_ui index
-(``website/scripts/lib/ui-index.mjs`` ``guidePlanFor``); the gateway accepts
+(``website/scripts/lib/ui-index-guide.mjs`` ``guidePlanFor``); the gateway accepts
 only an id whose packaged plan exists, records the placement the claiming tab
 walks, and find_ui hands out a ``ui.show`` guide_ref only for such an id.
 """
@@ -655,10 +655,10 @@ def test_find_ui_quotes_the_pages_own_words_for_what_a_deletion_removes() -> Non
     # Delete crewmate only unbinds; Mate describes it from the page's own
     # notice, never from a guess that it wipes chats and notes for good.
     for locale, want in (
-        ("en", "Deleting a crewmate only unbinds it from new sessions."),
+        ("en", "Deleting a mate only unbinds it from new sessions."),
         ("zh-CN", None),
     ):
-        d = ui_index.find_ui("delete a crewmate", locale)
+        d = ui_index.find_ui("delete a mate", locale)
         hit = next((r for r in d.get("results", []) if r["id"] == "agents.delete"), None)
         assert hit is not None, d
         assert hit["caution"] is True
@@ -734,7 +734,7 @@ def _pointing(lid: str, placement: str) -> list[dict[str, Any]]:
         "id": f"{placement}:gate:preview_flag:mc-preview-crew",
         "kind": "gate",
         "gate": "preview_flag:mc-preview-crew",
-        "setting_id": "developer.crewmates",
+        "setting_id": "developer.mates",
     }
     return steps[1:]
 
@@ -752,11 +752,7 @@ def test_delete_crewmate_walks_through_the_editor_and_never_finishes_on_its_own(
     assert steps[-1]["caution"] is True
 
 
-def test_crewmate_memory_and_model_walk_through_the_editor() -> None:
-    memory = _steps("agents.manage-memory", "any")
-    assert memory[0]["selection"] == "crewmate_editor_open"
-    assert memory[1]["location"] == "agents.section-place"
-    assert memory[-1]["requires"] == ["crewmate_memory_manageable"]
+def test_crewmate_model_walks_through_the_editor() -> None:
     model = _steps("agents.model", "any")
     assert [s["location"] for s in model] == [
         "agents.crew-list",

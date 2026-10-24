@@ -242,6 +242,11 @@ class _Host:
         # marker goes on the family that defines it. The real section reads the
         # host's process table, which no frozen report can pin.
         mp.setattr(resources, "_doctor_acp_runtimes", self._marker("_doctor_acp_runtimes"))
+        import kiro_crew.doctor_checks.workload as workload
+
+        # Same reason: added after the move. The real section walks the host's
+        # ledger stores, which no frozen report can pin.
+        mp.setattr(workload, "_doctor_ledger_backlog", self._marker("_doctor_ledger_backlog"))
         mp.setitem(sys.modules, "faiss", None)
         mp.setitem(sys.modules, "amazon_transcribe", None)
         mp.setitem(sys.modules, "amazon_transcribe.client", None)
@@ -420,6 +425,7 @@ Configuration
   <<_doctor_cron_health>>
   <<_doctor_task_store>>
   <<_doctor_overload_resilience>>
+  <<_doctor_ledger_backlog>>
   <<doctor_dead_paths>>
 
 MCP Tools
@@ -600,6 +606,7 @@ Configuration
   <<_doctor_cron_health>>
   <<_doctor_task_store>>
   <<_doctor_overload_resilience>>
+  <<_doctor_ledger_backlog>>
   <<doctor_dead_paths>>
 
 MCP Tools
@@ -820,6 +827,29 @@ def test_bundle_mode_prints_only_the_bundle(host, capsys, monkeypatch) -> None:
     out, code = host.run(capsys, bundle=True)
 
     assert out == _BUNDLE
+    assert code is None
+    assert host.calls == []
+
+
+def test_bundle_mode_prints_the_bundle_when_the_companion_does_not_compose(
+    host, capsys, monkeypatch
+) -> None:
+    result = cli_doctor.diagnostics.BundleResult(
+        zip_path=host.tmp / "diag.zip", filename="diag.zip"
+    )
+    monkeypatch.setattr(cli_doctor.diagnostics, "collect_bundle", lambda: result)
+
+    def refuse_context():
+        raise PlatformCompositionError("companion did not compose")
+
+    monkeypatch.setattr(cli_doctor.diagnostics, "current_context", refuse_context)
+
+    out, code = host.run(capsys, bundle=True)
+
+    assert "  ✅ bundle: <TMP>/diag.zip\n" in out
+    assert out.endswith("\n  Issue link skipped: the platform companion does not compose.\n")
+    assert "Open a GitHub issue" not in out
+    assert "github.com" not in out
     assert code is None
     assert host.calls == []
 

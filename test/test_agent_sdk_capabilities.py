@@ -53,6 +53,16 @@ SRC = Path(__file__).resolve().parent.parent / "src" / "kiro_crew"
 #: attribute), and a bare comparison against ``ACP_BACKEND_CLAUDE``.
 MIGRATED_CONSUMERS = (
     "config/loader.py",
+    # config/loader.py's code, in the owner modules its facade serves.
+    "config/loader_agents.py",
+    "config/loader_builders.py",
+    "config/loader_config.py",
+    "config/loader_credentials.py",
+    "config/loader_document.py",
+    "config/loader_locations.py",
+    "config/loader_pipeline.py",
+    "config/loader_snapshots.py",
+    "config/loader_writeback.py",
     "dashboard/chat_handlers.py",
     "dashboard/handlers/agents.py",
     "dashboard/chat_runner.py",
@@ -83,12 +93,14 @@ def _tree(rel: str) -> ast.Module:
 #: dashboard agents handlers run the functions ``dashboard/agent_admin`` defines on
 #: ``handlers/agents.py``'s globals, the chat handlers those ``dashboard/chat_api``
 #: defines on ``chat_handlers.py``'s, and the chat runner those ``dashboard/chat_turn``
-#: defines on its own, so the identity ratchet reads those owners as
+#: defines on its own, and ``subagent.py`` runs those of ``subagent_parts`` on its own,
+#: so the identity ratchet reads those owners as
 #: part of that file.
 _COMPOSED_OWNERS = {
     "dashboard/handlers/agents.py": "dashboard/agent_admin",
     "dashboard/chat_handlers.py": "dashboard/chat_api",
     "dashboard/chat_runner.py": "dashboard/chat_turn",
+    "subagent.py": "subagent_parts",
 }
 
 
@@ -703,10 +715,12 @@ def test_honor_zero_tool_ban_membership_matches_the_rule() -> None:
 
     A backend honours the ban iff its routing is ``Routing.AGENT_SPEC`` (the
     harness enforces natively -- kiro, kas), OR its routing is in
-    ``tool_gate.ENFORCED_ROUTINGS`` AND it has a mirror
-    (``providers/mirrors/registry.py``'s ``MIRRORS``) AND it is NOT in
-    ``ACP_BACKENDS_ACP_RUNTIME`` (the refusal lives only on ``AcpClient``, never
-    on the shared ``AcpRuntime`` codex and kas are served by).
+    ``tool_gate.ENFORCED_ROUTINGS`` AND something computes ``zero_tools`` for it --
+    a mirror (``providers/mirrors/registry.py``'s ``MIRRORS``), or Crew reading
+    the spec itself beside a ``ProjectionKind.BROKER_ONLY`` array, which
+    ``AcpClient._mirrorless_member_mounts`` does: pi) -- AND it is
+    NOT in ``ACP_BACKENDS_ACP_RUNTIME`` (the refusal lives only on ``AcpClient``,
+    never on the shared ``AcpRuntime`` codex and kas are served by).
 
     Would fail if claude were re-added: its routing is ``SEEDED_SETTINGS``, which
     ``ENFORCED_ROUTINGS`` does not carry. Would fail if codex were re-added: its
@@ -714,13 +728,13 @@ def test_honor_zero_tool_ban_membership_matches_the_rule() -> None:
     ``ACP_BACKENDS_ACP_RUNTIME``.
     """
     from kiro_crew.agent_sdk.tool_gate import ENFORCED_ROUTINGS
-    from kiro_crew.providers.mirrors.registry import MIRRORS
+    from kiro_crew.providers.mirrors.registry import MIRRORS, ProjectionKind, projection_for
 
     for backend in sorted(sdk_backends.ACP_BACKENDS_KNOWN):
         routing = routing_for(backend)
         expected = routing is sdk_backends.Routing.AGENT_SPEC or (
             routing in ENFORCED_ROUTINGS
-            and backend in MIRRORS
+            and (backend in MIRRORS or projection_for(backend).kind is ProjectionKind.BROKER_ONLY)
             and backend not in sdk_backends.ACP_BACKENDS_ACP_RUNTIME
         )
         actual = backend in sdk_backends.ACP_BACKENDS_HONOR_ZERO_TOOL_BAN
@@ -728,6 +742,7 @@ def test_honor_zero_tool_ban_membership_matches_the_rule() -> None:
             f"{backend!r}: honors_zero_tool_ban membership is {actual}, the rule "
             f"says {expected} (routing={routing}, enforced={routing in ENFORCED_ROUTINGS}, "
             f"mirrored={backend in MIRRORS}, "
+            f"projection={projection_for(backend).kind.value}, "
             f"acp_runtime={backend in sdk_backends.ACP_BACKENDS_ACP_RUNTIME})"
         )
     assert sdk_backends.ACP_BACKENDS_HONOR_ZERO_TOOL_BAN == {
@@ -735,6 +750,8 @@ def test_honor_zero_tool_ban_membership_matches_the_rule() -> None:
         sdk_backends.ACP_BACKEND_KAS,
         sdk_backends.ACP_BACKEND_OPENCODE,
         sdk_backends.ACP_BACKEND_GOOSE,
+        sdk_backends.ACP_BACKEND_DEEPSEEK,
+        sdk_backends.ACP_BACKEND_PI,
     }
 
 
@@ -746,7 +763,7 @@ def test_the_knowledge_pool_client_takes_the_default_backend() -> None:
     ``AcpWorker`` constructs its ``AcpClient`` with ``acp_backend=``, and
     ``llm_pool._get_acp_backend`` restricts the value to whatever answers both
     ``honors_zero_tool_ban`` and ``acp_client_spawnable`` True -- today
-    kiro/opencode/goose. claude is NOT a member: its routing
+    kiro/opencode/goose/deepseek/pi. claude is NOT a member: its routing
     (``Routing.SEEDED_SETTINGS``) is declared but not enforced by this core, so
     an inherited ``~/.claude`` pre-approval can skip the permission request the
     refusal needs to run. Asking the EFFORT capabilities rather than the identity
@@ -757,9 +774,11 @@ def test_the_knowledge_pool_client_takes_the_default_backend() -> None:
     assumed to inherit an existing member's.
     """
     from kiro_crew.agent_sdk.backends import (
+        ACP_BACKEND_DEEPSEEK,
         ACP_BACKEND_GOOSE,
         ACP_BACKEND_KIRO,
         ACP_BACKEND_OPENCODE,
+        ACP_BACKEND_PI,
         ACP_BACKENDS_ACP_CLIENT_SPAWNABLE,
         ACP_BACKENDS_HONOR_ZERO_TOOL_BAN,
     )
@@ -781,6 +800,8 @@ def test_the_knowledge_pool_client_takes_the_default_backend() -> None:
         ACP_BACKEND_KIRO,
         ACP_BACKEND_OPENCODE,
         ACP_BACKEND_GOOSE,
+        ACP_BACKEND_DEEPSEEK,
+        ACP_BACKEND_PI,
     }, (
         "the set of backends this pool trusts changed -- decide the effort "
         "channel for whichever member is new or missing deliberately, then "
@@ -792,19 +813,23 @@ def test_the_knowledge_pool_client_takes_the_default_backend() -> None:
     assert capabilities_for(ACP_BACKEND_KIRO).effort_via_slash_command is True
     assert capabilities_for(ACP_BACKEND_OPENCODE).effort_via_slash_command is False
     assert capabilities_for(ACP_BACKEND_GOOSE).effort_via_slash_command is False
+    assert capabilities_for(ACP_BACKEND_DEEPSEEK).effort_via_config_option is True
+    assert capabilities_for(ACP_BACKEND_DEEPSEEK).effort_via_slash_command is False
+    # pi carries effort as its ``thought_level`` config option.
+    assert capabilities_for(ACP_BACKEND_PI).effort_via_config_option is True
+    assert capabilities_for(ACP_BACKEND_PI).effort_via_slash_command is False
 
 
-def test_effort_via_slash_command_membership_is_the_kiro_family() -> None:
+def test_effort_via_slash_command_membership_is_the_command_verb_set() -> None:
     """``effort_via_slash_command`` translates ``ACP_BACKENDS_KIRO_SLASH_COMMANDS``
-    minus the config-option channel's members for every known backend, and no
-    backend carries effort down both channels: a change sent down the one the
-    harness does not implement is answered with method-not-found (KAS, which sits
-    in both sets, answers ``_kiro.dev/commands/execute`` with -32603)."""
+    for every known backend, and no backend carries effort down both channels: a
+    change sent down the one the harness does not implement is refused. KAS is
+    kiro-family but outside that set, because it answers
+    ``_kiro.dev/commands/execute`` with -32603 (``kas/commands-refused-live.jsonl``)."""
     for backend in sorted(sdk_backends.ACP_BACKENDS_KNOWN):
         caps = capabilities_for(backend)
         assert caps.effort_via_slash_command == (
             backend in sdk_backends.ACP_BACKENDS_KIRO_SLASH_COMMANDS
-            and backend not in sdk_backends.ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION
         ), backend
         assert not (caps.effort_via_slash_command and caps.effort_via_config_option), backend
     assert capabilities_for(sdk_backends.ACP_BACKEND_KAS).effort_via_slash_command is False

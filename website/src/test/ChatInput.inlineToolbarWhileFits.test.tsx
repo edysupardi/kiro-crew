@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { fireEvent, screen } from '@testing-library/react'
 import { renderWithProviders } from './helpers'
 import ChatInput from '../components/ChatInput'
 
@@ -25,7 +25,11 @@ describe('ChatInput inlineToolbarWhileFits: the one-row shape', () => {
     renderWithProviders(<ChatInput value="" onChange={vi.fn()} onSend={vi.fn()} inlineToolbarWhileFits onUploadFiles={vi.fn()} />)
     expect(inline()).toBe(true)
     expect(wrapper().className).toContain('flex items-center')
-    expect(wrapper().className).toContain('rounded-full')
+    // A finite pill radius (half the 46px box), not `rounded-full`: the
+    // corner then eases to the two-row 16px instead of holding a 9999px
+    // radius until the last frame of the transition.
+    expect(wrapper().className).toContain('rounded-[23px]')
+    expect(wrapper().className).not.toContain('rounded-full')
     // The bottom row dissolves (`contents`) so its two clusters sit on the
     // text's line, the attach cluster first and the send cluster last.
     const row = screen.getByTestId('composer-bottom-row')
@@ -49,6 +53,29 @@ describe('ChatInput inlineToolbarWhileFits: the one-row shape', () => {
     expect(inline()).toBe(false)
     expect(wrapper().className).toContain('rounded-2xl')
     expect(screen.getByTestId('composer-bottom-row').className).toContain('justify-between')
+  })
+
+  it('keeps one row through focus and blur on a list draft, with the list-indent hint screen-reader only', () => {
+    renderWithProviders(<ChatInput value="- item" onChange={vi.fn()} onSend={vi.fn()} inlineToolbarWhileFits />)
+    const ta = screen.getByRole('textbox')
+    expect(inline()).toBe(true)
+    expect(screen.getByTestId('list-indent-hint').className).toBe('sr-only')
+    fireEvent.focus(ta)
+    // Focus does not reshape the box: the hint stays out of the visual row
+    // and is still described to screen readers.
+    expect(inline()).toBe(true)
+    expect(screen.getByTestId('list-indent-hint').className).toBe('sr-only')
+    expect(ta.getAttribute('aria-describedby')).toContain(screen.getByTestId('list-indent-hint').id)
+    fireEvent.blur(ta)
+    expect(inline()).toBe(true)
+  })
+
+  it('shows the list-indent hint under the text once the draft no longer fits one row', () => {
+    renderWithProviders(<ChatInput value={'- item\n- next'} onChange={vi.fn()} onSend={vi.fn()} inlineToolbarWhileFits />)
+    const ta = screen.getByRole('textbox')
+    fireEvent.focus(ta)
+    expect(inline()).toBe(false)
+    expect(screen.getByTestId('list-indent-hint').className).toContain('text-[12px]')
   })
 
   it('opens to two rows while a file is staged: the file strip has no place on one line', () => {
@@ -83,6 +110,25 @@ describe('ChatInput inlineToolbarWhileFits: the one-row shape', () => {
     expect(probe.getAttribute('aria-hidden')).toBe('true')
     expect(probe.className).toContain('invisible')
     expect(probe.className).toContain('pointer-events-none')
+    // The touch font floor (16px, keyed on this attribute) must reach the
+    // probe too, or it measures at 14px while the textarea wraps at 16px.
+    expect(probe.hasAttribute('data-composer-typo')).toBe(true)
+  })
+
+  // One row centres the text line on the buttons: equal padding above and
+  // below, set on the text column so the textarea, its paste mirror and the
+  // Lexical editor all read it. Two rows keep INPUT_TYPO's 12px over 4px.
+  it('centres the text line on the single row, and only there', () => {
+    renderWithProviders(<ChatInput value="" onChange={vi.fn()} onSend={vi.fn()} inlineToolbarWhileFits />)
+    const column = () => screen.getByRole('textbox').parentElement!
+    expect(column().className).toContain('[--composer-pt:max(0px,calc((44px_-_1.5em)_/_2))]')
+    expect(column().className).toContain('[--composer-pb:max(0px,calc((44px_-_1.5em)_/_2))]')
+    expect(screen.getByRole('textbox').className).toContain('pt-[var(--composer-pt,0.75rem)]')
+  })
+
+  it('keeps the two-row text padding once the box opens', () => {
+    renderWithProviders(<ChatInput value={'first\nsecond'} onChange={vi.fn()} onSend={vi.fn()} inlineToolbarWhileFits />)
+    expect(screen.getByRole('textbox').parentElement!.className).not.toContain('--composer-pt')
   })
 
   // The ordinary composer draws session chrome in its toolbar and keeps two
@@ -107,7 +153,7 @@ describe('ChatInput inlineToolbarWhileFits: the one-row shape', () => {
     const sizer = screen.getByTestId('composer-sizer')
     expect(sizer.contains(wrapper())).toBe(true)
     expect(sizer.className).toContain('justify-end')
-    expect(sizer.className).toContain('rounded-full')
+    expect(sizer.className).toContain('rounded-[23px]')
     expect(sizer.className).toContain('overflow-hidden')
     // The inner box must not shrink to a pinned sizer, or its measure never moves.
     expect(wrapper().className).toContain('shrink-0')

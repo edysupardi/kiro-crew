@@ -28,6 +28,78 @@ export const FIELD_LABELS: Record<string, () => string> = {
   model: () => i18nT('components.changeCards.field_model'),
   reasoning_effort: () => i18nT('components.changeCards.field_reasoning_effort'),
   approval_mode: () => i18nT('components.changeCards.field_approval_mode'),
+  sender: () => i18nT('components.changeCards.field_sender'),
+  not_included: () => i18nT('components.changeCards.field_not_included'),
+  not_imported: () => i18nT('components.changeCards.field_not_imported'),
+  template_auto_approve: () => i18nT('components.changeCards.field_template_auto_approve'),
+  rules: () => i18nT('components.changeCards.field_rules'),
+  model_hint: () => i18nT('components.changeCards.field_model_hint'),
+  import_skills: () => i18nT('components.changeCards.field_import_skills'),
+  import_crons: () => i18nT('components.changeCards.field_import_crons'),
+  dashboard_template: () => i18nT('components.changeCards.field_dashboard_template'),
+  carried_skills: () => i18nT('components.changeCards.field_carried_skills'),
+  carried_scripts: () => i18nT('components.changeCards.field_carried_scripts'),
+  carried_avatar: () => i18nT('components.changeCards.field_carried_avatar'),
+}
+
+/** The import rows whose text the crewmate reads every turn: shown whole, line breaks kept. */
+const FULL_TEXT_FIELDS: ReadonlySet<string> = new Set(['rules', 'description', 'import_crons'])
+
+/** One imported cron: its name, schedule and that it lands paused, then the
+ *  full message it sends (or its script) and its time zone, so two crons that
+ *  would do different things never read the same. */
+function importCronText(job: unknown): string {
+  const o = (job && typeof job === 'object' ? job : {}) as {
+    name?: unknown; cron_expr?: unknown; message?: unknown; script?: unknown; timezone?: unknown
+  }
+  const when = typeof o.cron_expr === 'string' ? fmtCardCron(o.cron_expr) : ''
+  const lines = [
+    typeof o.message === 'string' ? o.message : '',
+    typeof o.script === 'string' ? o.script : '',
+    typeof o.timezone === 'string' && o.timezone ? i18nT('components.changeCards.import_cron_timezone', { tz: o.timezone }) : '',
+  ].filter(Boolean)
+  return i18nT('components.changeCards.import_cron_paused', { name: String(o.name ?? ''), when, detail: lines.join('\n') }).trimEnd()
+}
+
+/** One skill reference: the skill and the app it comes from. */
+function importSkillText(ref: unknown): string {
+  const o = (ref && typeof ref === 'object' ? ref : {}) as { name?: unknown; source?: unknown }
+  const app = typeof o.source === 'string' && o.source.startsWith('app:') ? o.source.slice(4) : ''
+  return i18nT('components.changeCards.import_skill_app', { name: String(o.name ?? ''), app })
+}
+
+/** One carried skill: its name and how many files it brings (each shown in full below). */
+function carriedSkillText(skill: unknown): string {
+  const o = (skill && typeof skill === 'object' ? skill : {}) as { name?: unknown; files?: unknown }
+  const count = Array.isArray(o.files) ? o.files.length : 0
+  return i18nT('components.changeCards.carried_skill_files', { name: String(o.name ?? ''), count })
+}
+
+/** One inherited MCP server, said as what it reaches: a service's host or a local program. */
+function reachText(r: unknown): string {
+  const o = (r && typeof r === 'object' ? r : {}) as { name?: unknown; host?: unknown; command?: unknown }
+  const name = String(o.name ?? '')
+  if (typeof o.host === 'string' && o.host) return i18nT('components.changeCards.reach_remote', { name, host: o.host })
+  if (typeof o.command === 'string' && o.command) return i18nT('components.changeCards.reach_local', { name, command: o.command })
+  return name
+}
+
+/** The servers a widen row names, for the warning above the rows. */
+export function reachNames(v: unknown): string {
+  if (Array.isArray(v)) return fmtList(v.map(r => String((r as { name?: unknown })?.name ?? r)))
+  return typeof v === 'string' ? v : ''
+}
+
+/** Where the owner changes which servers new crewmates use unasked. */
+export const TEMPLATES_HREF = '/capabilities?tab=templates'
+
+/** The parts an import card says it leaves out, sent as codes. */
+const LEFT_OUT_LABELS: Record<string, () => string> = {
+  crons: () => i18nT('components.changeCards.left_crons'),
+  keyResults: () => i18nT('components.changeCards.left_key_results'),
+  avatar: () => i18nT('components.changeCards.left_avatar'),
+  model: () => i18nT('components.changeCards.left_model'),
+  dashboardTemplate: () => i18nT('components.changeCards.left_dashboard'),
 }
 
 /** The approval modes a crewmate's own chat can be set to, in the picker's words. */
@@ -49,12 +121,14 @@ const APPROVAL_MODE_HINTS: Record<string, () => string> = {
 /** A line under a row's value explaining what the new value means, when the field has one. */
 export function changeHint(c: CardChange): string | null {
   if (c.field === 'approval_mode' && typeof c.after === 'string' && APPROVAL_MODE_HINTS[c.after]) return APPROVAL_MODE_HINTS[c.after]()
+  if (c.field === 'import_approval') return i18nT('components.changeCards.approval_hint_import')
   return null
 }
 
 /** A row's label: the localized field name when known, else the gateway's. */
 export function changeLabel(c: CardChange): string {
   if (c.field === 'goal' && typeof c.number === 'number') return i18nT('pages.membersPage.goals_goal_number', { number: c.number })
+  if (c.field === 'import_approval') return FIELD_LABELS.approval_mode()
   return (c.field && FIELD_LABELS[c.field]?.()) || c.label
 }
 
@@ -67,7 +141,16 @@ function changeValue(c: CardChange, v: unknown): string {
   if (c.field === 'reasoning_effort' && typeof v === 'string') return v === '' ? i18nT('pages.kiroCrewAgentsPage.inherited') : effortLabel(v)
   // An approval mode is a code identifier on the wire; the card shows the word
   // the picker shows for it, so "trust" reads as the same thing in both places.
-  if (c.field === 'approval_mode' && typeof v === 'string' && APPROVAL_MODE_LABELS[v]) return APPROVAL_MODE_LABELS[v]()
+  if ((c.field === 'approval_mode' || c.field === 'import_approval') && typeof v === 'string' && APPROVAL_MODE_LABELS[v]) return APPROVAL_MODE_LABELS[v]()
+  // Codes on the wire, so the words are in the reader's language.
+  if (c.field === 'not_included' && v === 'private') return i18nT('components.changeCards.not_included_private')
+  if (c.field === 'template_auto_approve' && Array.isArray(v)) return v.map(reachText).join('; ')
+  if (c.field === 'not_imported' && Array.isArray(v)) return fmtList(v.map(code => LEFT_OUT_LABELS[String(code)]?.() ?? String(code)))
+  if (c.field === 'import_crons' && Array.isArray(v)) return v.map(importCronText).join('\n')
+  if (c.field === 'import_skills' && Array.isArray(v)) return fmtList(v.map(importSkillText))
+  if (c.field === 'carried_skills' && Array.isArray(v)) return fmtList(v.map(carriedSkillText))
+  if (c.field === 'carried_scripts' && Array.isArray(v)) return fmtList(v.map(s => String((s as { file?: unknown })?.file ?? '')))
+  if (c.field === 'carried_avatar' && v && typeof v === 'object') return i18nT('components.changeCards.carried_avatar_kind', { type: String((v as { type?: unknown }).type ?? '') })
   return formatCardValue(v)
 }
 
@@ -117,10 +200,17 @@ export function CardChanges({ changes }: { changes: CardChange[] }) {
                 {c.before !== undefined && <span className="text-muted [overflow-wrap:anywhere]">{changeValue(c, c.before)}</span>}
                 {c.before !== undefined && <span aria-hidden="true" className="text-muted">→</span>}
                 {c.before !== undefined && <span className="sr-only">{i18nT('components.changeCards.becomes')}</span>}
-                {c.after !== undefined && <span className="font-medium [overflow-wrap:anywhere]">{changeValue(c, c.after)}</span>}
+                {c.after !== undefined && (
+                  <span className={`font-medium [overflow-wrap:anywhere]${c.field && FULL_TEXT_FIELDS.has(c.field) ? ' whitespace-pre-wrap' : ''}`}>
+                    {changeValue(c, c.after)}
+                  </span>
+                )}
               </span>
               {changeHint(c) && (
                 <span className="block text-[12px] leading-4 text-muted" data-testid="change-card-hint">{changeHint(c)}</span>
+              )}
+              {c.field === 'template_auto_approve' && (
+                <a className="block text-[12px] leading-4 text-accent underline" href={TEMPLATES_HREF} data-testid="change-card-template-link">{i18nT('components.changeCards.template_link')}</a>
               )}
             </>
           )}

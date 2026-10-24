@@ -1011,7 +1011,7 @@ def _ensure_crew_log_root(home: Path, restrict: Callable[[Path], None]) -> None:
         # every crew log path beneath it would pass while living outside this tree.
         # Establishing them here is what the argument above makes for the root --
         # a name that does not exist has no mode to inherit and is skipped by the
-        # sandbox mask. The names are the spellings ``crew_log/store.py::_ROOT_DIR``
+        # sandbox mask. The names are the spellings ``crew_log/store_paths.py::_ROOT_DIR``
         # maps its kinds to; this module imports no ``kiro_crew`` package at module
         # scope, so they are stated rather than read.
         for leaf in ("crews", "sessions"):
@@ -1202,7 +1202,7 @@ def kiro_home() -> Path:
     WHOLE user directory (agents, prompts, skills, steering, settings, sessions),
     but KiroCrew currently resolves the host ``~/.kiro`` for most of those readers
     (session transcripts in ``session_map.py`` / ``acp/*`` / ``providers/acp_*.py``
-    / ``dashboard/handlers/usage.py``, and the ``settings/mcp.json`` registry).
+    / ``dashboard/handlers/usage_sessions.py``, and the ``settings/mcp.json`` registry).
     Setting ``KIRO_HOME`` therefore moves where kiro-cli WRITES sessions without
     moving where KiroCrew READS them, which breaks session resume. Only the agents
     directory follows it today, so this is not yet a supported way to isolate an
@@ -1391,6 +1391,40 @@ def project_agents_dir(project_dir: str | Path) -> Path:
     directory belongs to the user's checkout and is typically version-controlled.
     """
     return Path(project_dir) / ".kiro" / "agents"
+
+
+#: A replacement resolver for :func:`mate_agents_dir`, ``None`` = live. The same
+#: shape as :data:`_agents_dir_override`, read inside the body for the same reason;
+#: the test floor installs one so no test reaches the operator's real crewmate
+#: folder, which holds the generated mate conductor and worker specs too.
+_mate_agents_dir_override: Callable[[], Path] | None = None
+
+
+def mate_agents_dir() -> Path:
+    """The Crew-owned crewmate custom-agent folder (``<kiro home>/mates/agents``).
+
+    ``rfc-mate-owned-agent-config``: a crewmate's own file, in the
+    :func:`kiro_agents_dir` format, and the mate conductor and worker specs live
+    here, a sibling of that folder that resolution reads and the agent picker
+    does not. Outside the data home and its sandbox keystone on purpose: only
+    unsandboxed gateway handlers write it, sessions get it as a projected KAS
+    payload, and the ceiling re-applies at projection. Honours ``KIRO_HOME`` and
+    :data:`_mate_agents_dir_override`.
+    """
+    if _mate_agents_dir_override is not None:
+        return _mate_agents_dir_override()
+    return kiro_home() / "mates" / "agents"
+
+
+def spec_dir_for(name: object, agents_dir: Path | None = None) -> Path:
+    """The folder a by-name read of *name*'s spec uses: this folder for the mate
+    conductor and worker, which Crew writes here, else *agents_dir* (default: the
+    user level). The one resolver every by-name spec reader shares."""
+    from kiro_crew.agent_files import is_mate_service_agent
+
+    if is_mate_service_agent(name):
+        return mate_agents_dir()
+    return agents_dir if agents_dir is not None else kiro_agents_dir()
 
 
 def project_kiro_dir(project_dir: str | Path) -> Path:

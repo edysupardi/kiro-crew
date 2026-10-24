@@ -52,6 +52,57 @@ export function partitionSourceLinks(
 }
 
 /**
+ * The key two mentions of ONE change share, so the panels list it once.
+ *
+ * A built-in parser emits exactly one canonical url per object, so its url is
+ * the key. A registered provider may keep a revision pin in its canonical url
+ * (`.../cr/123` and `.../cr/123/revisions/2` are one review), so its links key
+ * on the object's own fields instead, the way the backend's `SourceRef.identity`
+ * leaves the url out. The host stays in, because a number is only unique per
+ * instance.
+ *
+ * A GitHub url keys case-folded. GitHub resolves owner and repository names
+ * case-insensitively, so `Acme/Widgets/pull/10` and `acme/widgets/pull/10`
+ * are one pull request, and a sidebar chip can carry a different spelling from
+ * the one the panel lists. Every other part of the canonical url (host, the
+ * `pull`/`issues` segment, the number) is already lowercase.
+ */
+export function sourceLinkKey(link: PullRequestLink): string {
+  if (link.provider === 'github') return link.url.toLowerCase()
+  if (!sourceProviderDescriptor(link.provider)) return link.url
+  let host = ''
+  try {
+    host = new URL(link.url).host
+  } catch {
+    return link.url
+  }
+  return JSON.stringify([link.provider, link.kind, host, link.repo, link.number])
+}
+
+/**
+ * The listed source a remembered url names: the exact url, or else the same
+ * change at another url. A tab remembered at an older revision of a review is
+ * still that review, so the panel stays on it after a newer revision appears
+ * instead of jumping to the first tab.
+ */
+export function findSourceForUrl<T extends PullRequestLink>(
+  sources: readonly T[],
+  url: string,
+): T | undefined {
+  const exact = sources.find(source => source.url === url)
+  if (exact || !url) return exact
+  // Matched without re-parsing, because the parse below has no Enterprise host
+  // list and would reject a GitHub Enterprise url outright.
+  const folded = url.toLowerCase()
+  const spelling = sources.find(source => source.provider === 'github' && sourceLinkKey(source) === folded)
+  if (spelling) return spelling
+  const remembered = parseSourceLinkUrl(url)
+  if (!remembered) return undefined
+  const key = sourceLinkKey(remembered)
+  return sources.find(source => sourceLinkKey(source) === key)
+}
+
+/**
  * The pull-request URLs a slot's sidebar chips name — the set a turn-boundary
  * invalidation is scoped to. Issue links are skipped (their panel has no
  * turn-boundary refresh), an unknown slot yields nothing, and the list is the
@@ -138,7 +189,7 @@ export interface SourceProviderDescriptor {
 /** Ids the core owns. A descriptor may never claim one: the built-in branches
  *  run first, so a shadowing registration would be silently dead for extraction
  *  yet live for chip labels — two layers disagreeing about one provider. */
-const BUILTIN_PROVIDER_IDS: ReadonlySet<string> = new Set(['github', 'gitlab', 'jira'])
+const BUILTIN_PROVIDER_IDS: ReadonlySet<string> = new Set(['github', 'gitlab', 'jira', 'bitbucket_server'])
 
 /** Registration order is consultation order, so a later provider cannot
  *  intercept an earlier one's URLs. */
@@ -249,7 +300,9 @@ function parseRegisteredCandidate(url: URL): PullRequestLink | null {
  * in Resources, not Changes); 'agent' means the assistant / a tool / thinking
  * output surfaced or created it (a real Change). Because the dedup map keeps the
  * first occurrence of each URL, an agent later echoing a user-referenced PR
- * cannot reclassify it — the user's earlier mention stands.
+ * cannot reclassify it — the user's earlier mention stands. "Each URL" means
+ * each `sourceLinkKey`, so a newer revision of a user-pasted review stays a
+ * Resource too.
  */
 type MentionRole = 'agent' | 'user'
 interface AttributedLink extends PullRequestLink {
@@ -351,6 +404,56 @@ export function githubHostSet(hosts: readonly string[] | undefined): ReadonlySet
 const NO_GITLAB_HOSTS: ReadonlySet<string> = new Set<string>()
 const NO_JIRA_HOSTS: ReadonlySet<string> = new Set<string>()
 const NO_GITHUB_HOSTS: ReadonlySet<string> = new Set<string>()
+const NO_BITBUCKET_SERVER_HOSTS: ReadonlySet<string> = new Set<string>()
+
+/** Normalize the configured Bitbucket Server hosts to a lookup set.
+ * Same normalization as gitlabHostSet — entries are exact `host[:port]` values
+ * from operator config (dashboard.bitbucket_server_hosts). Bitbucket Server has
+ * no public default host, so a link is recognized only when listed here. */
+export function bitbucketServerHostSet(hosts: readonly string[] | undefined): ReadonlySet<string> {
+  return new Set(
+    (hosts ?? [])
+      .map(host => host.trim().toLowerCase().replace(/:443$/, ''))
+      .filter(Boolean),
+  )
+}
+
+/** Bitbucket Server path pieces. Mirrors the backend grammar so a link this
+ *  module builds always re-parses there: matched from the END of the path, with
+ *  any reverse-proxy context path before `/projects/` kept in the canonical url,
+ *  and the UI tab suffix the link was copied from dropped. */
+const BITBUCKET_SERVER_TABS: ReadonlySet<string> = new Set(['overview', 'diff', 'commits', 'builds'])
+const BITBUCKET_SERVER_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,127}$/
+const BITBUCKET_SERVER_SLUG_RE = /^[A-Za-z0-9._-]{1,128}$/
+const BITBUCKET_SERVER_CONTEXT_RE = /^[A-Za-z0-9._~-]{1,64}$/
+
+function bitbucketServerLink(origin: string, path: string): PullRequestLink | null {
+  let segments = path.split('/')
+  if (segments.length > 1 && BITBUCKET_SERVER_TABS.has(segments[segments.length - 1].toLowerCase())) {
+    segments = segments.slice(0, -1)
+  }
+  const n = segments.length
+  if (n < 7 || segments[0] !== '' || segments[n - 6] !== 'projects'
+    || segments[n - 4] !== 'repos' || segments[n - 2] !== 'pull-requests') return null
+  const key = segments[n - 5]
+  const slug = segments[n - 3]
+  const numberText = segments[n - 1]
+  const context = segments.slice(1, n - 6)
+  if (!BITBUCKET_SERVER_KEY_RE.test(key) || !BITBUCKET_SERVER_SLUG_RE.test(slug)) return null
+  if (slug === '.' || slug === '..') return null
+  if (!/^\d{1,15}$/.test(numberText) || Number(numberText) <= 0) return null
+  if (context.length > 8) return null
+  if (context.some(seg => seg === '.' || seg === '..' || !BITBUCKET_SERVER_CONTEXT_RE.test(seg))) return null
+  const number = Number(numberText)
+  const prefix = context.map(seg => `/${seg}`).join('')
+  return {
+    url: `https://${origin}${prefix}/projects/${key}/repos/${slug}/pull-requests/${number}`,
+    provider: 'bitbucket_server',
+    number,
+    repo: slug,
+    kind: 'change',
+  }
+}
 
 /** GitLab path markers, in match order. Both a merge request and an issue live
  * under the project's `/-/` namespace and end in a numeric id, so the marker
@@ -449,6 +552,8 @@ function parseCandidate(
   anyJiraHost = false,
   githubHosts: ReadonlySet<string> = NO_GITHUB_HOSTS,
   anyGithubHost = false,
+  bitbucketServerHosts: ReadonlySet<string> = NO_BITBUCKET_SERVER_HOSTS,
+  anyBitbucketServerHost = false,
 ): PullRequestLink | null {
   // Trim trailing punctuation and markdown emphasis (**bold**, *italic*,
   // `code`, _underscore_, ~~strike~~) that the candidate scan may have
@@ -482,6 +587,9 @@ function parseCandidate(
   // a host listed under two providers.
   if (anyGithubHost || githubHosts.has(hostWithPort)) return githubLink(hostWithPort, path)
   if (anyGitlabHost || gitlabHosts.has(hostWithPort)) return gitlabLink(hostWithPort, path)
+  // Bitbucket Server is recognized only through its allowlist, after GitHub
+  // Enterprise and GitLab, matching the backend's order.
+  if (anyBitbucketServerHost || bitbucketServerHosts.has(hostWithPort)) return bitbucketServerLink(hostWithPort, path)
   // Jira: Atlassian Cloud (*.atlassian.net) is recognized automatically;
   // self-hosted Jira/Data Center instances require explicit allowlisting via
   // dashboard.jira_hosts, matching the same discipline as self-hosted GitLab.
@@ -530,6 +638,12 @@ function parseStoredCanonicalLink(value: string): PullRequestLink | null {
     // the first probe does for self-hosted GitLab. It runs after the registry
     // probe so a registered provider with GitHub-shaped paths keeps its own id.
     ?? parseCandidate(value, NO_GITLAB_HOSTS, false, NO_JIRA_HOSTS, false, NO_GITHUB_HOSTS, true)
+    // Fifth probe, permissive, for Bitbucket Server, for the same reason as the
+    // fourth: the stored url is checked before the allowlist loads.
+    ?? parseCandidate(
+      value, NO_GITLAB_HOSTS, false, NO_JIRA_HOSTS, false, NO_GITHUB_HOSTS, false,
+      NO_BITBUCKET_SERVER_HOSTS, true,
+    )
 }
 
 function isCanonicalStoredUrl(value: string): boolean {
@@ -542,6 +656,7 @@ function linksInMessage(
   jiraHosts: ReadonlySet<string> = NO_JIRA_HOSTS,
   githubHosts: ReadonlySet<string> = NO_GITHUB_HOSTS,
   limit = MAX_PULL_REQUEST_SOURCES,
+  bitbucketServerHosts: ReadonlySet<string> = NO_BITBUCKET_SERVER_HOSTS,
 ): AttributedLink[] {
   if (message?.role === 'streaming' || message?.role === 'chunk' || limit <= 0) return []
   // Non-transient roles other than 'user' (assistant, tool, thinking, …) are all
@@ -553,9 +668,17 @@ function linksInMessage(
   const content = typeof rawContent === 'string' ? rawContent : ''
   URL_CANDIDATE_RE.lastIndex = 0
   for (const match of content.matchAll(URL_CANDIDATE_RE)) {
-    const link = parseCandidate(match[0], gitlabHosts, false, jiraHosts, false, githubHosts)
-    if (!link || found.has(link.url)) continue
-    found.set(link.url, { ...link, mentionedBy })
+    const link = parseCandidate(
+      match[0], gitlabHosts, false, jiraHosts, false, githubHosts, false, bitbucketServerHosts,
+    )
+    if (!link) continue
+    // A later mention of the same change replaces the url in place: text is read
+    // front to back, so the last url written is the most recent mention. That is
+    // the newest revision whenever the transcript cites revisions in order.
+    const key = sourceLinkKey(link)
+    const repeat = found.has(key)
+    found.set(key, { ...link, mentionedBy })
+    if (repeat) continue
     if (found.size >= limit) break
   }
   return [...found.values()]
@@ -574,6 +697,7 @@ export function parseSourceLinkUrl(
   gitlabHosts: readonly string[] = [],
   jiraHosts: readonly string[] = [],
   githubHosts: readonly string[] = [],
+  bitbucketServerHosts: readonly string[] = [],
 ): PullRequestLink | null {
   return parseCandidate(
     url,
@@ -582,6 +706,8 @@ export function parseSourceLinkUrl(
     jiraHostSet(jiraHosts),
     false,
     githubHostSet(githubHosts),
+    false,
+    bitbucketServerHostSet(bitbucketServerHosts),
   )
 }
 
@@ -676,7 +802,17 @@ function addLinks(
   links: AttributedLink[],
 ): void {
   for (const link of links) {
-    if (found.has(link.url)) continue
+    const key = sourceLinkKey(link)
+    const earlier = found.get(key)
+    if (earlier) {
+      // The same change mentioned again, e.g. at a newer revision. The first
+      // mention keeps its place and its attribution; the url follows the most
+      // recent mention, the same rule the backend sidebar chip uses. Core does
+      // not compare revision numbers, so citing an older revision later moves
+      // the card back to it.
+      if (earlier.url !== link.url) found.set(key, { ...link, mentionedBy: earlier.mentionedBy })
+      continue
+    }
     // Cap each role INDEPENDENTLY. The emitted Change sources are the agent
     // links, so counting user-referenced links against a single shared limit
     // let a flood of pasted PRs exhaust the budget and starve every later
@@ -684,7 +820,7 @@ function addLinks(
     // retained (bounded) so a later agent echo of a user-first PR stays
     // classified as a Resource — hence a per-role cap rather than dropping them.
     if (roleCount(found, link.mentionedBy) >= MAX_PULL_REQUEST_SOURCES) continue
-    found.set(link.url, link)
+    found.set(key, link)
   }
 }
 
@@ -693,13 +829,15 @@ export function extractPullRequestLinks(
   gitlabHosts: readonly string[] = [],
   jiraHosts: readonly string[] = [],
   githubHosts: readonly string[] = [],
+  bitbucketServerHosts: readonly string[] = [],
 ): PullRequestLink[] {
   const hosts = gitlabHostSet(gitlabHosts)
   const jHosts = jiraHostSet(jiraHosts)
   const ghHosts = githubHostSet(githubHosts)
+  const bbsHosts = bitbucketServerHostSet(bitbucketServerHosts)
   const found = new Map<string, AttributedLink>()
   for (const message of messages) {
-    addLinks(found, linksInMessage(message, hosts, jHosts, ghHosts))
+    addLinks(found, linksInMessage(message, hosts, jHosts, ghHosts, MAX_PULL_REQUEST_SOURCES, bbsHosts))
     // Once MAX agent sources are captured, no further message can add an emitted
     // Change source, so stop scanning (user links past this point are moot).
     if (roleCount(found, 'agent') >= MAX_PULL_REQUEST_SOURCES) break
@@ -734,6 +872,7 @@ export class PullRequestLinkIndex {
   private hosts: ReadonlySet<string> = NO_GITLAB_HOSTS
   private jHosts: ReadonlySet<string> = NO_JIRA_HOSTS
   private ghHosts: ReadonlySet<string> = NO_GITHUB_HOSTS
+  private bbsHosts: ReadonlySet<string> = NO_BITBUCKET_SERVER_HOSTS
   private hostsKey = ''
 
   update(
@@ -742,6 +881,7 @@ export class PullRequestLinkIndex {
     gitlabHosts: readonly string[] = [],
     jiraHosts: readonly string[] = [],
     githubHosts: readonly string[] = [],
+    bitbucketServerHosts: readonly string[] = [],
   ): PullRequestLink[] {
     // An operator adding a self-managed host mid-session must retro-detect the
     // MRs already in the transcript, so a changed allowlist forces a full
@@ -749,11 +889,13 @@ export class PullRequestLinkIndex {
     const hostsKey = [...gitlabHostSet(gitlabHosts)].sort().join(',')
       + '|' + [...jiraHostSet(jiraHosts)].sort().join(',')
       + '|' + [...githubHostSet(githubHosts)].sort().join(',')
+      + '|' + [...bitbucketServerHostSet(bitbucketServerHosts)].sort().join(',')
     if (hostsKey !== this.hostsKey) {
       this.hostsKey = hostsKey
       this.hosts = gitlabHostSet(gitlabHosts)
       this.jHosts = jiraHostSet(jiraHosts)
       this.ghHosts = githubHostSet(githubHosts)
+      this.bbsHosts = bitbucketServerHostSet(bitbucketServerHosts)
       this.rebuild(slot, messages)
       return this.result
     }
@@ -776,7 +918,7 @@ export class PullRequestLinkIndex {
     if (appended) {
       if (!this.tailTransient) addLinks(this.settled, this.tail)
       for (let index = previousLength; index < nextLength - 1; index += 1) {
-        addLinks(this.settled, linksInMessage(messages[index], this.hosts, this.jHosts, this.ghHosts))
+        addLinks(this.settled, linksInMessage(messages[index], this.hosts, this.jHosts, this.ghHosts, MAX_PULL_REQUEST_SOURCES, this.bbsHosts))
         if (roleCount(this.settled, 'agent') >= MAX_PULL_REQUEST_SOURCES) break
       }
       this.setTail(messages[nextLength - 1])
@@ -797,7 +939,7 @@ export class PullRequestLinkIndex {
     this.messages = messages
     this.settled = new Map()
     for (let index = 0; index < Math.max(0, messages.length - 1); index += 1) {
-      addLinks(this.settled, linksInMessage(messages[index], this.hosts, this.jHosts, this.ghHosts))
+      addLinks(this.settled, linksInMessage(messages[index], this.hosts, this.jHosts, this.ghHosts, MAX_PULL_REQUEST_SOURCES, this.bbsHosts))
       if (roleCount(this.settled, 'agent') >= MAX_PULL_REQUEST_SOURCES) break
     }
     this.setTail(messages.at(-1))
@@ -806,7 +948,7 @@ export class PullRequestLinkIndex {
 
   private setTail(message: ChatMessage | undefined): void {
     this.tailTransient = message?.role === 'streaming' || message?.role === 'chunk'
-    this.tail = linksInMessage(message, this.hosts, this.jHosts, this.ghHosts)
+    this.tail = linksInMessage(message, this.hosts, this.jHosts, this.ghHosts, MAX_PULL_REQUEST_SOURCES, this.bbsHosts)
   }
 
   private materialize(): void {

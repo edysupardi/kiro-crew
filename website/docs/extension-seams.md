@@ -38,9 +38,11 @@ POSTs the file context to the app's endpoint — see the App Kit publishing guid
 | Remote-instance provisioner forms | `components/remoteProvisionerRenderers.tsx` | `registerRemoteProvisionerRenderer()` to `getRemoteProvisionerRenderer()` / `canRenderRemoteProvisionerKind()` |
 | Bare-token autolink rules | `utils/autolinkRules.ts` | `registerAutolinkRules()` to `getAutolinkRules()` |
 
-Plus one **exported-transport** seam for edition-owned API methods and one
-**data-module** seam for syntax-highlighting languages. Neither is a registry; see
-"API methods" and "Highlighting languages" below.
+Plus two **exported-setter** seams for a value the core consumes itself (the
+product name and the feedback tracker), one **exported-transport** seam for
+edition-owned API methods and one **data-module** seam for syntax-highlighting
+languages. None is a registry; see "Product name", "Feedback tracker", "API
+methods" and "Highlighting languages" below.
 
 Other `register*()` functions in `src/` (built-in surfaces, command-palette
 providers, tool pills, terminal sockets) are core-internal wiring, not edition
@@ -196,8 +198,9 @@ loads later wins — today that is the core, and every variable its default bloc
 also sets silently overrides the edition's. Nothing errors: the picker shows
 the theme, the palette stays stock.
 
-The built-in themes never hit this because their blocks live in `index.css`
-itself, after the default block — same sheet, later, wins.
+The built-in themes never hit this because their blocks live in
+`src/styles/theme-palettes.css`, which `index.css` imports after the default
+block in `src/styles/design-tokens.css` — same sheet, later, wins.
 
 Prescription: prefix the edition's theme selectors with `html`, which wins on
 specificity regardless of load order:
@@ -407,7 +410,7 @@ ships in the edition's own overlay: this seam contributes only the picker entry.
 (core wins).
 
 **Theme branding reaches three consumers.** `getThemeBranding(colorTheme)` drives
-the shell chrome (resolved once in `shell/branding.ts`, which `App.tsx`'s header
+the shell chrome (resolved once in `shell/branding.ts`, which the shell's header
 and rail read), `WelcomeView.tsx` (the new-session brand mark), and
 `pages/chat/ChatFooter.tsx` (the turn-running loader). A registered theme's `logo`
 shows in the first two, falling back to the stock ghost mark when the theme
@@ -425,7 +428,7 @@ core has no per-theme favicon and falls back to `/logo.png`.
 mounts a status segment INSIDE the header's readout capsule, sharing its border,
 `|` dividers, and offline tint, rather than as a standalone sibling pill. Choose
 this over `registerTopBarWidgets` when the readout must join that grouping (a
-credential-TTL or spend segment, say). `App.tsx` splices registered segments after
+credential-TTL or spend segment, say). `shell/topbar/shellHeader.tsx` splices registered segments after
 the core segments in ascending `order`; each renders with an `offline` prop and is
 isolated in its own `ErrorBoundary` with `fallback={null}`. A segment must not
 change its size in response to the header's collapse classes (`tbl-N` / `tbr-N`)
@@ -450,7 +453,7 @@ is **not announced**, so an interactive or gap-sized decoration degrades silentl
 through `registerTopBarWidgets` instead.
 
 **Rung thresholds are locale-measured.** The container-query breakpoints in
-`.topbar`'s ladder (`src/index.css`) are the measured content width of each
+`.topbar`'s ladder (`src/styles/shell-chrome.css`) are the measured content width of each
 readout tier plus a margin, taken through
 `website/capture/topbar-search-variants.tsx`. The base rungs are measured in one
 locale; the update-pill shift (below) is measured across every shipped locale. A
@@ -463,7 +466,7 @@ folds built-ins wherever the container rungs still leave the group overflowing.
 
 **Width budget for both top-bar seams.** The header is a three-track grid whose
 side groups are pure remainder (`minmax(0,1fr)`, no floor) — see `.topbar` in
-`src/index.css`. The actions group therefore does NOT grow to fit its contents;
+`src/styles/shell-chrome.css`. The actions group therefore does NOT grow to fit its contents;
 it gets what the window leaves after the centred search, and its built-in
 readouts give that space back through container-query rungs. Registered widgets do
 not participate in those rungs, and registered capsule segments only in the
@@ -682,6 +685,52 @@ Scope: catalog strings only, and which catalog keys keep the literal name is
 [i18n-catalog](i18n-catalog.md#the-product-name-is-an-interpolation-variable)'s
 rule. The shell logo and welcome mark are the theme-branding seam's job; the chat
 bot display name stays `dashboard.bot_name`.
+
+## Feedback tracker: exported setter, not a registry
+
+Three surfaces send a user to the project's issue tracker, and the stock build
+points every one of them at the public GitHub repository: the top bar's **Request
+a Feature** (the hidden prompt it seeds, which tells the agent to search, label
+and file with `gh`; the copy/paste route that prompt offers; and the
+non-inference form link the `usage_limit` row shows when the plan is spent,
+#13342), the prerelease **report it** link in Settings › About, and the
+false-positive report a redaction card offers. On an edition where that
+repository is unreachable each of them dead-ends, and the agent, handed `gh`
+instructions it cannot follow, improvises a fallback nobody designed.
+
+`setFeedbackTracker({ prompt, issueUrl? })` (exported from
+`src/feedbackTracker.ts`) retargets them in one call from the composition root.
+The readers go through `feedbackTracker()`, which answers `{ prompt, issueUrl,
+formUrl }`; the public values stay as constants in `src/prompts/featureRequest.ts`,
+so the stock build is byte-identical. The seam seals on its first read: a later
+call throws in dev and is ignored in production, because a set that landed after
+one surface had rendered would retarget some surfaces and not others.
+
+Two rules a caller must know:
+
+- **The prompt is the fix, and it is replaced wholesale, never templated.** The
+  public prompt already carries its own tracker URL and its own filing steps
+  (`gh issue list` for duplicates, `gh label list` for the live taxonomy, `gh
+  issue create`, the 200-character pre-filled-URL rule), all GitHub's; an
+  edition's tracker has its own, so the edition writes the whole prompt, URL
+  included, in the agent's language. `featureRequestLabels.test.ts` pins the
+  PUBLIC prompt's label rules only.
+- **`issueUrl` is optional** and only moves the three links that do not go
+  through a prompt: the About link, the redaction report, and the spent-plan exit
+  (`formUrl`, which becomes `issueUrl` since an edition tracker has no public-repo
+  template form). Without it those links keep the public tracker.
+
+Validation runs through `reportSeamCollision`: `prompt` must be non-empty and
+`issueUrl`, when given, an absolute `http(s)` URL (a relative path or a
+`javascript:` URL is refused). A refused call leaves the stock tracker in place,
+so the surfaces keep working. `src/test/feedbackTrackerSeam.test.ts` exercises
+the seam on a fresh module per test, since the seal is a module singleton.
+
+Out of scope: the **Report a Problem** flow's issue link is built by the
+gateway (`diagnostics.github_issue_url`), so the backend `feedback` Composed
+Platform Provider retargets it
+([platform-context](../../docs/system-specs/modules/platform-context.md)), not
+this seam. An edition sets both.
 
 ## API methods: exported transport, not a registry
 

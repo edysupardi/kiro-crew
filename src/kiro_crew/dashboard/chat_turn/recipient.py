@@ -1,4 +1,5 @@
-"""Who a cross-surface delivery may reach: the recipient principal ladder and the channel target."""
+"""Who a cross-surface delivery may reach and the delivery itself: the recipient principal
+ladder, the channel target, and the linked-Slack and cross-surface legs."""
 
 from __future__ import annotations
 
@@ -6,16 +7,22 @@ import hashlib
 import logging
 from typing import TYPE_CHECKING, Any
 
+from kiro_crew.dashboard.chat_utils import slack_mirror_is_paused
+from kiro_crew.messaging.display_safety import redact_for_display
+from kiro_crew.messaging.egress import channel_egress_parts, send_channel_parts
+from kiro_crew.messaging.link import CHAT_TYPE_DIRECT, parse_session_key
+from kiro_crew.messaging.renderer import split_options_trailer
+from kiro_crew.mirror_admission import admission_required, verify_mirror_admission
+from kiro_crew.platform import redact_via_context
+
 if TYPE_CHECKING:
     from kiro_crew.dashboard.chat_runner import (
         _RECIPIENT_LOGGED,
         _RECIPIENT_LOGGED_CAP,
-        CHAT_TYPE_DIRECT,
         SLACK_NAMESPACE,
         logger,
-        parse_session_key,
+        mirror_is_paused,
         sel,
-        verify_mirror_admission,
     )
 
 
@@ -166,6 +173,92 @@ def _recipient_principal(session_key: str, link: Any, transport: Any) -> str:
         )
         return ""
     return hint
+
+
+def _is_origin_location(state: Any, session_key: str, link: Any) -> bool:
+    """Whether *link* is the conversation the gateway saw *session_key* read in.
+
+    ``SessionManager.get_origin_link`` is held in gateway memory and written only
+    by a transport's inbound path from the conversation's real send target, so it
+    is out of reach of in-sandbox code. Compared by location; any failure to read
+    it answers ``False``.
+    """
+    getter = getattr(getattr(state, "sessions", None), "get_origin_link", None)
+    if getter is None:
+        return False
+    try:
+        origin = getter(session_key)
+    except Exception:
+        return False
+    if origin is None:
+        return False
+    try:
+        return all(
+            getattr(origin, name, None) == getattr(link, name, None)
+            for name in ("channel_type", "channel_id", "thread_id")
+        )
+    except Exception:
+        return False
+
+
+def _key_named_row_admitted(state: Any, session_key: str, link: Any) -> bool:
+    """Whether a send to *link* on behalf of *session_key* may proceed past the row.
+
+    Answers ``True`` outright for a session whose key names nobody (a dashboard
+    ``chat-*`` key): its row is judged by :func:`_recipient_principal`. For a
+    KEY-NAMED session (``mirror_admission.admission_required``) the recipient check
+    is handed the peer off the KEY, so it cannot tell which conversation the row
+    points at, and the session map is writable by in-sandbox code: a row whose
+    ``channel_id`` was rewritten to another allow-listed user's DM would pass and
+    deliver this session's replies, cron results and notices there. Such a row is
+    admitted only when
+
+    * its admission verifies (:func:`verify_mirror_admission`): a MAC the gateway
+      minted over this key and this whole location when the conversation's own peer
+      bound it or a dashboard / ``!sessions`` link authorized it; or
+    * it IS the conversation the gateway saw this session read in
+      (:func:`_is_origin_location`), a record no agent can write; or
+    * it addresses the key's own peer by id, on the key's own channel, with no
+      thread: the peer the roster check is handed is then the very destination,
+      so a rewrite cannot move it.
+
+    Anything else -- an unsigned row from before rows were signed, a rewritten or
+    moved one, one signed under a rotated key -- is refused, audited, and logged
+    once naming the remedy: re-bind it from the conversation or the dashboard.
+    """
+    if not admission_required(session_key):
+        return True
+    if verify_mirror_admission(session_key, link):
+        return True
+    if _is_origin_location(state, session_key, link):
+        return True
+    peer = _session_principal(session_key)
+    parsed = parse_session_key(session_key)
+    if (
+        peer
+        and parsed is not None
+        # A user id means that user only on its own surface: the same digits on
+        # another channel are someone else, so a cross-channel row stays signed.
+        and getattr(link, "channel_type", None) == parsed.surface
+        and not getattr(link, "thread_id", None)
+        and getattr(link, "channel_id", None) == peer
+    ):
+        # Addressed to the key's own peer by id: where a conversation id IS the
+        # user id (Telegram, iMessage) and the cron leg's user-id rung, which
+        # resolves the postable DM through the transport for exactly this peer.
+        return True
+    channel_type = str(getattr(link, "channel_type", "") or "channel")
+    _audit_admission_refusal(session_key, link)
+    _log_once(
+        ("unadmitted-key-named", channel_type, str(getattr(link, "channel_id", "") or "")),
+        logging.WARNING,
+        "cross-surface: a %s channel session's mirror row carries no valid gateway "
+        "admission (written before rows were signed, rewritten outside the gateway, or "
+        "signed under a rotated key); refusing the send. Re-bind it: send a message or "
+        "the channel's link command in that conversation, or re-link from the dashboard",
+        channel_type,
+    )
+    return False
 
 
 def _audit_admission_refusal(session_key: str, link: Any, *, outcome: str = "unverified") -> None:
@@ -385,6 +478,12 @@ def _resolve_channel_target(
     # every dashboard-driven reply into such a mirror would be refused right here.
     if not check_recipient:
         return link, transport
+    # A KEY-NAMED session's principal comes off its key, so the roster check
+    # below cannot tell WHICH conversation the row points at: the row itself must
+    # be one the gateway wrote (``_key_named_row_admitted``). A caller-supplied
+    # principal came with its own in-memory conversation id and is judged as is.
+    if principal is None and not _key_named_row_admitted(state, session_key, link):
+        return None
     if not _authorize_recipient(
         transport,
         link.channel_type,
@@ -475,3 +574,183 @@ def slack_publication_withheld(state: Any, slot: Any, channel_id: Any, thread_ts
     from kiro_crew.dashboard.session_control import publication_withheld
 
     return publication_withheld(state, slot, (None, str(thread_ts), str(channel_id)))
+
+
+async def _deliver_linked_slack_message(
+    state: Any,
+    slot: Any,
+    sessions: Any,
+    session_key: str,
+    message: str,
+) -> None:
+    """Mirror one system message to a linked Slack thread."""
+    slack_client = getattr(state, "slack_client", None)
+    if slack_client is None:
+        return
+    if slack_mirror_is_paused(state, session_key):
+        return
+    thread_ts = getattr(slot, "_slack_thread_ts", "")
+    channel_id = getattr(slot, "_slack_channel", "")
+    if (not thread_ts or not channel_id) and sessions is not None:
+        thread_ts, channel_id = sessions.get_slack_link(session_key)
+    if not (thread_ts and channel_id):
+        return
+    try:
+        await slack_client.post_message(channel_id, message, thread_ts)
+    except Exception:
+        logger.debug("Failed to deliver a message to the linked Slack thread", exc_info=True)
+
+
+def _cross_surface_reply_text(segments: list[str], trailing: str) -> str:
+    """The text :func:`_deliver_cross_surface_reply` mirrors for a completed turn.
+
+    *segments* are the turn's own reply rows in window order, and the result joins
+    all of them, as the transcript shows the answer. *trailing* is
+    ``turn.assistant_text``: a tool boundary flushes it to a row and resets it, so a
+    turn that answers before its last tool call holds only the fragment after that
+    call in it, or nothing. It is used only when no row is named.
+
+    Only the FINAL segment keeps its ``[OPTIONS:]`` trailer, which the egress leg
+    renders as numbered choices. An earlier segment's trailer asked a question the
+    turn has since moved past, so it is stripped rather than offered: an answer to
+    it would arrive as a reply to a superseded ask. The Slack leg follows the same
+    rule.
+    """
+    if not segments:
+        return trailing
+    earlier = [split_options_trailer(s)[0] for s in segments[:-1]]
+    return "\n\n".join([*(e for e in earlier if e), segments[-1]])
+
+
+async def _deliver_cross_surface_reply(
+    state: Any, session_key: str, assistant_text: str, *, slot: Any = None
+) -> None:
+    """Deliver a completed dashboard reply to a linked NON-Slack channel.
+
+    The channel-neutral leg of cross-surface sync: reads the session's outbound
+    mirror link, resolves the registered ``MessagingTransport`` for that channel
+    and pushes the reply via ``send_message`` — capability-gated on
+    ``supports_proactive_send``. Slack keeps its dedicated rich streaming mirror
+    inline in the turn loop, so it is skipped here. Silent no-op when the session
+    has no non-Slack mirror, the transport is not registered, or the channel
+    cannot send proactively (WhatsApp outside its 24-hour window). A channel whose
+    push is per-TARGET rather than blanket answers that in ``send_message`` itself
+    — WeCom pushes through ``aibot_send_msg`` but only into a conversation the user
+    has already written to. Best-effort: a delivery failure never disrupts the
+    dashboard turn.
+
+    The publish decision and the delivery rest on ONE read of the binding
+    (``get_mirror_link`` and ``get_slack_link``, through
+    ``session_control._read_mirror_binding``): the row is judged against the
+    admissions *slot*'s turn recorded (``session_control.publication_withheld``, the
+    audience fence) and the send resolves its transport from that same row. The
+    mirror-link writer runs off the loop (``chat_mirror._claim_binding`` under
+    ``asyncio.to_thread``), so a decision taken on one read and a send resolved from
+    another could straddle a retarget and publish a transcript the decision never
+    saw into the new room. An unreadable store delivers nothing. *slot* carries the
+    record; a caller with no slot has no turn and no admissions, and gets the plain
+    delivery.
+    """
+    if not assistant_text:
+        return
+    # Disconnected: the binding is retained so a reply there still resolves here,
+    # but turn output stops. Asked before resolving so a muted channel costs no
+    # transport lookup.
+    if mirror_is_paused(state, session_key):
+        return
+    # circular import: session_control imports this package's modules at module level.
+    from kiro_crew.dashboard.session_control import _read_mirror_binding, publication_withheld
+
+    sessions = getattr(state, "sessions", None)
+    if getattr(sessions, "get_mirror_link", None) is None:
+        return
+    binding = _read_mirror_binding(sessions, session_key)
+    if publication_withheld(state, slot, binding):
+        logger.info(
+            "withholding cross-surface reply for %s: %d unresolved audience "
+            "fence(s) (peer steers into, or transcript reads by, this turn)",
+            session_key,
+            len(slot._steer_audience_fences),
+        )
+        return
+    if binding is None:
+        logger.debug(
+            "cross-surface: mirror binding unreadable for %s; skipping mirror", session_key
+        )
+        return
+    target = _resolve_channel_target(state, session_key, binding[0])
+    if target is None:
+        return
+    link, transport = target
+    # Strip, display-redact, number the ``[OPTIONS:]`` choices (``send_message``
+    # takes none, so the mirror builds no button), chunk and send: the shared
+    # unattended-egress leg, ``messaging.egress``. Chunking keeps a long reply
+    # whole rather than hard-truncated by the transport (Telegram caps at 4096).
+    parts = await channel_egress_parts(assistant_text, transport.capabilities, number_options=True)
+    try:
+        await send_channel_parts(transport, link.channel_id, parts, thread_id=link.thread_id)
+        logger.info(
+            "cross-surface: mirrored reply to %s:%s (%d part(s))",
+            link.channel_type,
+            link.channel_id,
+            len(parts),
+        )
+    except Exception:
+        logger.debug("Failed to mirror reply to %s", link.channel_type, exc_info=True)
+
+
+async def _deliver_cross_surface_user_message(
+    state: Any, session_key: str, user_message: str
+) -> None:
+    """Mirror the user's dashboard message to a linked NON-Slack channel.
+
+    The user-message half of the channel-neutral cross-surface leg: before the
+    turn's reply is delivered, push what the user typed in the dashboard to the
+    linked channel so the remote conversation reads coherently (question then
+    reply), matching Slack's ``💬 _msg_`` echo. Capability-gated and best-effort,
+    mirroring ``_deliver_cross_surface_reply``. Slack is handled by its dedicated
+    streaming mirror; the caller guards out slash commands and recovery turns.
+    """
+    if not user_message:
+        return
+    # Same gate as the reply leg: these are the two sites that carry turn output,
+    # and a disconnect silences both or the remote conversation reads as a
+    # question with no answer.
+    if mirror_is_paused(state, session_key):
+        return
+    target = _resolve_mirror_target(state, session_key)
+    if target is None:
+        return
+    link, transport = target
+    try:
+        await transport.send_message(
+            link.channel_id,
+            f"💬 {_prepare_mirror_msg(user_message)}",
+            thread_id=link.thread_id,
+        )
+        logger.info(
+            "cross-surface: mirrored user message to %s:%s",
+            link.channel_type,
+            link.channel_id,
+        )
+    except Exception:
+        logger.debug("Failed to mirror user message to %s", link.channel_type, exc_info=True)
+
+
+def _prepare_mirror_msg(raw_user_message: str) -> str:
+    """Prepare a user message for the cross-surface / Slack mirror echo.
+
+    Redacts through the canonical ``redact_via_context`` egress shim over the
+    FULL text, then truncates — bounding first can cut a credential at the
+    boundary into fragments no redaction regex matches, so it would escape into
+    the mirrored echo. The shim's standalone fallback is the OSS baseline
+    ``security.redact``, so a standalone host keeps the previous redaction
+    behaviour.
+
+    Scanned in DISPLAY form as well, like the assistant leg above and the Slack
+    chokepoint: this echo goes to a channel without passing a renderer, and a
+    credential the user typed with markdown between its halves is whole once the
+    client renders the markup away.
+    """
+    safe, _ = redact_for_display(raw_user_message or "", redact_via_context)
+    return safe[:500]

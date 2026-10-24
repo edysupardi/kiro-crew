@@ -15,7 +15,7 @@
  * The chat SidePanel has two standing entries here: the crewmate's generated
  * Dashboard and the workspace-scoped Files browser. Side Chat remains dynamic.
  * Profile owns Notes, Schedules, driven Sessions and browser-local Goals.
- * Configuration still writes through CrewEditorDialog.
+ * Configuration still writes through CrewEditorModal.
  *
  * Identity is the exact CREW NAME, never the slug: slugification is lossy
  * (`Oncall` and `oncall` share a slug and therefore one thread directory),
@@ -59,17 +59,16 @@
  */
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router-dom'
-import { Loader2 } from 'lucide-react'
+import CrewEditorChunkLoading from '../../components/crew/CrewEditorChunkLoading'
 import NewCrewmateDialog, { type CreatedCrewmate, type CrewmateDraft } from './NewCrewmateDialog'
 import { useTranslation } from 'react-i18next'
 import { type MemberRosterRow } from '../../api/client'
 import { MEMBERS_ROSTER_QUERY_KEY, memberThreadQueryKey, type MemberThreadOutcome } from '../../api/membersQuery'
 import { skipToken, useQuery, useQueryClient } from '@tanstack/react-query'
-import { i18nT } from '../../i18n/t'
 import { useAppSelector } from '../../store'
 import CrewMonitoredAvatar from '../../components/crew/CrewMonitoredAvatar'
 import { PROFILE_FACE_PX } from './CrewProfilePanel'
-import { createPortal } from 'react-dom'
+import { OverlayPortal } from '../../components/overlayRoot'
 import { useGuideOpenedSurface } from '../../guide/useGuideOpenedSurface'
 import { useGuideRevealScope } from '../../guide/GuideRevealScope'
 import { useGuidePredicate, useGuideSelection } from '../../guide/guidePredicates'
@@ -104,29 +103,7 @@ export {
 // splits out of the main App chunk — it is only needed once the identity pill
 // opens the modal, and keeping it eager pushed App over its bundle budget. The
 // hook stays eager: it is called every render to drive the pill's open state.
-const CrewEditorDialog = lazy(() => import('../../components/crew/CrewEditorDialog'))
-// A tiny NON-lazy fallback shown while the CrewEditorDialog chunk downloads on a
-// cold-cache first open, so the pill click gives immediate feedback instead of
-// rendering nothing until the chunk lands. Deliberately plain (no Radix dialog)
-// so it stays out of the lazy split's purpose — keeping the editor's code off the
-// main App chunk. The hook's own `crew-editor-loading` dialog takes over once the
-// chunk is in and the roster read is still pending.
-function CrewEditorChunkLoading() {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-bg/60"
-      role="dialog"
-      aria-busy="true"
-      aria-label={i18nT('pages.chatPage.loading')}
-      data-testid="crew-editor-chunk-loading"
-    >
-      <div className="flex items-center gap-2 rounded-lg border border-border bg-bg-elevated px-5 py-4 text-[13px] text-muted shadow-lg">
-        <Loader2 size={16} className="lucide-inline animate-spin" />
-        {i18nT('pages.chatPage.loading')}
-      </div>
-    </div>
-  )
-}
+const CrewEditorModal = lazy(() => import('../../components/crew/CrewEditorModal'))
 
 /** Creating a crewmate happens in a modal over this page: the header
  *  "+" New crewmate, the empty-state hero and the switcher's New crewmate open
@@ -138,7 +115,7 @@ function CrewEditorChunkLoading() {
  *  (one write path, several front doors); this page's card also asks for the
  *  crewmate's first greeting.
  *  Editing an existing crewmate also happens IN this page now (CREW-18688): the
- *  Profile card's edit controls open `CrewEditorDialog` as a modal, driven by the
+ *  Profile card's edit controls open `CrewEditorModal` as a modal, driven by the
  *  shared `useCrewEditor` state machine — the SAME editor the crew manager
  *  mounts, so there is still one write path, reached from two surfaces. */
 
@@ -178,7 +155,7 @@ function CrewFaceFlight({ flight, onDone }: { flight: FaceFlight; onDone: () => 
     })
     return () => ctrl.stop()
   }, [flight, onDone])
-  return createPortal(
+  return <OverlayPortal>
     <div
       ref={ref}
       className="fixed left-0 top-0 z-[60] pointer-events-none origin-top-left will-change-transform"
@@ -194,9 +171,8 @@ function CrewFaceFlight({ flight, onDone }: { flight: FaceFlight; onDone: () => 
         size={PROFILE_FACE_PX}
         working="full"
       />
-    </div>,
-    document.body,
-  )
+    </div>
+  </OverlayPortal>
 }
 
 export default function MembersPage() {
@@ -234,7 +210,7 @@ export default function MembersPage() {
 
   // CREW-18688: editing a bot opens the crew editor as a MODAL on this page,
   // instead of navigating to /capabilities?tab=crews. The editor's whole
-  // state machine lives in useCrewEditor; CrewEditorDialog renders it. The
+  // state machine lives in useCrewEditor; CrewEditorModal renders it. The
   // identity pill in the thread header sets `editingCrew`, which drives the hook.
   const [editingCrew, setEditingCrew] = useState('')
   // The profile card (crewmate-panel IA): a floating hover card centred over the
@@ -826,6 +802,7 @@ export default function MembersPage() {
         scrollActiveRowIntoView={scrollActiveRowIntoView} gone={gone} createOpen={createOpen}
         openAdvanced={openAdvanced} openQuick={openQuick} postCreateError={postCreateError}
         createHeld={createHeld} slotKeyOf={slotKeyOf}
+        faceOnStageFor={thread.entranceFaceHidden && active ? active.name : ''}
       />)}
 
       {/* DM thread */}
@@ -923,7 +900,7 @@ export default function MembersPage() {
           because the hook's own loading dialog lives inside the lazy chunk. When no
           edit is requested the fallback is null, so a closed dialog renders nothing. */}
       <Suspense fallback={editingCrew ? <CrewEditorChunkLoading /> : null}>
-        <CrewEditorDialog ctl={crewEditor} />
+        <CrewEditorModal ctl={crewEditor} />
       </Suspense>
     </div>
     </RunInTerminalScope.Provider>

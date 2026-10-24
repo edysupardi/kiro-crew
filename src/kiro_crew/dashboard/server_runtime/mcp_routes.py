@@ -180,7 +180,7 @@ def _register_mcp_routes(app: web.Application) -> None:
     # calling the module's own `register_agent_panel_routes`: that call would
     # import the module at boot, which is what the boot-path rule forbids for an
     # optional subsystem. The paths are duplicated from that function, and
-    # `test_agent_panel_routes` pins both spellings against each other.
+    # `test_agent_panel_routes_allocation` pins both spellings against each other.
     app.router.add_get(
         "/api/agent-panel/templates", _deferred("agent_panel", "api_agent_panel_templates")
     )
@@ -307,6 +307,7 @@ def _register_mcp_routes(app: web.Application) -> None:
         ("POST", "/api/member/self/goals/read", "api_member_self_goals_read"),
         ("POST", "/api/member/self/goals/key-result", "api_member_self_key_result"),
         ("POST", "/api/member/self/goals/report", "api_member_self_goal_report"),
+        ("POST", "/api/member/self/notes", "api_member_self_notes"),
     ):
         app.router.add_route(_method, _path, _deferred("member_goals", _name))
     # Spelled with ``add_put``: the ``crewmate.goal``, ``crewmate.key_results``
@@ -324,6 +325,21 @@ def _register_mcp_routes(app: web.Application) -> None:
         "/api/members/{slug}/goals/schedules",
         _deferred("member_goals", "api_member_goals_schedules"),
     )
+    # A ``crewmate.import`` card's file step writes (and its Undo takes back) the
+    # carried files; card steps only, owner only.
+    app.router.add_post(
+        "/api/members/{slug}/import-files",
+        _deferred("crewmate_import_files", "api_member_import_files"),
+    )
+    app.router.add_delete(
+        "/api/members/{slug}/import-files",
+        _deferred("crewmate_import_files", "api_member_import_files_undo"),
+    )
+    # The ``crewmate.dashboard_page`` card's yes: it wakes the crewmate to write its page.
+    app.router.add_post(
+        "/api/members/{slug}/dashboard/page-offer",
+        _deferred("member_page_offer", "api_member_page_offer"),
+    )
     # Change cards. Same split as the guide: the agent half is MCP-only under the
     # strict "/api/cards/agent" prefix, the browser half is owner-only cookie auth.
     # The paths are duplicated from ``change_cards.register_change_card_routes``,
@@ -339,6 +355,8 @@ def _register_mcp_routes(app: web.Application) -> None:
         ("POST", "/api/cards/{card_id}/preview", "api_cards_preview"),
         ("POST", "/api/cards/{card_id}/cancel", "api_cards_cancel"),
         ("POST", "/api/cards/{card_id}/dismiss", "api_cards_dismiss"),
+        ("POST", "/api/members/import", "api_members_import"),
+        ("GET", "/api/members/import/{sha256}/files", "api_members_import_files"),
     ):
         app.router.add_route(_method, _path, _deferred("change_cards", _name))
     app.router.add_get(
@@ -497,6 +515,11 @@ def _register_mcp_routes(app: web.Application) -> None:
     # dashboard-less state simply has no owner sockets to deliver to.
     app.router.add_post("/api/computer-use/frame", handlers.api_computer_use_frame)
     app.router.add_post("/api/session-keepalive", handlers.api_session_keepalive)
+    # Chinese dictionary words for an mcp-core session search: the gateway holds
+    # the host's one copy of the dictionary. In _STRICT_INTERNAL_API_PATHS, and the
+    # handler re-checks loopback and the secret itself. Deferred so the boot path
+    # never imports the segmenter.
+    app.router.add_post("/api/search/segment", _deferred("search_segment", "api_search_segment"))
     app.router.add_post("/api/session-directive", handlers.api_session_directive)
     app.router.add_get("/api/session-tool-policy", handlers.api_session_tool_policy)
     app.router.add_post("/api/slack-profile", handlers.api_slack_profile)

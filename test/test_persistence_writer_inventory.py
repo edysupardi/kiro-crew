@@ -62,7 +62,7 @@ GATED_AUTOMATIC = {
     "taskrunner_parts/run_reporting.py::_extract_lesson",
     # The enforcement point behind the learn_add MCP tool: every transport that
     # posts a lesson (tool, dashboard, direct HTTP) is refused by this one check.
-    "dashboard/handlers/cron.py::api_lessons_create",
+    "dashboard/handlers/cron_lessons.py::api_lessons_create",
     # The "Dashboard: ..." history line every owner mutation leaves in Global
     # memory: automatic, so it is skipped while the switch is off.
     "dashboard/handlers/change_cards.py::_record_memory",
@@ -89,12 +89,14 @@ EXEMPT = {
     # Store-internal writes. The storage layer is deliberately NOT the gate (see
     # the module docstring): these are reached from the classified entry points
     # or from an explicit migration/import the user asked for.
-    "vector_memory.py::write_lesson": "storage primitive",
-    "vector_memory.py::write_episodic": "storage primitive (bool wrapper of write_episodic_outcome)",
-    "vector_memory.py::seed_item_if_absent": "storage primitive",
-    "vector_memory.py::import_memory": "explicit user-initiated import",
-    "vector_memory.py::migrate_from_markdown": "explicit one-shot migration",
-    "vector_memory.py::promote_episodic_patterns": "explicit dashboard action",
+    "vector_memory_runtime/lesson_write.py::write_lesson": "storage primitive",
+    "vector_memory_runtime/episodic_write.py::write_episodic": (
+        "storage primitive (bool wrapper of write_episodic_outcome)"
+    ),
+    "vector_memory_member.py::seed_item_if_absent": "storage primitive",
+    "vector_memory_runtime/bulk_ingest.py::import_memory": "explicit user-initiated import",
+    "vector_memory_runtime/bulk_ingest.py::migrate_from_markdown": "explicit one-shot migration",
+    "vector_memory_runtime/bulk_ingest.py::promote_episodic_patterns": "explicit dashboard action",
     # A one-shot, user-initiated import (merge-only, never tombstones).
     "onboarding_import.py::_write_instruction": "user-initiated one-shot import",
     "onboarding_import.py::_write_memory": "user-initiated one-shot import",
@@ -112,7 +114,7 @@ EXEMPT = {
     ),
     # The CLI's own explicit `kirocrew learn add`, which carries its own check
     # (a refusal message rather than a silent skip) — see cli_commands.
-    "cli_commands.py::_learn": "carries its own refusal",
+    "cli_commands_learn.py::_learn": "carries its own refusal",
     # The app's nightly sweep gates its only caller, routes._index_ledger_safely,
     # before constructing the vector store. This function stays policy-free so
     # its isolated projection tests can inject a fake store directly.

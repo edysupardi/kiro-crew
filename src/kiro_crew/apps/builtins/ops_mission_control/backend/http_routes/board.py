@@ -83,7 +83,7 @@ def _slot_state(request: web.Request, slot_key: str) -> dict[str, Any] | None:
         return None
 
     # `to_dict()` is the slot's PUBLIC serializer and it already derives `pending_approval`
-    # from the approval futures (state.py). Reading `slot._approval_futures` directly is
+    # from the approval futures (state_parts/slot_transcript.py). Reading `slot._approval_futures` directly is
     # wrong: a private attribute is not a contract, so a core refactor that renamed it
     # would silently turn "waiting on you" into "progressing" on this board, with nothing
     # failing anywhere. Asking the owner is the fix.
@@ -296,7 +296,7 @@ async def _handle_incidents(request: web.Request) -> web.StreamResponse:
     # single-incident ``GET /incident`` route cannot be admitted to
     # internal-secret callers without prefix-admitting the human-only
     # ``/incident/proposal/decide`` (see ``_MIXED_INTERNAL_API_PATHS`` in
-    # dashboard/server.py), so SOP-driven agents read one incident here.
+    # dashboard/server_internal_paths.py), so SOP-driven agents read one incident here.
     id_filter = request.query.get("id", "").strip()
     # Off-loop: full index parse on a polled endpoint.
     index = await asyncio.to_thread(store.read_index)

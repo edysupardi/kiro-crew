@@ -1100,6 +1100,10 @@ Before generation, authoring searches the saved global definition library and
 supplies up to three relevant local examples. The model may adapt one and declare
 its exact `id@revision` in `META["adapted_from"]`; otherwise it authors from
 scratch. A named saved workflow is never re-authored or reinterpreted.
+Each example's source is untrusted: it sits between an open and a close line that
+carry a fresh random token per prompt, is scrubbed by `neutralize_untrusted_text`,
+and the prompt says the fenced text is reference data, never instructions, so a
+saved source cannot close its own fence or forge another reference.
 
 Authoring runs in a **fresh, isolated, ephemeral** session (`wf-author:<id>`).
 `wf-author:` is a stateless SessionManager prefix, so acquisition never consults
@@ -1769,10 +1773,10 @@ refusal or a `WorkflowMemoryError`, both raised with fixed text (a test parses
 every raise site to keep it so). Any other cause, such as an `OSError` or a
 memory-store refusal that formats one and its path into its own text, stays in
 the log only. When either reason is one of
-the two a crewmate's own binding produces (`MEMBER_ON_GLOBAL_REASON`,
+the two a mate's own binding produces (`MEMBER_ON_GLOBAL_REASON`,
 `MEMBER_WITHOUT_IDENTITY_REASON`), the text adds the two ways to run a workflow:
-a chat with no crewmate picked (the default template on Global), or a crewmate
-with its own memory. A crewmate on Global V1 is still refused: member memory
+a chat with no mate picked (the default template on Global), or a mate
+with its own memory. A mate on Global V1 is still refused: member memory
 never substitutes Global. A refusal that names no reason keeps the generic text
 "Workflow memory is unavailable; no Global fallback was used."
 

@@ -12,7 +12,7 @@ import ErrorNotice from '../../components/ErrorNotice'
 import FolderGlyph from '../../components/FolderGlyph'
 import { useQuery } from '@tanstack/react-query'
 import { useLocation } from 'react-router-dom'
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from '../../components/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from '../../components/ui/dropdown-menu'
 import { setCloseRefused } from '../../store/chatSlice'
 import { api } from '../../api/client'
 import { isInstancesDisabledError } from '../../utils/instancesDisabled'
@@ -21,13 +21,12 @@ import { Btn, IconButton } from '../../components/ui'
 import SimpleSelect from '../../components/SimpleSelect'
 import { isEmbeddedPane } from '../../lib/embedded'
 import { SearchFilterBar, FilterMenuButton, FilterChip, FILTER_CHIP_ROW_CLS, FilterMenuLabel, FilterMenuContent } from '../../components/SearchFilterBar'
-import { safeSetItem } from '../../utils/safeStorage'
 import { FOLDER_SORT_MODES, folderHasCreatedStamp, type FolderSortMode } from '../../utils/folderTree'
 import { type RecentUnit, RECENT_WINDOW_PRESETS, formatRecentWindow } from '../recentWindow'
-import { SESSION_SORT_STORAGE_KEY } from '../chat/sessionOrder'
 import { STALE_COLLAPSE_PRESETS_MS } from '../staleCollapse'
-import type { SortKey } from '../chat/sessionOrder'
+import { SORT_LABEL_KEY, type SortKey } from '../chat/sessionOrder'
 import { i18nT } from '../../i18n/t'
+import { sessionDisplayTitle } from '../../utils/sessionDisplayTitle'
 import { fmtList } from '../../i18n/format'
 import type { SessionFilterKey } from './types'
 import { SESSION_FILTERS } from './filters'
@@ -91,16 +90,12 @@ const SORT_OPTIONS: { value: SortKey }[] = [
   { value: 'created-asc' },
   { value: 'name-asc' },
   { value: 'name-desc' },
+  // The person's own drag order, under Name. A drop between two rows in any
+  // sort switches to it, so it is checked whenever the list is in that order.
+  { value: 'manual' },
 ]
-/** Catalog key per sort option — same resolvable shape as `FILTER_LABEL_KEY`. */
-export const SORT_LABEL_KEY: Record<SortKey, string> = {
-  'date-desc': 'pages.chatSidebar.sort_newest',
-  'date-asc': 'pages.chatSidebar.sort_oldest',
-  'created-desc': 'pages.chatSidebar.sort_created_newest',
-  'created-asc': 'pages.chatSidebar.sort_created_oldest',
-  'name-asc': 'pages.chatSidebar.sort_name_asc',
-  'name-desc': 'pages.chatSidebar.sort_name_desc',
-}
+// Kept beside `SortKey`, where the manual order's notice reads it too.
+export { SORT_LABEL_KEY }
 /** Catalog key per folder sort mode -- the "Folder order" rows in the same menu.
  *  Three rows because there are three modes; the list itself is
  *  `FOLDER_SORT_MODES`, so a fourth mode fails typing here rather than rendering
@@ -149,17 +144,17 @@ function RemoteCrewNamesError() {
 export function renderSearchDock(shell: SidebarScope): { field: React.ReactNode; shelf: React.ReactNode } {
   const { activeFilters, activeModelKeys, activeModelRows, activeTagIds, activeTagNames, autoTitleError,
     availableLanes, boardLaneActive, changeRecentUnit, clearHiddenFilters, clearModelFilter, clearTagFilter,
-    closeRefused, columnsError, columnsFailed, commitRecentAmount, conductorView, connected, cycleLane, dispatch,
+    closeRefused, columnsError, columnsFailed, commitRecentAmount, conductorView, connected, cycleLane, dismissSortError, dispatch,
     filterCounts, filterHiddenFolders, filterSortOpen, filtersPaused, flatLaneActive, folderActionError,
     folderFilterRows, folderOfflineNotice, folderReorderHint, folderReorderHintRef, folderRowsDrawn, folderSortMode,
     folderSortMut, folderSortRead, folders, foldersError, foldersFailed, foldersShelved,
     hasRemoteExecutedRow, hiddenFilters, hiddenFolderCount, instanceSessions, isMobile, lane,
-    laneSwitchLabel, listNarrowed, modelFilterInverted, modelFilterRows, newChatError, nextLane,
+    laneSwitchLabel, listNarrowed, manualOrderError, modelFilterInverted, modelFilterRows, newChatError, nextLane, pinnedOrderError,
     recentAmountDraft, recentUnitDraft, recentWindowMs, refetchColumns, refetchFolders, remoteSessionsError,
     renameError, seedError, seedStateLanesMutation, selectRecentPreset, setAllFiltersPaused,
-    setAutoTitleError, setFilterSortOpen, setFolderActionError, setFolderOfflineNotice, setModelFilterExcluded, setNewChatError,
-    setRecentAmountDraft, setRenameError, setSeedError, setSlotFilter, setSortKey, setStaleCollapseMs,
-    setToggleSaveFailed, showAllFolders, slotFilter, sortKey, staleCollapseMs, tagFilterRows, toggleFilter,
+    setAutoTitleError, setFilterSortOpen, setFolderActionError, setFolderOfflineNotice, setManualOrderError, setModelFilterExcluded, setNewChatError,
+    setPinnedOrderError, setRecentAmountDraft, setRenameError, setSeedError, setSlotFilter, setSortKey, setStaleCollapseMs,
+    setToggleSaveFailed, showAllFolders, slotFilter, sortError, sortKey, staleCollapseMs, tagFilterRows, toggleFilter,
     toggleFolderFilter, toggleFoldersShelved, toggleHideFilter, toggleModelFilter, toggleSaveFailed,
     toggleTagFilter } = shell
   const field = (
@@ -477,15 +472,27 @@ export function renderSearchDock(shell: SidebarScope): { field: React.ReactNode;
                     which list each one changes. The members page keeps the bare
                     key -- it has no second list. */}
                 <FilterMenuLabel>{i18nT('pages.chatSidebar.sort_sessions_by')}</FilterMenuLabel>
-                {SORT_OPTIONS.map(o => (
-                  <DropdownMenuItem
-                    key={o.value}
-                    onSelect={() => { setSortKey(o.value); safeSetItem(SESSION_SORT_STORAGE_KEY, o.value) }}
-                  >
-                    <span className="flex-1">{i18nT(SORT_LABEL_KEY[o.value])}</span>
-                    {sortKey === o.value && <Check size={14} className="text-accent shrink-0" />}
-                  </DropdownMenuItem>
-                ))}
+                {/* A switcher over mutually exclusive sorts, so each row is a
+                    `menuitemradio` reporting `aria-checked` -- a screen reader
+                    says WHICH sort is in effect, which a plain item's check icon
+                    (kept, sighted-only) cannot convey. The write stays on each
+                    row's `onSelect`, NOT the group's `onValueChange`: `sortKey`
+                    is the OPTIMISTIC overlay value (a pick shows at once, before
+                    its save lands), so the group's `value` already reflects an
+                    in-flight pick -- and Radix fires `onValueChange` only on a
+                    change against that value. `setSortKey` must run on every
+                    pick regardless, because it also decides this load's
+                    carry-over (`carryChecked`) and queues the pick against the
+                    one in flight; routing through `onValueChange` would drop a
+                    re-pick of the shown-but-not-yet-saved sort. */}
+                <DropdownMenuRadioGroup value={sortKey}>
+                  {SORT_OPTIONS.map(o => (
+                    <DropdownMenuRadioItem key={o.value} value={o.value} onSelect={() => setSortKey(o.value)}>
+                      <span className="flex-1">{i18nT(SORT_LABEL_KEY[o.value])}</span>
+                      {sortKey === o.value && <Check size={14} className="text-accent shrink-0" aria-hidden="true" />}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
                 {/* Folder order: the same row grammar as Sort by, one section down,
                     because it answers the same kind of question about this list.
                     Custom is the person's own arrangement (drag, or an agent's
@@ -500,25 +507,37 @@ export function renderSearchDock(shell: SidebarScope): { field: React.ReactNode;
                     the lane they are in is the trap. */}
                 <DropdownMenuSeparator />
                 <FilterMenuLabel>{i18nT('pages.chatSidebar.folder_order')}</FilterMenuLabel>
-                {FOLDER_SORT_MODES.map(mode => (
-                  <DropdownMenuItem
-                    key={mode}
-                    data-testid={`folder-order-${mode}`}
-                    // "Already the mode" is the value in flight while a save is
-                    // pending (the newest pick, queued or on the wire), not the
-                    // cache (which moves only when a save lands): pick Name,
-                    // reopen, pick Custom -- Custom must go out, not be read as
-                    // a no-op against the still-Custom cache. A pick that is a
-                    // change goes into `folderSortMut`'s one-at-a-time queue.
-                    onSelect={() => {
-                      const current = folderSortMut.isPending ? folderSortMut.variables : folderSortMode
-                      if (mode !== current) folderSortMut.mutate(mode)
-                    }}
-                  >
-                    <span className="flex-1">{i18nT(FOLDER_SORT_LABEL_KEY[mode])}</span>
-                    {folderSortMode === mode && <Check size={14} className="text-accent shrink-0" />}
-                  </DropdownMenuItem>
-                ))}
+                {/* A switcher like Sort by, so the rows are `menuitemradio`s that
+                    report `aria-checked` too. The group's `value` is the
+                    COMMITTED mode (the cache), so the checked row tracks what is
+                    actually in effect. The write stays on each row's `onSelect`,
+                    NOT the group's `onValueChange`: a re-pick of a mode equal to
+                    the group's committed value fires no change event, yet it must
+                    still go out when a different pick is in flight (pick Name,
+                    reopen, pick Custom while Name is still saving -- Custom must
+                    be sent, not read as a no-op against the still-Custom cache). */}
+                <DropdownMenuRadioGroup value={folderSortMode}>
+                  {FOLDER_SORT_MODES.map(mode => (
+                    <DropdownMenuRadioItem
+                      key={mode}
+                      value={mode}
+                      data-testid={`folder-order-${mode}`}
+                      // "Already the mode" is the value in flight while a save is
+                      // pending (the newest pick, queued or on the wire), not the
+                      // cache (which moves only when a save lands): pick Name,
+                      // reopen, pick Custom -- Custom must go out, not be read as
+                      // a no-op against the still-Custom cache. A pick that is a
+                      // change goes into `folderSortMut`'s one-at-a-time queue.
+                      onSelect={() => {
+                        const current = folderSortMut.isPending ? folderSortMut.variables : folderSortMode
+                        if (mode !== current) folderSortMut.mutate(mode)
+                      }}
+                    >
+                      <span className="flex-1">{i18nT(FOLDER_SORT_LABEL_KEY[mode])}</span>
+                      {folderSortMode === mode && <Check size={14} className="text-accent shrink-0" aria-hidden="true" />}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
                 {/* Outside Custom a folder drag can re-parent but not reorder
                     (the rows' droppable side is off). Said here, where the mode
                     is chosen, the same caption grammar as the stale control's
@@ -1044,7 +1063,7 @@ export function renderSearchDock(shell: SidebarScope): { field: React.ReactNode;
       <ErrorNotice
         title={i18nT('pages.chatSidebar.close_refused_title')}
         message={closeRefused
-          ? i18nT(closeRefused.reason === 'historyWrite' ? 'pages.chatSidebar.close_refused' : 'pages.chatSidebar.close_refused_other', { title: closeRefused.title })
+          ? i18nT(closeRefused.reason === 'historyWrite' ? 'pages.chatSidebar.close_refused' : 'pages.chatSidebar.close_refused_other', { title: closeRefused.title ?? sessionDisplayTitle({ key: closeRefused.key, title: null }) })
           : null}
         askAgent={closeRefused?.reason === 'failed'}
         onDismiss={() => dispatch(setCloseRefused(null))}
@@ -1081,6 +1100,21 @@ export function renderSearchDock(shell: SidebarScope): { field: React.ReactNode;
         onDismiss={() => setFolderActionError('')}
         className="mx-2 mt-2 shrink-0"
         testId="folder-action-error"
+      />
+      {/* A session sort pick the gateway refused. The list is already back on the
+          stored order, so the footer names the refused sort and the order now
+          drawn (`sortKey`); the server's text sits under the title as the detail. The
+          hand-off is withheld offline and stacked below in this narrow column. */}
+      <ErrorNotice
+        title={i18nT('pages.chatSidebar.sort_update_failed')}
+        message={sortError?.message ?? ''}
+        messagePlacement="below"
+        footer={sortError ? i18nT('pages.chatSidebar.sort_update_failed_detail', { sort: i18nT(SORT_LABEL_KEY[sortError.key]), restored: i18nT(SORT_LABEL_KEY[sortKey]) }) : null}
+        askAgent={connected}
+        actionPlacement="below"
+        onDismiss={dismissSortError}
+        className="mx-2 mt-2 shrink-0"
+        testId="session-sort-error"
       />
       {/* The folder order (dashboard.folder_sort) could not be read AND there is
        *  no body to fall back on: the tree is drawn in the stored order meanwhile
@@ -1141,6 +1175,30 @@ export function renderSearchDock(shell: SidebarScope): { field: React.ReactNode;
           </Btn>
         </div>
       )}
+      <ErrorNotice
+        title={i18nT('pages.chatSidebar.pinned_order_save_failed')}
+        message={pinnedOrderError}
+        // The message (what happened to the order) sits under the title and
+        // the action under both, as on folder-order-unavailable: side by side
+        // in this ~300px panel they wrapped to one or two words a line.
+        messagePlacement="below"
+        askAgent
+        actionPlacement="below"
+        onDismiss={() => setPinnedOrderError('')}
+        className="mx-2 mt-2 shrink-0"
+        testId="pinned-order-error"
+      />
+      {/* The manual order's twin of the notice above, laid out the same way. */}
+      <ErrorNotice
+        title={i18nT('pages.chatSidebar.manual_order_save_failed')}
+        message={manualOrderError}
+        messagePlacement="below"
+        askAgent
+        actionPlacement="below"
+        onDismiss={() => setManualOrderError('')}
+        className="mx-2 mt-2 shrink-0"
+        testId="manual-order-error"
+      />
       <ErrorNotice
         message={newChatError}
         askAgent

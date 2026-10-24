@@ -47,10 +47,20 @@ FORBIDDEN_WHEN_BRIDGING = (
     "kiro_crew.mcp_gateway.manager",
     "kiro_crew.mcp_gateway.backend",
     "kiro_crew.mcp_gateway.rewriter",
+    # The rewriter's owner modules, which hold its code beside the facade above.
+    "kiro_crew.mcp_gateway.rewriter_env",
+    "kiro_crew.mcp_gateway.rewriter_launch",
+    "kiro_crew.mcp_gateway.rewriter_overlay",
+    "kiro_crew.mcp_gateway.rewriter_spec",
     "kiro_crew.metrics.events",
     "kiro_crew.jsonl_util",
     "kiro_crew.security",
     "kiro_crew.validation",
+    # The stub imports only the 10 managed server NAMES from ``mcp_cleanup``.
+    # ``mcp_cleanup`` imports ``agent_sdk.mcp_refs`` lazily, inside the one
+    # function that reads it, so that NAME import does not pull
+    # ``kiro_crew.agent_sdk`` and its subtree into a bridging stub.
+    "kiro_crew.agent_sdk",
 )
 
 #: Additionally absent after a bare ``import``: building the Register payload

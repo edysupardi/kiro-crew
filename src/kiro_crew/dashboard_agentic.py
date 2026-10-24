@@ -146,37 +146,6 @@ PACKAGE_REFUSALS: Final[dict[str, str]] = {
     "error": "package_model_invalid",
 }
 
-#: The refusal a package-bound write gets while the DISPLAY still selects a different
-#: Model from the one the write would be checked against. Its own code, because the
-#: remedy is neither "create a package" nor "repair this one": the package is fine and
-#: the write is fine, and what is missing is the half that draws it.
-PACKAGE_DISPLAY_PENDING: Final[str] = "package_display_pending"
-
-
-def display_pending_refusal(field: str) -> WriteRefused:
-    """A live package whose values nothing would draw yet.
-
-    Checking a write against the package's Model while the member's page renders from
-    its TEMPLATE instance lets a value land that the display cannot draw -- a string
-    where the page reads a list renders as nothing, so the cards that were there
-    disappear and no error is raised anywhere. The old values are still in the log, but
-    a reader looking at the page cannot tell that from an empty list.
-
-    Refused rather than written, because the two halves disagreeing is not something an
-    agent can see or work around. The caller decides WHEN to ask this: the condition is
-    about the display, which is not this module's to read.
-    """
-    return WriteRefused(
-        PACKAGE_DISPLAY_PENDING,
-        field,
-        "this crewmate's page is composed from a dashboard package, and the display "
-        "still draws it from the template instance -- so a value checked against the "
-        "package could be one the page cannot draw, and writing it would blank what is "
-        "already there. Nothing is wrong with the package or the value: wait for the "
-        "display to read the package, and write it then",
-    )
-
-
 #: What each refusal tells the agent to DO, which is the half a bare state cannot
 #: supply. One sentence per state, and they differ in the action rather than in tone:
 #: create one, tell a human, stop reaching for it.
@@ -847,11 +816,14 @@ def fold_summary(value: Any) -> str:
 def _read_page(slug: str) -> tuple[Any, TemplateManifest | None, str]:
     """The record a crewmate's tab shows, its parsed manifest, and the lock line.
 
-    The record is ``None`` when there is no page in force. The lock line is the
-    store's own refusal (``LOCKED_REFUSAL``) while the person's lock is set, else
-    ``""``; it is read off the stored record BEFORE any fallback, because the default
-    page carries no lock of its own, so it can be set while the page is ``None``.
-    TOTAL: a record that cannot be read is no page and no lock line.
+    The manifest is ``None`` when there is no page in force. The record is ``None``
+    then too, except for an UNADOPTED record with no default to show -- a crewmate with
+    no page named for it -- which comes back as the stored record: whether its tab
+    draws the suggestions page is :func:`shows_suggestions`'s question to answer. The
+    lock line is the store's own refusal (``LOCKED_REFUSAL``) while the person's lock
+    is set, else ``""``; it is read off the stored record BEFORE any fallback, because
+    the default page carries no lock of its own, so it can be set while there is no
+    page. TOTAL: a record that cannot be read is no page and no lock line.
     """
     try:
         from kiro_crew.dashboard_templates import instance as instance_store
@@ -859,10 +831,18 @@ def _read_page(slug: str) -> tuple[Any, TemplateManifest | None, str]:
 
         record = instance_store.read(slug)
         locked = instance_store.LOCKED_REFUSAL if getattr(record, "structure_locked", False) else ""
+        if getattr(record, "package_slug", ""):
+            # The crewmate's own package is in force: its Model is the page's, read
+            # the way `dashboard_write` reads it, so the block names the right fields.
+            from kiro_crew import dashboard_package
+
+            package = dashboard_package.read_package_model(slug)
+            if package.from_package and package.model is not None:
+                return record, package.model.manifest, locked
         if record.state == instance_store.STATE_EMPTY:
             fallback = instance_store.default_instance(slug)
             if fallback is None:
-                return None, None, locked
+                return record, None, locked
             record = fallback
         elif record.state not in (instance_store.STATE_LIVE, instance_store.STATE_STALE):
             return None, None, locked
@@ -870,6 +850,28 @@ def _read_page(slug: str) -> tuple[Any, TemplateManifest | None, str]:
     except Exception:
         logger.debug("no dashboard page in force for %r", slug, exc_info=True)
         return None, None, ""
+
+
+def _package_manifest(slug: str) -> TemplateManifest | None:
+    """The manifest of the PACKAGE a ``dashboard_write`` to *slug* is checked against.
+
+    ``None`` when that Model is not a package's, or cannot be read. TOTAL.
+    """
+    try:
+        from kiro_crew import dashboard_package
+
+        package = dashboard_package.read_package_model(slug)
+    except Exception:
+        logger.debug("dashboard: %r's package model could not be read", slug, exc_info=True)
+        return None
+    return package.model.manifest if package.from_package and package.model is not None else None
+
+
+def _package_manifest_id() -> str:
+    """The manifest id a package in force carries (``instance.PACKAGE_TEMPLATE_ID``)."""
+    from kiro_crew.dashboard_templates import instance as instance_store
+
+    return instance_store.PACKAGE_TEMPLATE_ID
 
 
 def page_in_force(slug: str) -> tuple[Any, TemplateManifest] | None:
@@ -910,16 +912,65 @@ def bound_package(slug: str) -> str:
         return ""
 
 
+def has_person_cut_version(package_slug: str) -> bool:
+    """Whether *package_slug* has a version a PERSON cut (``applied_package_version``).
+
+    The older rule's question. A record written before packages were pinned keeps the
+    page a person put in force by cutting a version, so that page is still found by
+    the crewmate's binding. A bound package with NO such version is the crewmate's own
+    saved draft: ``dashboard_save`` writes and binds it, and only ``dashboard_apply``
+    pins it. Answered as no package, so the tab keeps the page it had until the apply,
+    which is what the write check already answers (``dashboard_package`` folds an
+    uncut package into the template instance).
+
+    A package that cannot be read answers ``True``: the render path then reads it
+    again and fails closed exactly as it did before this question existed.
+    """
+    try:
+        from kiro_crew.artifacts import get_default_store
+        from kiro_crew.dashboard.handlers.member_dashboard import applied_package_version
+
+        return applied_package_version(get_default_store().get(package_slug)) > 0
+    except Exception:
+        logger.debug("dashboard: package %r could not be read", package_slug, exc_info=True)
+        return True
+
+
+def package_on_screen(slug: str) -> str:
+    """The package crewmate *slug*'s Dashboard tab draws, or ``""`` for its template page.
+
+    The read route's rule (``member_dashboard._serve``), for a reader that holds no
+    request: a pinned package is in force; a record that released packages, or one
+    under the person's lock, draws its template; only an older unlocked record looks
+    the package up by binding, and then only one a person cut a version of. TOTAL:
+    an unreadable record is no package.
+    """
+    try:
+        from kiro_crew.dashboard_templates import instance as instance_store
+
+        record = instance_store.read(slug)
+        if getattr(record, "package_slug", ""):
+            return str(record.package_slug)
+        if not instance_store.keeps_older_package_rule(record):
+            return ""
+    except Exception:
+        logger.debug("dashboard: %r's instance record could not be read", slug, exc_info=True)
+        return ""
+    bound = bound_package(slug)
+    return bound if bound and has_person_cut_version(bound) else ""
+
+
 def shows_suggestions(slug: str, record: Any, *, package_slug: str) -> bool:
     """Whether the person sees the SUGGESTIONS page on this crewmate's Dashboard tab.
 
     THE decision, made once: the read route sends it to the website as
     ``suggestions`` and :func:`turn_block` tells the crewmate the same answer.
 
-    True only for the template instance (no package page is being served), an
-    UNADOPTED record (``state: empty``, the default filled in), and the GENERIC
-    default -- a shipped page named for the crewmate (``default_template_id``'s slug
-    pick, e.g. ``kirocrew-conductor``'s board) is drawn as before.
+    True only for the template instance (no package page is being served) and an
+    UNADOPTED record (``state: empty``) with no page named for the crewmate -- a
+    shipped page named for it (``default_template_id``'s slug pick, e.g.
+    ``kirocrew-conductor``'s board) is drawn as before. Such a crewmate has no page in
+    force at all, so its record is the stored one, with no template.
     """
     from kiro_crew.dashboard_templates import instance as instance_store
 
@@ -931,22 +982,80 @@ def shows_suggestions(slug: str, record: Any, *, package_slug: str) -> bool:
 
 
 def tab_shows_suggestions(slug: str) -> bool:
-    """:func:`shows_suggestions` for *slug* as it stands, for a reader that holds no
-    record of its own (the profile's upkeep view). TOTAL: unreadable is ``False``."""
-    record, manifest, locked_line = _read_page(slug)
-    if record is None or manifest is None:
+    """Whether crewmate *slug*'s Dashboard tab shows the suggestions page right now.
+
+    The answer :func:`turn_block` gives, for a caller that only needs the yes or no:
+    the stored instance record, no template page in force, no package on screen
+    (none under a lock), and :func:`shows_suggestions` on that. A template page in
+    force, a page named for the crewmate, or a package the tab draws is ``False``.
+    TOTAL: a dashboard that cannot be read answers ``False``, so nothing is asked of
+    a crewmate whose page might be there. Blocking IO.
+    """
+    try:
+        record, manifest, locked_line = _read_page(slug)
+    except Exception:
+        logger.debug("dashboard: %r's page could not be read", slug, exc_info=True)
         return False
-    package_slug = "" if locked_line else bound_package(slug)
+    if record is None or manifest is not None:
+        return False
+    package_slug = "" if locked_line else package_on_screen(slug)
     return shows_suggestions(slug, record, package_slug=package_slug)
 
 
+def page_offer_target(slug: str) -> dict[str, str] | None:
+    """What a page crewmate *slug* writes for itself would replace, or ``None``.
+
+    ``{"replaces": <title>, "template_id": <id>}`` while a template page is in force,
+    whether the person adopted it or it is the page named for the crewmate. ``None``
+    for the suggestions page (that crewmate writes its page with no card), once the
+    crewmate has a page of its own (a package on screen, or one bound to it), or when
+    the tab cannot be read. The read route's own answers, so the card
+    names the page the person actually sees. TOTAL. Blocking IO.
+    """
+    try:
+        if bound_package(slug):
+            return None
+        record, manifest, _locked = _read_page(slug)
+        if record is None:
+            return None
+        if manifest is None:
+            return None
+        if manifest.id == _package_manifest_id() or str(getattr(record, "package_slug", "")):
+            return None
+        return {"replaces": str(manifest.title or manifest.id), "template_id": str(manifest.id)}
+    except Exception:
+        logger.debug("dashboard: %r's page offer target is unreadable", slug, exc_info=True)
+        return None
+
+
 #: The block for a crewmate whose tab shows the suggestions page. No fields and no
-#: upkeep pointer: values written to the default would land on a page nobody sees, so
-#: offering them would spend every turn's tokens on upkeep no reader can look at.
-SUGGESTIONS_LINE: str = (
-    "Your Dashboard tab shows the suggestions page: no page is adopted yet, so there "
-    "are no fields to keep up. Offer a page with dashboard_preview; the person applies it."
+#: upkeep pointer: with no page in force there is nothing to write.
+#: What a crewmate's turn says while its tab shows the suggestions page. It rides EVERY
+#: turn, so it states where the page stands and never asks for one: building a page is
+#: the job of the gated build line (``goal_reminder.DASHBOARD_BUILD_LINE``) or of a user
+#: who asks.
+SUGGESTIONS_STATE: str = (
+    "Your Dashboard tab shows the suggestions page: you have no page of your own yet, "
+    "so there are no fields to keep up, and a dashboard_write lands on a page nobody "
+    "sees."
 )
+SUGGESTIONS_LINE: str = (
+    SUGGESTIONS_STATE + " Your progress belongs on a page of your own, not in chat: when "
+    "you have work to report, build your page with the dashboard skill "
+    "(dashboard_save, then dashboard_apply) instead of posting it here."
+)
+
+
+def _crew_panel_on() -> bool:
+    """Whether member sessions mount ``kirocrew-panel``; ``False`` on any read failure,
+    so a block that cannot tell asks for no page. TOTAL."""
+    try:
+        from kiro_crew.members import crew_panel_enabled
+
+        return bool(crew_panel_enabled())
+    except Exception:
+        logger.debug("dashboard: the crew panel switch is unreadable", exc_info=True)
+        return False
 
 
 def turn_block(slug: str) -> str:
@@ -957,32 +1066,46 @@ def turn_block(slug: str) -> str:
     ``dashboard_fields`` also tells it what each means and when and how to write it.
     The shapes, the mistake book and the upkeep text stay behind ``dashboard_fields``,
     because a block on every turn is paid for on every turn. Building the block also
-    syncs the page's helper scripts, so a crewmate on the default page, which never
-    commits, still has them.
+    syncs the page's helper scripts, so a crewmate on the page named for it, which
+    never commits, still has them.
     TOTAL: a dashboard that cannot be read costs the turn this block, nothing else.
     """
     record, manifest, locked_line = _read_page(slug)
+    if record is not None and manifest is None:
+        # No template page in force. The read route's rule for which package is on
+        # screen: a lock keeps the template instance there, so a locked crewmate serves
+        # no package. The lock is read off the STORED record, which is what
+        # `locked_line` already is.
+        package_slug = "" if locked_line else package_on_screen(slug)
+        if shows_suggestions(slug, record, package_slug=package_slug):
+            if locked_line:
+                # Locked: the store's own refusal is the whole instruction, so no line
+                # here can read as "write one".
+                return f"[DASHBOARD]\n{SUGGESTIONS_STATE}\n{locked_line}"
+            if not _crew_panel_on():
+                # ``agent.crew_panel`` off: no kirocrew-panel, so no dashboard_save to
+                # build a page with. Where the tab stands, and nothing to act on.
+                return "[DASHBOARD]\n" + SUGGESTIONS_STATE
+            return "[DASHBOARD]\n" + SUGGESTIONS_LINE
+        if package_slug:
+            # An older record's bound page, which the tab draws: named from the Model
+            # a write is checked against, so the block, the tab and the write agree.
+            manifest = _package_manifest(slug)
     if record is None or manifest is None:
         # The line is the store's own refusal, so the turn and the tool never disagree.
         return f"[DASHBOARD]\n{locked_line}" if locked_line else ""
     from kiro_crew import dashboard_upkeep  # the upkeep module reads this one
 
-    # The read route's rule for which package is on screen: a lock keeps the template
-    # instance there, so a locked crewmate serves no package. The lock is read off
-    # the STORED record (the default it fell back to carries none), which is what
-    # `locked_line` already is.
-    package_slug = "" if locked_line else bound_package(slug)
-    if shows_suggestions(slug, record, package_slug=package_slug):
-        # Still synced: `dashboard_fields` keeps answering for the default and names
-        # these helpers, so they must exist and be current even though the block
-        # offers no fields.
-        dashboard_upkeep.sync(slug, page=(record, manifest))
-        return "[DASHBOARD]\n" + SUGGESTIONS_LINE + (f"\n{locked_line}" if locked_line else "")
     names = sorted(agentic_fields(manifest))
     writes = ", ".join(names) if names else "none (every field is folded)"
+    shows = (
+        f"the page you saved with dashboard_save (package version {manifest.version})"
+        if manifest.id == _package_manifest_id()
+        else f"template {manifest.id} v{manifest.version}"
+    )
     block = (
         "[DASHBOARD]\n"
-        f"Your Dashboard tab shows template {manifest.id} v{manifest.version}.\n"
+        f"Your Dashboard tab shows {shows}.\n"
         + (f"{locked_line}\n" if locked_line else "")
         + f"Fields you write: {writes}. Call dashboard_fields for their shapes and "
         "current values before dashboard_write."

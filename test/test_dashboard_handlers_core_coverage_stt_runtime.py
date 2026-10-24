@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import platform
 import threading
 from types import SimpleNamespace
@@ -643,12 +644,14 @@ class TestSttPrewarm:
         Both configured values are non-default, so this also proves the warm-up
         targets the operator's selection rather than the catalog default.
         """
-        _seed_stt(seeded_config, model="small", language_code="fr-FR")
+        _seed_stt(seeded_config, model="small", language_code="fr-FR", threads=32)
         seen: dict = {}
         release = asyncio.Event()
 
-        async def _fake_prewarm(*, model_name: str = "", language: str = ""):
-            seen.update({"model_name": model_name, "language": language})
+        async def _fake_prewarm(
+            *, model_name: str = "", language: str = "", threads: int | None = None
+        ):
+            seen.update({"model_name": model_name, "language": language, "threads": threads})
             await release.wait()
             return _availability(True)
 
@@ -662,6 +665,9 @@ class TestSttPrewarm:
         # The BCP-47 config value is reduced to the bare language code the
         # recogniser names its languages by.
         assert seen["language"] == "fr"
+        # The configured count, so a warm-up after a settings change loads the
+        # context the next session will use instead of one it would rebuild.
+        assert seen["threads"] == 32
 
     @pytest.mark.asyncio
     async def test_prewarm_failure_does_not_fail_the_request(
@@ -845,6 +851,38 @@ class TestSttTranscribe:
         # not discard the transcript the user is waiting for.
         assert text.startswith("the key is ")
         assert text.endswith(" thanks")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            AsyncMock(return_value="hello"),
+            AsyncMock(return_value=None),
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ],
+        ids=["transcribed", "failed", "raised"],
+    )
+    async def test_upload_is_not_kept_on_disk(self, monkeypatch, outcome) -> None:
+        """Settings tells the user the gateway keeps no audio, so the uploaded
+        recording must be gone once the request answers, whatever the outcome."""
+        seen: list[str] = []
+
+        async def transcribe(path, _cfg):
+            seen.append(path)
+            assert os.path.exists(path)
+            return await outcome(path, _cfg)
+
+        monkeypatch.setattr("kiro_crew.transcribe.transcribe_audio", transcribe)
+        field = SimpleNamespace(
+            name="audio",
+            filename="recording.webm",
+            read_chunk=AsyncMock(side_effect=[b"audio-bytes", b""]),
+        )
+
+        await core_mod.api_stt_transcribe(_multipart_req(field))
+
+        assert len(seen) == 1
+        assert not os.path.exists(seen[0])
 
     @pytest.mark.asyncio
     async def test_none_backend_result_is_a_generic_500(self, monkeypatch) -> None:

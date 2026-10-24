@@ -3,21 +3,18 @@
 import type { UiGuidePlan } from './types'
 
 /** The `build_digest` of the packaged index this bundle was built with (see `guideBuildDigest`). */
-export const GUIDE_BUILD_DIGEST = "sha256:7f7baa40aba433a67d5e5a9c1499766dc1648957af748480fc2f8b5e777519c0"
+export const GUIDE_BUILD_DIGEST = "sha256:380172f6b61dbdcd6235a0cc02058ca796dfd7a9b7e6b18f0eba078db304d001"
 
 /** Curated location ids: the only ids a live observation may name. */
 export const GUIDE_OBSERVABLE_IDS: readonly string[] = [
   "agents.add",
-  "agents.chat",
   "agents.create-first",
   "agents.crew-list",
   "agents.delete",
   "agents.edit-avatar",
-  "agents.manage-memory",
   "agents.model",
   "agents.section-danger",
   "agents.section-model",
-  "agents.section-place",
   "apps.detail.disable",
   "apps.detail.install",
   "apps.detail.sync",
@@ -76,15 +73,20 @@ export const GUIDE_OBSERVABLE_IDS: readonly string[] = [
   "mcp.add-server",
   "mcp.probe",
   "members.add-menu",
+  "members.add-menu.import",
   "members.add-menu.new",
   "members.back",
   "members.details",
   "members.edit",
+  "members.empty.import",
   "members.new",
   "members.new-advanced",
   "members.permissions",
+  "members.profile-tab",
   "members.roster-list",
+  "members.settings",
   "members.switcher",
+  "members.switcher.import",
   "members.switcher.new",
   "members.switcher.show-roster",
   "members.switcher.unread",
@@ -175,6 +177,11 @@ export const GUIDE_REVEAL_SCOPES = {
     "revealer": "members.edit",
     "state": "crewmate_profile_closed"
   },
+  "members.profile-tab": {
+    "kind": "state",
+    "revealer": "members.profile-tab",
+    "state": "crewmate_profile_tab_closed"
+  },
   "members.roster": {
     "kind": "state",
     "revealer": "members.switcher.show-roster",
@@ -184,6 +191,11 @@ export const GUIDE_REVEAL_SCOPES = {
     "kind": "state",
     "revealer": "members.back",
     "state": "crewmate_chat_open_phone"
+  },
+  "members.settings": {
+    "kind": "state",
+    "revealer": "members.settings",
+    "state": "crewmate_settings_closed"
   },
   "menu:apps.sources": {
     "kind": "menu",
@@ -270,10 +282,6 @@ export const GUIDE_REVEAL_SCOPES = {
   "tab:agents.section-model": {
     "kind": "tab",
     "revealer": "agents.section-model"
-  },
-  "tab:agents.section-place": {
-    "kind": "tab",
-    "revealer": "agents.section-place"
   }
 } as const
 
@@ -320,31 +328,6 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
       }
     ]
   },
-  "agents.chat": {
-    "version": 2,
-    "label_key": "memoryV2.chat_member",
-    "placements": [
-      {
-        "id": "any",
-        "route": "/capabilities?tab=crews",
-        "steps": [
-          {
-            "id": "any:select:crewmate_editor_open",
-            "kind": "select",
-            "location": "agents.crew-list",
-            "label_key": "pages.kiroCrewAgentsPage.agents",
-            "selection": "crewmate_editor_open",
-            "entity": "crewmate"
-          },
-          {
-            "id": "any:agents.chat",
-            "location": "agents.chat",
-            "label_key": "memoryV2.chat_member"
-          }
-        ]
-      }
-    ]
-  },
   "agents.delete": {
     "version": 2,
     "label_key": "pages.kiroCrewAgentsPage.delete_crew",
@@ -364,7 +347,7 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
           {
             "id": "any:agents.section-danger",
             "location": "agents.section-danger",
-            "label_key": "pages.kiroCrewAgentsPage.danger_zone",
+            "label_key": "crewEditorNext.section_danger",
             "scope": "tab:agents.section-danger"
           },
           {
@@ -395,43 +378,15 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
             "entity": "crewmate"
           },
           {
+            "id": "any:agents.section-model",
+            "location": "agents.section-model",
+            "label_key": "crewEditorNext.section_general",
+            "scope": "tab:agents.section-model"
+          },
+          {
             "id": "any:agents.edit-avatar",
             "location": "agents.edit-avatar",
             "label_key": "components.avatarBuilder.edit_avatar"
-          }
-        ]
-      }
-    ]
-  },
-  "agents.manage-memory": {
-    "version": 2,
-    "label_key": "pages.kiroCrewAgentsPage.manage_private_memory",
-    "placements": [
-      {
-        "id": "any",
-        "route": "/capabilities?tab=crews",
-        "steps": [
-          {
-            "id": "any:select:crewmate_editor_open",
-            "kind": "select",
-            "location": "agents.crew-list",
-            "label_key": "pages.kiroCrewAgentsPage.agents",
-            "selection": "crewmate_editor_open",
-            "entity": "crewmate"
-          },
-          {
-            "id": "any:agents.section-place",
-            "location": "agents.section-place",
-            "label_key": "components.crewEditor.pane_workspace_memory",
-            "scope": "tab:agents.section-place"
-          },
-          {
-            "id": "any:agents.manage-memory",
-            "location": "agents.manage-memory",
-            "label_key": "pages.kiroCrewAgentsPage.manage_private_memory",
-            "requires": [
-              "crewmate_memory_manageable"
-            ]
           }
         ]
       }
@@ -456,7 +411,7 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
           {
             "id": "any:agents.section-model",
             "location": "agents.section-model",
-            "label_key": "pages.kiroCrewAgentsPage.model",
+            "label_key": "crewEditorNext.section_general",
             "scope": "tab:agents.section-model"
           },
           {
@@ -1803,7 +1758,7 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
             "id": "desktop:gate:preview_flag:mc-preview-crew",
             "kind": "gate",
             "gate": "preview_flag:mc-preview-crew",
-            "setting_id": "developer.crewmates"
+            "setting_id": "developer.mates"
           },
           {
             "id": "desktop:members.switcher",
@@ -1837,7 +1792,7 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
             "id": "mobile:gate:preview_flag:mc-preview-crew",
             "kind": "gate",
             "gate": "preview_flag:mc-preview-crew",
-            "setting_id": "developer.crewmates"
+            "setting_id": "developer.mates"
           },
           {
             "id": "mobile:members.back",
@@ -1858,6 +1813,86 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
       }
     ]
   },
+  "members.add-menu.import": {
+    "version": 2,
+    "label_key": "pages.membersPage.import_from_file",
+    "placements": [
+      {
+        "id": "desktop",
+        "route": "/members",
+        "viewport": "desktop",
+        "steps": [
+          {
+            "id": "desktop:gate:preview_flag:mc-preview-crew",
+            "kind": "gate",
+            "gate": "preview_flag:mc-preview-crew",
+            "setting_id": "developer.mates"
+          },
+          {
+            "id": "desktop:members.switcher",
+            "location": "members.switcher",
+            "label_key": "pages.membersPage.switch_crewmate",
+            "scope": "menu:members.switcher"
+          },
+          {
+            "id": "desktop:members.switcher.show-roster",
+            "location": "members.switcher.show-roster",
+            "label_key": "pages.membersPage.roster_show",
+            "when": "crewmate_roster_folded",
+            "scope": "members.roster"
+          },
+          {
+            "id": "desktop:members.add-menu",
+            "location": "members.add-menu",
+            "label_key": "pages.membersPage.add_menu",
+            "scope": "menu:members.add-menu",
+            "requires": [
+              "has_crewmates"
+            ]
+          },
+          {
+            "id": "desktop:members.add-menu.import",
+            "location": "members.add-menu.import",
+            "label_key": "pages.membersPage.import_from_file"
+          }
+        ]
+      },
+      {
+        "id": "mobile",
+        "route": "/members",
+        "viewport": "mobile",
+        "steps": [
+          {
+            "id": "mobile:gate:preview_flag:mc-preview-crew",
+            "kind": "gate",
+            "gate": "preview_flag:mc-preview-crew",
+            "setting_id": "developer.mates"
+          },
+          {
+            "id": "mobile:members.back",
+            "location": "members.back",
+            "label_key": "pages.membersPage.toggle_roster",
+            "when": "crewmate_chat_open_phone",
+            "scope": "members.roster-phone"
+          },
+          {
+            "id": "mobile:members.add-menu",
+            "location": "members.add-menu",
+            "label_key": "pages.membersPage.add_menu",
+            "scope": "menu:members.add-menu",
+            "requires": [
+              "has_crewmates"
+            ]
+          },
+          {
+            "id": "mobile:members.add-menu.import",
+            "location": "members.add-menu.import",
+            "label_key": "pages.membersPage.import_from_file"
+          }
+        ]
+      }
+    ]
+  },
   "members.add-menu.new": {
     "version": 2,
     "label_key": "pages.membersPage.add_member",
@@ -1871,7 +1906,7 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
             "id": "desktop:gate:preview_flag:mc-preview-crew",
             "kind": "gate",
             "gate": "preview_flag:mc-preview-crew",
-            "setting_id": "developer.crewmates"
+            "setting_id": "developer.mates"
           },
           {
             "id": "desktop:members.switcher",
@@ -1911,7 +1946,7 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
             "id": "mobile:gate:preview_flag:mc-preview-crew",
             "kind": "gate",
             "gate": "preview_flag:mc-preview-crew",
-            "setting_id": "developer.crewmates"
+            "setting_id": "developer.mates"
           },
           {
             "id": "mobile:members.back",
@@ -1951,7 +1986,7 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
             "id": "mobile:gate:preview_flag:mc-preview-crew",
             "kind": "gate",
             "gate": "preview_flag:mc-preview-crew",
-            "setting_id": "developer.crewmates"
+            "setting_id": "developer.mates"
           },
           {
             "id": "mobile:select:crewmate_selected",
@@ -1982,7 +2017,7 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
             "id": "any:gate:preview_flag:mc-preview-crew",
             "kind": "gate",
             "gate": "preview_flag:mc-preview-crew",
-            "setting_id": "developer.crewmates"
+            "setting_id": "developer.mates"
           },
           {
             "id": "any:select:crewmate_selected",
@@ -2001,6 +2036,89 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
       }
     ]
   },
+  "members.profile-tab": {
+    "version": 2,
+    "label_key": "pages.membersPage.profile_tab",
+    "placements": [
+      {
+        "id": "any",
+        "route": "/members",
+        "steps": [
+          {
+            "id": "any:gate:preview_flag:mc-preview-crew",
+            "kind": "gate",
+            "gate": "preview_flag:mc-preview-crew",
+            "setting_id": "developer.mates"
+          },
+          {
+            "id": "any:select:crewmate_selected",
+            "kind": "select",
+            "location": "members.roster-list",
+            "label_key": "pages.membersPage.title",
+            "selection": "crewmate_selected",
+            "entity": "crewmate"
+          },
+          {
+            "id": "any:members.edit",
+            "location": "members.edit",
+            "label_key": "pages.membersPage.profile_card",
+            "when": "crewmate_profile_closed",
+            "scope": "members.profile"
+          },
+          {
+            "id": "any:members.profile-tab",
+            "location": "members.profile-tab",
+            "label_key": "pages.membersPage.profile_tab"
+          }
+        ]
+      }
+    ]
+  },
+  "members.settings": {
+    "version": 2,
+    "label_key": "pages.membersPage.profile_settings",
+    "placements": [
+      {
+        "id": "any",
+        "route": "/members",
+        "steps": [
+          {
+            "id": "any:gate:preview_flag:mc-preview-crew",
+            "kind": "gate",
+            "gate": "preview_flag:mc-preview-crew",
+            "setting_id": "developer.mates"
+          },
+          {
+            "id": "any:select:crewmate_selected",
+            "kind": "select",
+            "location": "members.roster-list",
+            "label_key": "pages.membersPage.title",
+            "selection": "crewmate_selected",
+            "entity": "crewmate"
+          },
+          {
+            "id": "any:members.edit",
+            "location": "members.edit",
+            "label_key": "pages.membersPage.profile_card",
+            "when": "crewmate_profile_closed",
+            "scope": "members.profile"
+          },
+          {
+            "id": "any:members.profile-tab",
+            "location": "members.profile-tab",
+            "label_key": "pages.membersPage.profile_tab",
+            "when": "crewmate_profile_tab_closed",
+            "scope": "members.profile-tab"
+          },
+          {
+            "id": "any:members.settings",
+            "location": "members.settings",
+            "label_key": "pages.membersPage.profile_settings"
+          }
+        ]
+      }
+    ]
+  },
   "members.switcher": {
     "version": 2,
     "label_key": "pages.membersPage.switch_crewmate",
@@ -2014,7 +2132,7 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
             "id": "desktop:gate:preview_flag:mc-preview-crew",
             "kind": "gate",
             "gate": "preview_flag:mc-preview-crew",
-            "setting_id": "developer.crewmates"
+            "setting_id": "developer.mates"
           },
           {
             "id": "desktop:select:crewmate_selected",
@@ -2033,6 +2151,44 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
       }
     ]
   },
+  "members.switcher.import": {
+    "version": 2,
+    "label_key": "pages.membersPage.import_from_file",
+    "placements": [
+      {
+        "id": "desktop",
+        "route": "/members",
+        "viewport": "desktop",
+        "steps": [
+          {
+            "id": "desktop:gate:preview_flag:mc-preview-crew",
+            "kind": "gate",
+            "gate": "preview_flag:mc-preview-crew",
+            "setting_id": "developer.mates"
+          },
+          {
+            "id": "desktop:select:crewmate_selected",
+            "kind": "select",
+            "location": "members.roster-list",
+            "label_key": "pages.membersPage.title",
+            "selection": "crewmate_selected",
+            "entity": "crewmate"
+          },
+          {
+            "id": "desktop:members.switcher",
+            "location": "members.switcher",
+            "label_key": "pages.membersPage.switch_crewmate",
+            "scope": "menu:members.switcher"
+          },
+          {
+            "id": "desktop:members.switcher.import",
+            "location": "members.switcher.import",
+            "label_key": "pages.membersPage.import_from_file"
+          }
+        ]
+      }
+    ]
+  },
   "members.switcher.new": {
     "version": 2,
     "label_key": "pages.membersPage.add_member",
@@ -2046,7 +2202,7 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
             "id": "desktop:gate:preview_flag:mc-preview-crew",
             "kind": "gate",
             "gate": "preview_flag:mc-preview-crew",
-            "setting_id": "developer.crewmates"
+            "setting_id": "developer.mates"
           },
           {
             "id": "desktop:select:crewmate_selected",
@@ -2084,7 +2240,7 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
             "id": "desktop:gate:preview_flag:mc-preview-crew",
             "kind": "gate",
             "gate": "preview_flag:mc-preview-crew",
-            "setting_id": "developer.crewmates"
+            "setting_id": "developer.mates"
           },
           {
             "id": "desktop:select:crewmate_selected",
@@ -2122,7 +2278,7 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
             "id": "desktop:gate:preview_flag:mc-preview-crew",
             "kind": "gate",
             "gate": "preview_flag:mc-preview-crew",
-            "setting_id": "developer.crewmates"
+            "setting_id": "developer.mates"
           },
           {
             "id": "desktop:select:crewmate_selected",
@@ -2154,7 +2310,7 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
             "id": "desktop:gate:preview_flag:mc-preview-crew",
             "kind": "gate",
             "gate": "preview_flag:mc-preview-crew",
-            "setting_id": "developer.crewmates"
+            "setting_id": "developer.mates"
           },
           {
             "id": "desktop:select:crewmate_selected",

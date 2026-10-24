@@ -17,7 +17,7 @@ import ErrorNotice from '../components/ErrorNotice'
 import { i18nT } from '../i18n/t'
 import { fmtRelative, toDate } from '../i18n/format'
 import { cardsApi, CARD_FINISHED_STATUSES, type Card } from '../api/cards'
-import { CardChanges } from './CardChanges'
+import { CardChanges, reachNames } from './CardChanges'
 import { cardChanges, cardTitle, FALLBACK_ICON, specFor } from './cardRegistry'
 import { oneShotRunAt } from './oneShot'
 import { CardRow, UserInputs } from './kindBodies'
@@ -51,6 +51,14 @@ function safeHttpUrl(value: string): string {
   }
 }
 
+
+/** The widen warning; an import card names the servers it would run unasked. */
+function widenText(card: Card): string {
+  const row = card.kind === 'crewmate.import' ? card.changes.find(c => c.field === 'template_auto_approve') : undefined
+  const servers = row ? reachNames(row.after) : ''
+  if (servers) return i18nT('components.changeCards.risk_widen_import', { servers })
+  return i18nT('components.changeCards.risk_widen')
+}
 
 interface ChangeCardProps {
   card: Card
@@ -300,8 +308,12 @@ export default function ChangeCard({ card, store, refresh, remove }: ChangeCardP
               <div className="mt-3 rounded-md border border-warn/30 bg-warn-subtle px-3 py-2 text-[13px] leading-5 text-text" data-testid="change-card-risk">
                 <div className="flex items-start gap-2">
                   <AlertTriangle size={14} className="mt-[3px] shrink-0 text-warn" aria-hidden="true" />
-                  <span>{card.risk === 'widen' ? i18nT('components.changeCards.risk_widen') : i18nT('components.changeCards.risk_code_exec')}</span>
+                  <span>{card.risk === 'widen' ? widenText(card) : i18nT('components.changeCards.risk_code_exec')}</span>
                 </div>
+                {/* What the press does, read beside the warning, before any code. */}
+                {spec?.pressNote && card.status === 'pending' && !expired && (
+                  <p className="m-0 mt-1 pl-[22px]" data-testid="change-card-press-note">{spec.pressNote()}</p>
+                )}
                 {widen && (
                   <label className="mt-1 flex min-h-11 items-center gap-2 cursor-pointer">
                     <input
@@ -317,6 +329,10 @@ export default function ChangeCard({ card, store, refresh, remove }: ChangeCardP
                   </label>
                 )}
               </div>
+            )}
+
+            {spec?.pressNote && card.risk !== 'widen' && card.risk !== 'code_exec' && card.status === 'pending' && !expired && (
+              <p className="m-0 mt-3 text-[13px] leading-5 text-text" data-testid="change-card-press-note">{spec.pressNote()}</p>
             )}
 
             <div className="mt-2 [&>[data-card-row]+[data-card-row]]:border-t [&>[data-card-row]+[data-card-row]]:border-border" data-testid="change-card-rows">
@@ -377,7 +393,7 @@ export default function ChangeCard({ card, store, refresh, remove }: ChangeCardP
                 disabled={busy}
                 data-testid="change-card-cancel"
               >
-                {i18nT('components.changeCards.cancel')}
+                {spec?.decline?.() ?? i18nT('components.changeCards.cancel')}
               </Btn>
             )}
             {(card.status === 'failed' || expired) && (

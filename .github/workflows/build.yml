@@ -288,7 +288,6 @@ jobs:
     runs-on: ${{ github.repository == 'kirodotdev/KiroCrew' && contains(fromJSON(vars.CODEBUILD_ACTOR_IDS || '[]'), github.actor_id) && (github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize') && github.event.pull_request.head.repo.full_name == github.repository)) && format('codebuild-kirocrew-gha-linux-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
     permissions:
       contents: read
-      pull-requests: read
     outputs:
       os: ${{ steps.compute.outputs.os }}
       # 'true' or 'false': whether build-windows-installer runs. Always 'true'
@@ -376,6 +375,7 @@ jobs:
               - 'MANIFEST.in'
               - 'src/kiro_crew/__main__.py'
               - 'src/kiro_crew/cli_server.py'
+              - 'src/kiro_crew/cli_server_*.py'
               - 'src/kiro_crew/testing/**'
       - id: compute
         env:
@@ -474,7 +474,7 @@ jobs:
   smoke-install-macos:
     needs: [desktop-matrix, build-desktop]
     if: contains(needs.desktop-matrix.outputs.os, 'macos-15')
-    name: Smoke-install macOS DMG (launch + bundled kiro-cli)
+    name: Smoke-install macOS DMG (launch)
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -488,7 +488,7 @@ jobs:
           name: desktop-macos-arm64
           path: dist
 
-      - name: Install the DMG, launch the app, prove the bundled kiro-cli
+      - name: Install the DMG and launch the app
         run: ./scripts/smoke-macos-install.sh dist
 
       - name: Upload smoke evidence

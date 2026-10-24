@@ -164,11 +164,18 @@ _BASELINE_OWNER_MARKED = 3
 #: be found, so a scanner that matches nothing cannot pass as a clean tree. Drop a
 #: name here in the same change that removes its last site.
 _KNOWN_SITE_FILES = (
-    "acp/client.py",
-    "acp/runtime.py",
+    "acp/client_start.py",
+    "acp/runtime_class.py",
+    "acp/runtime_host_requests.py",
+    "acp/runtime_liveness.py",
+    "acp/runtime_session_create.py",
+    "acp/runtime_session_load.py",
+    "acp/runtime_spawn_launch.py",
+    "acp/runtime_tree_kill.py",
     "acp/session_provider.py",
     "providers/base.py",
-    "session.py",
+    "session_parts/claims.py",
+    "session_parts/provider_probes.py",
     "session_pid_sig.py",
     # Reached ONLY by the reflective family, so one of these failing is the signal
     # that the string-literal form stopped being counted.

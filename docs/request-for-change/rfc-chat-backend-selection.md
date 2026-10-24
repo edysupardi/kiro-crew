@@ -113,7 +113,7 @@ The pick is persisted with the slot's other metadata, so it survives a gateway
 restart. When the session is created, the pick reaches the factory through
 `get_or_create(..., backend_override=)`, which records it as
 `session.backend_override`. `allocation_identity` in
-`src/kiro_crew/session_lifecycle.py` already carries that field to a reset or
+`src/kiro_crew/session_lifecycle_parts/parked_queue.py` already carries that field to a reset or
 compaction successor, so those keep the chat's backend with no new code.
 
 ### 4. Agent surface
@@ -121,7 +121,7 @@ compaction successor, so those keep the chat's backend with no new code.
 - `POST /api/chat/slots/{slot}/backend`, registered beside
   `/api/chat/slots/{slot}/model`, takes `{"backend": "<name>"}` or
   `{"backend": ""}` to clear.
-- MCP tool `session_set_backend` in `src/kiro_crew/mcp_dashboard.py`, beside
+- MCP tool `session_set_backend` in `src/kiro_crew/mcp_dashboard_session_tools.py`, beside
   `session_set_model`, calls the same handler logic.
 
 Both run the same validation and the same ownership gate

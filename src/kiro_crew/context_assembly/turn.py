@@ -9,8 +9,9 @@ mapped through both. Every untrusted value is screened or scrubbed here before i
 lands beside a trusted frame.
 
 The member section, the rules gate and the lifecycle verdict that decides both stay
-at the ``members.member_turn_context`` chokepoint in :mod:`kiro_crew.context`, as do
-the trigger-matched skill bodies and the request boundary itself.
+at the ``members.member_turn_context`` chokepoint in ``ContextBuilder.build_message``
+(:mod:`kiro_crew.context_assembly.turn_message`), as do the trigger-matched skill
+bodies and the request boundary itself.
 
 New per-turn blocks belong here.
 """
@@ -117,7 +118,11 @@ def post_compaction_parts(
             "[Memory tools] Call memory_recall with specific keywords for prior facts and tasks.\n"
         )
     _inject, _globs = ctx._skills_injection_plan(
-        agent, is_cc=is_cc, project_dir=project, provider_type=provider_type
+        agent,
+        is_cc=is_cc,
+        project_dir=project,
+        provider_type=provider_type,
+        session_key=session_key,
     )
     if _inject:
         _cfg = ctx.KiroCrewConfig.load()
@@ -177,6 +182,38 @@ def post_compaction_parts(
                 + "\n[END REINJECTED]\n\n"
             )
     return parts
+
+
+def ledger_reinjection_part(session_key: str | None, turn_text: str) -> str:
+    """The session's ``[work ledger]`` snapshot for a post-compaction turn, or ``""``.
+
+    A compaction drops whatever the agent had read of its own durable state, and
+    the instruction to read it again went with it. A monitor-loop cycle already
+    starts from this snapshot (``compose_nudge_body``); an interactive turn gets
+    the same block here. Empty when the session has no ledger or a terminal one,
+    and when *turn_text* already carries the snapshot -- a nudge cycle that lands
+    on the first turn after a compaction is not given the block twice.
+
+    Best-effort: a failed read costs the block, never the turn. The ledger is
+    agent-written text, so its payload is scrubbed of structural markers.
+    """
+    if not session_key:
+        return ""
+    from kiro_crew import context as ctx  # circular import: the facade imports this owner
+    from kiro_crew import session_ledger
+
+    try:
+        snapshot = session_ledger.render_snapshot(session_ledger.ledger_key(session_key))
+    except Exception:
+        logger.debug("reinjection: ledger snapshot failed for %s", session_key, exc_info=True)
+        return ""
+    if not snapshot or snapshot in turn_text:
+        return ""
+    return (
+        "[REINJECTED AFTER COMPACTION — work ledger]\n"
+        + ctx._neutralize_structural_markers(snapshot)
+        + "\n[END REINJECTED]\n\n"
+    )
 
 
 def thread_context_parts(
@@ -299,7 +336,36 @@ def rail_parts(
     parts: list[str] = []
     # Project context — inject on every message so the LLM always knows
     # the active project, even when set/changed after session start.
-    if project and _inclusion._group_included(context_groups, _inclusion.CONTEXT_GROUP_PROJECT):
+    from kiro_crew.session_environment import remote_workspace_for
+
+    # A remote session works in the GUEST's directory; naming the gateway checkout
+    # (which its tools cannot reach) sent the model to the wrong machine. Values
+    # come from operator config (profile name, workdir).
+    remote = remote_workspace_for(session_key)
+    project_on = _inclusion._group_included(context_groups, _inclusion.CONTEXT_GROUP_PROJECT)
+    if remote is not None and project_on:
+        env_name, env_workdir = remote
+        parts.append(
+            f"[PROJECT] This session runs in a remote environment ({env_name}). "
+            f"Its working directory is {env_workdir} on that remote machine, "
+            "reached only through the @workspace tools (read_file, write_file, "
+            "edit_file, list_directory, glob, grep, run_command). Files, commands, "
+            "the OS and installed tools all describe that remote machine. "
+            "Subagents you spawn run in the same remote environment. "
+            "The gateway machine that hosts you is a different computer, and "
+            "anything describing it (paths, host memory) is not this session's "
+            "workspace.\n\n"
+        )
+        from kiro_crew.session_environment import take_workspace_recreated
+
+        if take_workspace_recreated(session_key):
+            parts.append(
+                "[PROJECT] This session's remote workspace was recreated empty: files, "
+                "uncommitted changes and installed tools from earlier in this "
+                "conversation are gone. Re-clone or rebuild before relying on them; "
+                "anything pushed to git is still on its remote.\n\n"
+            )
+    elif project and project_on:
         parts.append(
             f"[PROJECT] Active project directory: {project}\n"
             "This is the codebase you are working in for this session. "
@@ -356,7 +422,7 @@ def rail_parts(
             from kiro_crew.resource_status import probe as _probe_resources
 
             _rstatus = _probe_resources()
-            _rline = _rstatus.context_line()
+            _rline = _rstatus.context_line(remote=remote is not None)
             if _rline:
                 parts.append(_rline + "\n\n")
                 logger.info(

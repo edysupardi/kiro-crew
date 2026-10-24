@@ -5,12 +5,13 @@
  */
 import type { ComponentType } from 'react'
 import { AlarmClock,
-  CalendarClock, Cog, FolderCog, Goal, Gauge, KeyRound, Link2, Plug, Power, ShieldCheck, ShieldOff, UserPlus, UserCog, Wrench, LayoutTemplate, PackagePlus, PackageOpen,
+  CalendarClock, Cog, FolderCog, Goal, Gauge, KeyRound, LayoutDashboard, Link2, Plug, Power, ShieldCheck, ShieldOff, UserPlus, UserCog, Wrench, LayoutTemplate, PackagePlus, PackageOpen,
   type LucideIcon,
 } from 'lucide-react'
 import { i18nT } from '../i18n/t'
 import type { Card, CardChange, CardKind } from '../api/cards'
 import { NoBody, OneCrewmateBody, ScheduleBody, type KindBodyProps } from './kindBodies'
+import { ImportFilesBody } from './ImportFilesBody'
 import { cardTimezone, fmtOneShot, isOneShot } from './oneShot'
 
 export interface CardKindSpec {
@@ -19,6 +20,10 @@ export interface CardKindSpec {
   label: () => string
   /** The primary button: the concrete action, never a bare "OK". */
   primary: (card?: Card) => string
+  /** The decline button, when "Decline change" does not say what declining means here. */
+  decline?: () => string
+  /** One line beside the primary button: what the press does and how to take it back. */
+  pressNote?: () => string
   Body: ComponentType<KindBodyProps>
 }
 
@@ -43,6 +48,12 @@ export const CARD_REGISTRY: Record<CardKind, CardKindSpec> = {
     icon: UserPlus, label: () => i18nT('components.changeCards.kind_crewmate_create'),
     primary: () => i18nT('components.changeCards.primary_crewmate_create'), Body: ScheduleBody,
   },
+  'crewmate.import': {
+    icon: UserPlus, label: () => i18nT('components.changeCards.kind_crewmate_import'),
+    primary: () => i18nT('components.changeCards.primary_crewmate_import'), Body: ImportFilesBody,
+    decline: () => i18nT('components.changeCards.decline_crewmate_import'),
+    pressNote: () => i18nT('components.changeCards.note_crewmate_import'),
+  },
   'crewmate.update': {
     icon: UserCog, label: () => i18nT('components.changeCards.kind_crewmate_update'),
     primary: () => i18nT('components.changeCards.primary_crewmate_update'), Body: OneCrewmateBody,
@@ -62,6 +73,10 @@ export const CARD_REGISTRY: Record<CardKind, CardKindSpec> = {
   'crewmate.check_ins': {
     icon: AlarmClock, label: () => i18nT('components.changeCards.kind_crewmate_check_ins'),
     primary: () => i18nT('components.changeCards.primary_crewmate_check_ins'), Body: OneCrewmateBody,
+  },
+  'crewmate.dashboard_page': {
+    icon: LayoutDashboard, label: () => i18nT('components.changeCards.kind_crewmate_dashboard_page'),
+    primary: () => i18nT('components.changeCards.primary_crewmate_dashboard_page'), Body: OneCrewmateBody,
   },
   'template.update': {
     icon: LayoutTemplate, label: () => i18nT('components.changeCards.kind_template_update'),
@@ -153,6 +168,9 @@ function listOp(card: Pick<Card, 'kind' | 'params'>): ListOp | null {
 /** The card's title in the reader's language where the dashboard owns the
  *  wording (a list setting's add/remove); otherwise the gateway's title. */
 export function cardTitle(card: Pick<Card, 'kind' | 'params' | 'title' | 'changes'>): string {
+  // The gateway's title is English; the import's is rebuilt in the reader's language.
+  const name = card.kind === 'crewmate.import' ? card.params?.name : undefined
+  if (typeof name === 'string' && name) return i18nT('components.changeCards.title_crewmate_import', { name })
   const list = listOp(card)
   if (!list) return card.title
   if (list.wording) return list.wording[list.op](list.item)

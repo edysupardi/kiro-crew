@@ -101,6 +101,17 @@ _ANSWERS: dict[str, str] = {
         "long it ran and what it cost"
     ),
     "class": "What KIND of session this log belongs to, over the log's whole life",
+    "otel_usage": (
+        "Whether this session opened and which closed agent_kind value it opened "
+        "under -- never the raw agent name, which the fold folds to that enum and "
+        "does not keep -- and how many turns it has started per actor: the counts "
+        "the OTel usage export reads to mint session and turn counters"
+    ),
+    "otel_session_tree": (
+        "How many creators stood above this session in the session tree when it "
+        "opened, and how many child sessions it has created -- the numbers the OTel "
+        "export reads to count sessions by tree depth and children by ordinal"
+    ),
     "outline": (
         "The conversation one row per turn: the first line the human typed and the "
         "reply the turn settled on, both clipped, with no injected context and no "
@@ -124,6 +135,22 @@ _ANSWERS: dict[str, str] = {
     "workstreams": (
         "Every workstream this crewmate is running: each board's goal and counts, each "
         "task's result, and what each task cost its own worker session"
+    ),
+    "goal": (
+        "This crewmate's goal record as the gateway last recorded it: its goals, each "
+        "milestone's target and latest reading, whether it is met, and the counts"
+    ),
+    "waiting": (
+        "What this crewmate waits on the person for: its open questions and the cards "
+        "still waiting on a button, newest first, with the count"
+    ),
+    "workers": (
+        "The worker sessions this crewmate created: each one's task, whether it is "
+        "running, between turns, done, blocked, failed or closed, and what it last said"
+    ),
+    "worker": (
+        "One worker session's own row, the part of `workers` read from that worker's "
+        "own log; not bound by a page"
     ),
     "worktree": (
         "The shape of a fleet: every work board the tree reaches, which board each one "

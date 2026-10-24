@@ -12,6 +12,7 @@ that happening a second time in the other direction.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -40,6 +41,7 @@ from kiro_crew.providers.mirrors.opencode import (
     opencode_tool_id,
     without_stdio_tag,
 )
+from kiro_crew.testing.wait import wait_until
 
 #: What opencode 1.18.30's ``initialize`` actually answered. Two fields, because
 #: ACP's ``McpCapabilities`` has exactly two -- which is the whole point: there is
@@ -54,7 +56,7 @@ _CRON = {"command": "/opt/kirocrew", "args": ["mcp-cron"]}
 def agents_dir(tmp_path, monkeypatch):
     """Point the agent-spec resolver at a temp agents directory.
 
-    Same seam as ``test_codex_session_mcp.py``: materialization would rebuild the
+    Same seam as ``codex_session_mcp_helpers.py``: materialization would rebuild the
     managed default from bundled defaults, and these tests supply the spec.
     """
     d = tmp_path / "agents"
@@ -1174,12 +1176,12 @@ def test_the_driver_runner_reaps_descendants_on_the_timeout_path():
     # Windows, the sweep's caller filter recognises only the sanctioned helpers,
     # and a bare existence probe cannot tell our reaped grandchild's reissued
     # number from the grandchild itself.
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        if platform_compat.get_process_start_id(grandchild) != grandchild_identity:
-            break
-        time.sleep(0.2)
-    else:  # pragma: no cover - the failure this test exists to catch
+    try:
+        wait_until(
+            lambda: platform_compat.get_process_start_id(grandchild) != grandchild_identity,
+            describe=lambda: f"pid {grandchild} still carries identity {grandchild_identity}",
+        )
+    except AssertionError:  # pragma: no cover - the failure this test exists to catch
         try:
             platform_compat.kill_pid_pinned(
                 grandchild, grandchild_identity, platform_compat.SIGKILL
@@ -1306,3 +1308,65 @@ def test_real_opencode_a_lower_source_deny_is_still_refused(tmp_path):
     assert _BIN is not None
     issue, _remedy = _real_opencode_read_back(tmp_path, {"bash": {"pwd": "deny"}})
     assert issue and "deny" in issue
+
+
+class _VersionProbeSession:
+    """The session surface the version gate's probe reads, nothing more."""
+
+    def __init__(self, work_dir):
+        self._spawn_work_dir = work_dir
+        self._extra_env = {}
+
+    def _agent_env_for_spawn(self):
+        return {}
+
+
+@pytest.mark.real_adapter
+def test_real_opencode_the_version_gate_passes_the_pinned_binary(tmp_path):
+    """ANTI-DRIFT GUARD for the fail-closed version gate, against the REAL binary.
+
+    The gate refuses every launch whose wrapped ``--version`` answer is not an
+    exit-0, dotted, in-range major -- so its premise is how the REAL binary
+    answers through the REAL sandbox mask, not through a stub. This drives
+    ``_opencode_version_refusal`` exactly as the launch does -- the adapter's
+    credential mask, the same spawn-env bindings, the wrapped child off the
+    loop -- against the binary this host resolves, and the verdict is host-class
+    specific, never assumed:
+
+    - a host where the mask applies (macOS seatbelt, a Linux with user
+      namespaces) must answer the in-range verdict for the pinned release -- a
+      release that changes where ``--version`` prints, wraps badly, or exits
+      non-zero turns this into a refusal here instead of every session being
+      refused where no one can see it;
+    - a host with NO OS sandbox backend must NOT answer in-range by silently
+      unwrapping: production refuses such a launch at the preflight, before any
+      child runs, so ``SandboxUnavailableError`` propagating IS the contract
+      there.
+    """
+    import kiro_crew.sandbox as sandbox_mod
+    from kiro_crew.acp.harness import opencode as opencode_mod
+    from kiro_crew.agent_sdk import tool_gate as acp_tool_gate
+
+    _require_opencode()
+    assert _BIN is not None
+
+    hidden = acp_tool_gate.adapter_hidden_credential_dirs(ACP_BACKEND_OPENCODE)
+    expose = acp_tool_gate.adapter_expose_files(ACP_BACKEND_OPENCODE, hidden)
+    work = tmp_path / "work"
+    work.mkdir()
+    try:
+        issue, remedy = asyncio.run(
+            opencode_mod._opencode_version_refusal(
+                _VersionProbeSession(work),
+                str(_BIN),
+                sandbox_mode="auto",
+                hidden=hidden,
+                expose=expose,
+            )
+        )
+    except sandbox_mod.SandboxUnavailableError:
+        # The launch would refuse at the preflight on this host: no child of the
+        # harness runs at all, so there is no version answer to check. What this
+        # host CAN prove is that the gate did not dodge its own mask.
+        return
+    assert (issue, remedy) == ("", ""), f"the pinned binary failed its own gate: {issue} / {remedy}"

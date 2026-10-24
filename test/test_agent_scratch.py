@@ -7,6 +7,7 @@ real ``<data home>/scratch`` is never touched.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import stat
 import subprocess
@@ -15,6 +16,7 @@ import time
 from pathlib import Path
 
 import pytest
+from git_maintenance_helpers import git_maintenance_off_entries
 
 from kiro_crew import agent_scratch as sc
 from kiro_crew import platform_compat
@@ -930,8 +932,21 @@ class TestLivenessSweep:
 _GIT = platform_compat.trusted_git_bin()
 
 
-def _git(cwd: Path, *args: str) -> str:
-    """Run git for a fixture, with no host config and a fixed identity."""
+def _git(
+    cwd: Path, *args: str, trace_to: Path | None = None, auto_maintenance: bool = False
+) -> str:
+    """Run git for a fixture, with no host config and a fixed identity.
+
+    Auto-maintenance and auto-gc are off: either can start a background git that
+    creates and removes ``.git/objects/maintenance.lock`` while a test walks the
+    tree, so a snapshot could list the file and then fail to read it. ``-c`` is
+    carried to every git the command starts, the detached one included.
+
+    *trace_to* names a file that receives git's trace2 event stream, so a test
+    can see which child processes a fixture command started. *auto_maintenance*
+    turns git's auto maintenance back on; only the regression test's control
+    command sets it.
+    """
     assert _GIT is not None
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(
@@ -942,8 +957,30 @@ def _git(cwd: Path, *args: str) -> str:
         GIT_COMMITTER_NAME="Scratch Test",
         GIT_COMMITTER_EMAIL="scratch-test@example.invalid",
     )
+    if trace_to is not None:
+        env["GIT_TRACE2_EVENT"] = str(trace_to)
+    # A commit otherwise starts a detached ``git maintenance run --auto`` that
+    # outlives this call and creates and removes lock files under .git, so a
+    # walk of the tree right after can list a file that is gone when it is
+    # touched. Stripping GIT_* dropped the suite's maintenance entries, so they
+    # go back on for every fixture command.
+    env.update(git_maintenance_off_entries(env))
+    flags = [
+        "-c",
+        "init.defaultBranch=main",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "maintenance.auto=false",
+        "-c",
+        "gc.auto=0",
+    ]
+    if auto_maintenance:
+        # Explicit, so the control starts maintenance over the entries and the
+        # flag above: the later -c wins.
+        flags += ["-c", "maintenance.auto=true"]
     result = subprocess.run(
-        [_GIT, "-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false", *args],
+        [_GIT, *flags, *args],
         cwd=cwd,
         env=env,
         capture_output=True,
@@ -1035,6 +1072,72 @@ class TestGitTreesAreQuarantined:
         _git(clone, "add", "feature.py")
         _git(clone, "commit", "-q", "-m", "feature")
         return path, clone
+
+    # -- the fixtures ------------------------------------------------------
+
+    @staticmethod
+    def _background_children(events: Path) -> tuple[list[list[str]], list[list[str]]]:
+        """Every child a traced git command started, and the auto-maintenance ones."""
+        started = [
+            event["argv"]
+            for event in map(json.loads, events.read_text(encoding="utf-8").splitlines())
+            if event.get("event") == "child_start"
+        ]
+        return started, [argv for argv in started if argv[1:2] in (["maintenance"], ["gc"])]
+
+    def test_fixture_git_leaves_no_process_writing_into_the_tree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The tests below walk, snapshot and move a tree right after building
+        # it, so no git command may leave a detached child (auto maintenance or
+        # auto gc) still adding and removing lock files in it. The suite's own
+        # maintenance.auto=false entry is dropped here, so this checks the
+        # helper's flags and not whatever the environment happens to carry.
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "0")
+        control_events = tmp_path / "control.json"
+        control = tmp_path / "control"
+        control.mkdir()
+        _git(control, "init", "-q")
+        _git(
+            control,
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+            trace_to=control_events,
+            auto_maintenance=True,
+        )
+        control_started, control_background = self._background_children(control_events)
+        # Searched in every argv word, independent of the filter below, so a
+        # filter that stops recognising the child fails here instead of passing.
+        if not any({"maintenance", "gc"} & set(argv) for argv in control_started):
+            pytest.fail(
+                "prerequisite missing: the control git started no auto maintenance, "
+                f"so this test cannot show the helper's flags suppress it: {control_started}"
+            )
+        assert control_background, f"the filter missed the control's maintenance: {control_started}"
+
+        events = tmp_path / "trace2.json"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q", trace_to=events)
+        (repo / "a.txt").write_text("one\n")
+        _git(repo, "add", "a.txt", trace_to=events)
+        _git(repo, "commit", "-q", "-m", "first", trace_to=events)
+        _git(tmp_path, "clone", "-q", str(repo), "clone", trace_to=events)
+        clone = tmp_path / "clone"
+        _git(clone, "checkout", "-q", "-b", "feature", trace_to=events)
+        (clone / "b.txt").write_text("two\n")
+        _git(clone, "add", "b.txt", trace_to=events)
+        _git(clone, "commit", "-q", "-m", "feature", trace_to=events)
+        (clone / "a.txt").write_text("stashed\n")
+        _git(clone, "stash", "-q", trace_to=events)
+        _git(repo, "worktree", "add", "-q", "-b", "side", str(tmp_path / "wt"), trace_to=events)
+
+        started, background = self._background_children(events)
+        assert started, "the trace recorded no child processes at all"
+        assert background == []
 
     # -- what is moved -----------------------------------------------------
 
@@ -1160,6 +1263,195 @@ class TestGitTreesAreQuarantined:
         assert not sc.holds_git_repository(path)
         assert self._sweep_later() == 1
         assert not path.exists()
+
+    def test_repositories_only_in_rebuildable_dirs_are_not_work(self, scratch_root: Path) -> None:
+        # Test suites ``git init`` throwaway repositories in pytest's basetemp,
+        # which lands at the top of the scratch tree; package installs can
+        # carry a ``.git`` too.
+        path = self._dead_scratch()
+        basetemp = path / "pytest-of-agent" / "pytest-3" / "test_commit0"
+        basetemp.mkdir(parents=True)
+        _git(basetemp, "init", "-q", "repo")
+        (path / "work" / "node_modules" / "dep").mkdir(parents=True)
+        _git(path / "work" / "node_modules" / "dep", "init", "-q")
+
+        assert not sc.holds_git_repository(path)
+        assert self._sweep_later() == 1
+        assert not path.exists()
+        assert not sc.quarantine_dir().exists()
+
+    def test_a_basetemp_name_below_the_top_is_searched(self, scratch_root: Path) -> None:
+        # Only pytest's own spot, the top of the tree, is a basetemp.
+        path = self._dead_scratch()
+        (path / "work").mkdir()
+        _git(path / "work", "init", "-q", "pytest-of-agent")
+
+        assert sc.holds_git_repository(path)
+        self._swept(path)
+
+    # -- what the quarantine keeps -----------------------------------------
+
+    @staticmethod
+    def _rebuildable(tree: Path) -> None:
+        """Fill *tree* with what tools rebuild: installs, a venv, caches, a basetemp."""
+        for relative in (
+            "clone/node_modules/dep/index.js",
+            "clone/__pycache__/mod.cpython-312.pyc",
+            "clone/.pytest_cache/v/cache/lastfailed",
+            "clone/.mypy_cache/3.12/mod.json",
+            "clone/.ruff_cache/0.1/cache",
+            "clone/.tox/py312/log",
+            "clone/.nox/tests/log",
+            "clone/.venv/pyvenv.cfg",
+            "clone/.venv/lib/site.py",
+            "clone/env312/pyvenv.cfg",
+            "pytest-of-agent/pytest-0/test_x0/repo/.git/HEAD",
+        ):
+            (tree / relative).parent.mkdir(parents=True, exist_ok=True)
+            (tree / relative).write_text("rebuilt\n")
+
+    def test_the_quarantine_keeps_the_work_and_drops_what_tools_rebuild(
+        self, scratch_root: Path, upstream: Path, caplog
+    ) -> None:
+        caplog.set_level("INFO", logger=sc.__name__)
+        path, clone = self._clone_into(upstream)
+        (clone / "draft.txt").write_text("uncommitted\n")
+        # Named like a venv, but no pyvenv.cfg: somebody's files.
+        (clone / "work" / ".venv").mkdir(parents=True)
+        (clone / "work" / ".venv" / "notes.txt").write_text("not a venv\n")
+        # A link named pyvenv.cfg does not make a venv either.
+        _symlink_or_skip(clone / "work" / "pyvenv.cfg", Path(".venv"))
+        # A repository is work whatever its directory is called.
+        _git(path, "clone", "-q", str(upstream), "node_modules")
+        kept = _snapshot(path)
+        self._rebuildable(path)
+
+        assert self._sweep_later() == 0
+        moved = self._moved(path)
+        assert _snapshot(moved) == kept
+        assert "?? draft.txt" in _git(moved / "clone", "status", "--porcelain")
+        assert f"removed 10 rebuildable dir(s) from {moved}" in caplog.text
+
+    def test_a_venv_holding_a_repository_is_work(self, scratch_root: Path, upstream: Path) -> None:
+        # A venv used as a project folder, or one ``pip install -e git+...``
+        # cloned into, holds work below its pyvenv.cfg.
+        path = self._dead_scratch()
+        (path / "work").mkdir()
+        (path / "work" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        (path / "work" / "src").mkdir()
+        _git(path / "work" / "src", "clone", "-q", str(upstream), "pkg")
+
+        assert sc.holds_git_repository(path)
+        self._swept(path)
+
+    def test_a_basetemp_name_inside_a_venv_is_work(
+        self, scratch_root: Path, upstream: Path
+    ) -> None:
+        path, _clone = self._clone_into(upstream, inside="env/pytest-of-agent/repo")
+        (path / "env" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+
+        self._swept(path)
+
+    def test_a_quarantined_venv_keeps_a_repository_below_a_basetemp_name(
+        self, scratch_root: Path, upstream: Path
+    ) -> None:
+        path, _clone = self._clone_into(upstream, inside="env/pytest-of-agent/repo")
+        moved = self._swept(path)
+        (moved / "env" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        kept = _snapshot(moved)
+
+        assert self._sweep_later(extra=3600) == 0
+        assert (moved / "env").is_dir()
+        assert _snapshot(moved) == kept
+
+    def test_nested_venvs_are_searched_once(
+        self, scratch_root: Path, upstream: Path, monkeypatch
+    ) -> None:
+        # Each venv is judged by searching below it; searching it again as the
+        # walk descends made the work double with every level of nesting.
+        path = self._dead_scratch()
+        venv = path
+        for level in range(8):
+            venv = venv / f"e{level}"
+            venv.mkdir()
+            (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        # A ``.git`` file, not a clone: a clone's object paths this deep pass
+        # Windows' 260-character path limit.
+        (venv / "pkg").mkdir()
+        (venv / "pkg" / ".git").write_text("gitdir: elsewhere\n")
+        dirs = 1 + sum(len(names) for _root, names, _files in os.walk(path))
+
+        listed: list[str] = []
+        real_scandir = os.scandir
+
+        def _counting(target):
+            listed.append(os.fspath(target))
+            return real_scandir(target)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(sc.os, "scandir", _counting)
+            assert sc.holds_git_repository(path)
+        assert len(listed) <= dirs, (len(listed), dirs)
+        assert len(listed) == len(set(listed))
+        self._swept(path)
+
+    def test_nothing_inside_a_git_directory_is_stripped(
+        self, scratch_root: Path, upstream: Path
+    ) -> None:
+        path, clone = self._clone_into(upstream)
+        _git(path, "init", "-q", "--bare", "backup.git")
+        for relative in (
+            "clone/.git/node_modules/dep/index.js",
+            "clone/.git/hooks/__pycache__/hook.pyc",
+            "clone/.git/env/pyvenv.cfg",
+            "backup.git/node_modules/dep/index.js",
+            "backup.git/hooks/.venv/pyvenv.cfg",
+        ):
+            (path / relative).parent.mkdir(parents=True, exist_ok=True)
+            (path / relative).write_text("inside a git directory\n")
+
+        self._swept(path)
+
+    def test_a_linked_install_is_never_followed(
+        self, scratch_root: Path, upstream: Path, tmp_path: Path
+    ) -> None:
+        # A link holds no bytes of its own, so it stays, and what it names is
+        # never entered, whether in the tree or outside it.
+        path, clone = self._clone_into(upstream)
+        (clone / "store" / "dep").mkdir(parents=True)
+        (clone / "store" / "dep" / "index.js").write_text("in the tree\n")
+        outside = tmp_path / "shared-modules"
+        (outside / "dep").mkdir(parents=True)
+        (outside / "dep" / "index.js").write_text("outside the tree\n")
+        (outside / "__pycache__").mkdir()
+        (clone / "web").mkdir()
+        _symlink_or_skip(clone / "node_modules", Path("store"))
+        _symlink_or_skip(clone / "web" / "node_modules", outside)
+        _symlink_or_skip(clone / "web" / "lib", outside)
+        _symlink_or_skip(path / "pytest-of-agent", clone / "store")
+        kept, outside_before = _snapshot(path), _snapshot(outside)
+
+        assert self._sweep_later() == 0
+        moved = self._moved(path)
+        assert _snapshot(moved) == kept
+        assert _snapshot(outside) == outside_before
+
+    def test_a_tree_already_in_the_quarantine_is_stripped_on_a_later_sweep(
+        self, scratch_root: Path, upstream: Path
+    ) -> None:
+        # A tree moved before the strip existed, or whose strip was cut short.
+        path, _clone = self._local_feature(upstream)
+        moved_at = time.time() + self.LATER
+        assert sc.sweep_dead_scratch(now=moved_at) == 0
+        moved = self._moved(path)
+        kept = _snapshot(moved)
+        self._rebuildable(moved)
+
+        assert sc.sweep_dead_scratch(now=moved_at + 3600) == 0
+        assert _snapshot(moved) == kept
+        assert sc.sweep_dead_scratch(now=moved_at + 7200) == 0
+        assert _snapshot(moved) == kept
+        assert _git(moved / "clone", "log", "-1", "--format=%s") == "feature\n"
 
     # -- the move ----------------------------------------------------------
 

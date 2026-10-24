@@ -6,7 +6,8 @@ pages this surface exists for: a dispatch tree, a chart, a 3D scene are layouts 
 renderer knows, and a catalog that grew a type per picture would be the host writing every
 page anyway.
 
-So a view is EITHER a block list or one HTML page, never both and never neither. The page
+So a view is one HTML page. A stored block list is read as the page it becomes,
+one way, and the block catalog is gone. The page
 is agent-authored and may run JS, and what keeps that safe is not a check on the markup --
 it is :mod:`kiro_crew.dashboard_frame`: text-only bindings, ``connect-src 'none'``,
 ``allow-scripts`` and nothing else, over an opaque origin. The checks here are the ones
@@ -15,11 +16,12 @@ that catch an author's mistake while the author is still present:
 * a page that ships its own ``<html>`` would nest documents inside the host's;
 * a binding naming a field the model does not declare is a cell that stays blank forever,
   and the model is also the push allowlist, so the typo is silent twice;
-* a page over the view cap is a package with a value baked into it.
+* a page over the view cap is one the frame would refuse to draw.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -69,13 +71,17 @@ class TestOneViewOrTheOther:
         assert out["view"] == {"html": '<p data-dashboard-field="boards"></p>'}
         assert "blocks" not in out["view"]
 
-    def test_a_block_list_is_still_a_view(self) -> None:
-        """The shape every stored package uses today. A new view kind that invalidated
-        the old one would make this change a migration rather than an addition."""
+    def test_a_saved_block_list_is_read_as_its_page(self) -> None:
+        """One way: a stored block list is the page it becomes, whatever its
+        type -- there is no catalog left to ask."""
         out = dp.validate_package(
-            package(view={"blocks": [{"id": "b", "type": "stat", "fields": ["boards"]}]})
+            package(view={"blocks": [{"id": "b", "type": "hologram", "fields": ["boards"]}]})
         )
-        assert out["view"]["blocks"][0]["id"] == "b"
+        assert out["view"] == {
+            "html": '<section><dl><div><dt>Boards</dt><dd data-dashboard-field="boards"></dd>'
+            "</div></dl></section>"
+        }
+        assert dp.validate_package(out)["view"] == out["view"]
 
     def test_both_at_once_is_refused(self) -> None:
         """Two views is a package with no answer to "what does this page look like".
@@ -94,7 +100,7 @@ class TestOneViewOrTheOther:
 
     def test_neither_is_refused(self) -> None:
         said = refusal(package(view={}))
-        assert "html" in said and "blocks" in said
+        assert "must hold 'html'" in said
 
 
 class TestThePageItself:
@@ -115,8 +121,7 @@ class TestThePageItself:
         assert "view.html" in refusal(package(view={"html": 42}))
 
     def test_a_page_over_the_view_cap_is_refused(self) -> None:
-        """A page this large is a package with values baked into it. The message says so
-        rather than naming a number the author has no model for."""
+        """The refusal names the limit, so the author knows how much to take out."""
         said = refusal(package(view={"html": "<p>" + "x" * dp.MAX_VIEW_HTML_BYTES + "</p>"}))
         assert str(dp.MAX_VIEW_HTML_BYTES) in said
 
@@ -155,6 +160,89 @@ class TestTheModelIsTheAllowlist:
         added for -- a canvas, a scene, an SVG tree."""
         html = "<canvas id=t></canvas><script>window.kirocrew.subscribe('boards', f);</script>"
         assert dp.validate_package(package(view={"html": html}))["view"]["html"] == html
+
+
+_HEAD = '<p data-dashboard-field="boards"></p><script>'
+_TAIL = "</script>"
+
+
+def _page_of(size: int, fill: str = "x") -> str:
+    """A page of exactly *size* bytes of UTF-8, binding a declared field, *fill* inlined."""
+    return _HEAD + fill * (size - len(_HEAD) - len(_TAIL)) + _TAIL
+
+
+def _save(raw: dict[str, Any]) -> str:
+    """Through THE write gate, the one that also measures the stored form."""
+    return dp.canonical_package_content(json.dumps(raw, ensure_ascii=False))
+
+
+class TestTheSizeCaps:
+    """The page cap and the package cap, each at its boundary, through the write gate.
+
+    A page that inlines a client-side library with its own scene code is a few MB of
+    layout with no data in it, so both caps are sized for it: the page cap is the
+    frame's own, and the package cap leaves room for that page once JSON escapes it.
+    """
+
+    def test_a_page_exactly_at_the_cap_saves(self) -> None:
+        page = _page_of(dp.MAX_VIEW_HTML_BYTES)
+        assert len(page.encode("utf-8")) == dp.MAX_VIEW_HTML_BYTES
+        stored = _save(package(view={"html": page}))
+        assert dp.parse_package(stored)["view"]["html"] == page
+
+    def test_one_byte_over_the_cap_is_refused_naming_the_cap(self) -> None:
+        with pytest.raises(ArtifactValidationError) as caught:
+            _save(package(view={"html": _page_of(dp.MAX_VIEW_HTML_BYTES + 1)}))
+        said = str(caught.value)
+        assert "view.html" in said
+        assert f"is {dp.MAX_VIEW_HTML_BYTES + 1} bytes" in said
+        assert f"over the {dp.MAX_VIEW_HTML_BYTES}-byte limit for a page" in said
+
+    def test_a_page_at_the_cap_that_doubles_once_stored_still_saves(self) -> None:
+        """The worst case for the stored form, with a model and a theme beside it.
+
+        JSON writes each quote in the page as two bytes, so a page made of them takes
+        twice its size in the package. The package cap is sized for exactly that: a
+        page the page cap allows is never refused by the package cap instead.
+        """
+        page = _page_of(dp.MAX_VIEW_HTML_BYTES, fill='"')
+        theme = {"tokens": {"--accent": "#0af"}, "css": "#scene { inset: 0; }"}
+        stored = _save(package(view={"html": page}, theme=theme))
+        assert len(stored.encode("utf-8")) > 2 * dp.MAX_VIEW_HTML_BYTES - 1024
+        assert dp.parse_package(stored)["view"]["html"] == page
+
+    def test_a_stored_package_at_its_cap_saves_and_one_byte_more_is_refused(self) -> None:
+        """The package cap's own boundary, measured on the STORED form.
+
+        A page at the page cap reaches it only with more than 128 KiB beside it, so the
+        model carries forty enum fields. Swapping one ``x`` in the page for a quote adds
+        exactly one stored byte, which is what lands the package on the cap exactly.
+        """
+        filler = {
+            f"pick_{i:02d}": {
+                "type": "enum",
+                "label": "Pick",
+                "choices": [f"choice {j:02d} " + "c" * 100 for j in range(32)],
+                "source": {"agentic": True},
+            }
+            for i in range(40)
+        }
+        types = {**TYPES, **filler}
+        room = dp.MAX_VIEW_HTML_BYTES - len(_HEAD) - len(_TAIL)
+
+        def at(quotes: int) -> dict[str, Any]:
+            html = _HEAD + '"' * quotes + "x" * (room - quotes) + _TAIL
+            return package(types=types, view={"html": html})
+
+        plain = len(_save(at(0)).encode("utf-8"))
+        quotes = dp.MAX_PACKAGE_BYTES - plain
+        assert 0 < quotes < room, "the filler does not put the cap in reach"
+        assert len(_save(at(quotes)).encode("utf-8")) == dp.MAX_PACKAGE_BYTES
+        with pytest.raises(ArtifactValidationError) as caught:
+            _save(at(quotes + 1))
+        said = str(caught.value)
+        assert f"is {dp.MAX_PACKAGE_BYTES + 1} bytes once stored" in said
+        assert f"over the {dp.MAX_PACKAGE_BYTES}-byte limit" in said
 
 
 class TestVersioningAndRevertSeeAPage:
@@ -227,6 +315,18 @@ def test_the_view_cap_is_under_the_package_cap() -> None:
     assert dp.MAX_VIEW_HTML_BYTES < dp.MAX_PACKAGE_BYTES
 
 
+def test_the_page_cap_is_the_frames_own() -> None:
+    """A page a package can hold is a page the frame will draw.
+
+    Mirrored rather than imported, for the binding attribute's reason above. A page cap
+    over the frame's would let a package save a page its own reader then refuses, and
+    the tab would show the refusal where the page should be.
+    """
+    from kiro_crew import dashboard_frame
+
+    assert dp.MAX_VIEW_HTML_BYTES == dashboard_frame.MAX_PAGE_BYTES
+
+
 class TestAScriptsOffPageStillShowsItsValues:
     """THE BOOTSTRAP IS WHAT FILLS A BINDING, so a page mounted without it filled none.
 
@@ -292,6 +392,74 @@ class TestAScriptsOffPageStillShowsItsValues:
 
         page = '<p data-dashboard-field="other">author text</p>'
         assert frame.fill_bindings_as_text(page, self._read(goal="land it")) == page
+
+    @pytest.mark.timeout(60)
+    @pytest.mark.parametrize(
+        ("prefix", "unit", "suffix"),
+        [
+            pytest.param("", "<a ", "", id="opening-brackets-only"),
+            pytest.param("", "<a data-dashboard-field=x ", "", id="bound-tags-never-closed"),
+            pytest.param("<", "a-", "", id="hyphenated-tag-name"),
+            pytest.param("<a ", "data-dashboard-field=gp ", "", id="one-tag-many-attributes"),
+            pytest.param(
+                "<a ",
+                "data-dashboard-field=x ",
+                ">t</b>",
+                id="one-tag-many-attributes-wrong-close",
+            ),
+        ],
+    )
+    def test_a_page_built_to_stall_the_scan_is_filled_in_linear_time(
+        self, prefix: str, unit: str, suffix: str
+    ) -> None:
+        """EACH START TAG IS READ ONCE, so no page stalls the fill however it is cut.
+
+        One page per way a scan can re-read what it has read: every ``<a`` runs on to
+        the end of a page with no ``>`` after it; one tag name is cut again at every
+        ``-``; one start tag names the attribute many times, each reading on to the
+        same ``>`` and each failing at the same wrong close. A quadratic form takes
+        about a second at 16-64 KiB, and the cost grows with the square, so a page at
+        the cap holds the GIL for hours, which the ``_run`` offload cannot help. Each
+        page below is at the cap. A quadratic form does not finish it, and the
+        per-test timeout is what fails a regression: no time is asserted.
+        """
+        from kiro_crew import dashboard_frame as frame
+
+        cell = '<p data-dashboard-field="goal"></p>'
+        room = frame.MAX_PAGE_BYTES - len(prefix) - len(suffix) - len(cell)
+        page = prefix + unit * (room // len(unit)) + suffix + cell
+        assert len(page.encode("utf-8")) <= frame.MAX_PAGE_BYTES
+        out = frame.fill_bindings_as_text(page, self._read(goal="land it"))
+        assert out.endswith('<p data-dashboard-field="goal">land it</p>')
+
+    def test_a_start_tag_is_not_read_across_the_next_tag(self) -> None:
+        """The price of the linear scan, pinned: a literal ``<`` inside a start tag
+        ends the search, so the cell keeps the author's own text."""
+        from kiro_crew import dashboard_frame as frame
+
+        page = '<p title="a<b" data-dashboard-field="goal">author text</p>'
+        assert frame.fill_bindings_as_text(page, self._read(goal="land it")) == page
+
+    @pytest.mark.parametrize(
+        ("name", "wrong_close"),
+        [
+            pytest.param("p-", "p", id="name-ends-in-a-hyphen"),
+            pytest.param("my-el", "my", id="custom-element"),
+        ],
+    )
+    def test_a_hyphenated_tag_name_is_read_whole(self, name: str, wrong_close: str) -> None:
+        """``<my-el>`` is an element named ``my-el``, so only ``</my-el>`` closes it.
+        Reading the name as ``my`` and then closing it with ``</my>`` is what cut the
+        name at every ``-``, and a browser does not read it that way either."""
+        from kiro_crew import dashboard_frame as frame
+
+        read = self._read(goal="land it")
+        closed = f"<{name} data-dashboard-field=goal>author text</{name}>"
+        assert frame.fill_bindings_as_text(closed, read) == (
+            f"<{name} data-dashboard-field=goal>land it</{name}>"
+        )
+        unclosed = f"<{name} data-dashboard-field=goal>author text</{wrong_close}>"
+        assert frame.fill_bindings_as_text(unclosed, read) == unclosed
 
     def test_the_route_fills_only_when_script_is_withheld(self) -> None:
         """Source-level, because the ORDER is the mechanism: a page that will run its
@@ -363,3 +531,51 @@ class TestAScriptsOffPageStillShowsItsValues:
 
         page = '<b data-dashboard-field="goal" title="a>b"><i>nested</i></b>'
         assert frame.fill_bindings_as_text(page, self._read(goal="land it")) == page
+
+
+class TestThePageWearsItsTheme:
+    """A package's ``theme`` is drawn on its page: tokens on ``:root``, then its css.
+
+    The gate accepts both halves and the save tool tells the author to set the look
+    there, so a renderer that dropped them served a page in the host's plain look while
+    its author had been told the style was live.
+    """
+
+    @staticmethod
+    def _body(theme: dict[str, Any]) -> str:
+        from kiro_crew import dashboard_frame
+        from kiro_crew.dashboard.handlers import member_dashboard_fields as fields
+
+        read = dashboard_frame.read_payload({"boards": 2})
+        return fields.render_package_page(dp.validate_package(package(theme=theme)), read)
+
+    def test_the_tokens_and_the_css_reach_the_page(self) -> None:
+        body = self._body(
+            {"tokens": {"--panel-bg": "#20262a"}, "css": ".board{font-family:cursive}"}
+        )
+        assert ":root{--panel-bg:#20262a;}" in body
+        assert ".board{font-family:cursive}" in body
+        # After the host's stylesheet, so a token the package sets wins over the default.
+        assert body.index("--panel-bg:#20262a") > body.index("<style>")
+        assert body.index(".board{font-family:cursive}") < body.index(
+            '<p data-dashboard-field="boards">'
+        )
+
+    def test_a_credential_in_the_theme_is_redacted_on_the_page(self) -> None:
+        token = "ghp_" + "a" * 36
+        body = self._body({"tokens": {}, "css": f".board{{content:'{token}'}}"})
+        assert token not in body
+        assert ".board{" in body
+
+    def test_an_empty_theme_adds_no_style(self) -> None:
+        assert self._body({"tokens": {}}).count("<style>") == 1
+
+    def test_a_theme_the_gate_would_refuse_draws_nothing(self) -> None:
+        from kiro_crew import dashboard_frame
+        from kiro_crew.dashboard.handlers import member_dashboard_fields as fields
+
+        stored = dp.validate_package(package())
+        # Written under an older validator: a css that closes the element.
+        stored["theme"] = {"tokens": {}, "css": "</style><script>alert(1)</script>"}
+        body = fields.render_package_page(stored, dashboard_frame.read_payload({"boards": 2}))
+        assert "alert(1)" not in body

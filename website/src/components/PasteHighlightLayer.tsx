@@ -7,12 +7,20 @@ import { findTokenRanges, type PasteBlock } from '../utils/pasteTokens'
  *  (`mc-message-font-text`, styles/message-font-size.css): what the user types
  *  is sized like what they read. Every composer surface — textarea, this
  *  mirror, the Lexical editor and its placeholder, the Suspense fallback —
- *  shares this one constant, which is what keeps their metrics identical. */
-export const INPUT_TYPO = 'px-4 pt-3 pb-1 mc-message-font-text font-body leading-normal'
+ *  shares this one constant, which is what keeps their metrics identical.
+ *  The vertical padding reads two variables so a host can re-centre every
+ *  surface at once: the one-row composer sets them on the text column
+ *  (ChatInput `ONE_ROW_TEXT_PAD`). Unset, they are 12px over 4px. */
+export const INPUT_TYPO = 'px-4 pt-[var(--composer-pt,0.75rem)] pb-[var(--composer-pb,0.25rem)] mc-message-font-text font-body leading-normal'
 
 interface Props {
   value: string
   blocks: PasteBlock[]
+  /** The box and font classes of the textarea this mirror sits behind. Every
+   *  dashboard composer shares {@link INPUT_TYPO}; a host whose textarea is
+   *  boxed differently (the app-sdk `ChatEmbed`) passes its own, and they
+   *  must match that textarea exactly for the same reason. */
+  typo?: string
 }
 
 /**
@@ -31,7 +39,7 @@ interface Props {
  * boxes also reserve the scrollbar gutter, so the textarea's scrollbar cannot
  * make it wrap narrower than this mirror.
  */
-const PasteHighlightLayer = forwardRef<HTMLDivElement, Props>(function PasteHighlightLayer({ value, blocks }, ref) {
+const PasteHighlightLayer = forwardRef<HTMLDivElement, Props>(function PasteHighlightLayer({ value, blocks, typo = INPUT_TYPO }, ref) {
   const ranges = findTokenRanges(value, blocks)
   const nodes: React.ReactNode[] = []
   let last = 0
@@ -53,7 +61,7 @@ const PasteHighlightLayer = forwardRef<HTMLDivElement, Props>(function PasteHigh
       ref={ref}
       aria-hidden
       data-composer-typo
-      className={`pointer-events-none absolute inset-0 overflow-hidden [scrollbar-gutter:stable] select-none text-transparent whitespace-pre-wrap break-words ${INPUT_TYPO}`}
+      className={`pointer-events-none absolute inset-0 overflow-hidden [scrollbar-gutter:stable] select-none text-transparent whitespace-pre-wrap break-words ${typo}`}
       style={{ overflowWrap: 'break-word', wordBreak: 'normal' }}
     >
       {nodes}

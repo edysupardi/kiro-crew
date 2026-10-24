@@ -74,7 +74,7 @@ is to scroll past everything or open a new session.
 the slot a fresh *model* conversation while keeping the slot open. With
 `{"replay": false}` it also suppresses the `[CONVERSATION HISTORY]` re-injection
 that would otherwise rebuild what was just discarded
-(`session_lifecycle.py`). It does not
+(`session_lifecycle_parts/teardown.py`). It does not
 solve this, for two independent reasons.
 
 **It deliberately does not touch the view**, per its own docstring:
@@ -151,7 +151,7 @@ if role == "system" and cls_val:
 ```
 
 — `dashboard/chat_persistence.py`. Meanwhile `ConversationLog.append`
-persists any truthy `cls` (`history.py`, `append`). A `cls`-carried marker on any role
+persists any truthy `cls` (`history_append.py`, `append`). A `cls`-carried marker on any role
 other than `system` is silently dropped on the dashboard's persist path. `meta`
 persists for every role (`chat_persistence.py`), which is where the
 label belongs.
@@ -165,18 +165,18 @@ un-picking a deliberate "carries state, not something to read" classification.
 **Why not `role="inject"`** (what `/note` writes) — two concrete harms. It is in
 `RECALL_ROLES` (`context_assembly/replay.py`), so every marker would be replayed into the model
 as conversation content; a chapter break must not enter the prompt. And it is in
-`_PROMPT_ROLES` (`dashboard/state.py`), so a marker would rank as an inbound
+`_PROMPT_ROLES` (`dashboard/state_parts/slot_transcript.py`), so a marker would rank as an inbound
 prompt for the sidebar's `last_turn_ts`, making a session look freshly asked-of
 every time a break was drawn.
 
 A new role is cheap on the wire: `ChatMessage.role` is an open `string`
-(`website/src/types/index.ts`), and the transcript read path has no role
+(`website/src/types/index.chat.ts`), and the transcript read path has no role
 allowlist — `_read_messages_locked` skips only the `_type: "metadata"` header and
-appends every other JSON line verbatim (`history_projection.py`,
+appends every other JSON line verbatim (`history_projection_reads.py`,
 `TranscriptReadProjection`).
 
 One thing to *not* do: leave the new role out of `_QUESTION_RETIRING_ROLES`
-(`dashboard/state.py`, currently `{user}`, mirrored by the frontend's
+(`dashboard/state_parts/slot_transcript.py`, currently `{user}`, mirrored by the frontend's
 `QUESTION_RETIRING_ROLES`). A marker must not retire a pending question card.
 Default behaviour is already correct; this is a note against a well-meaning later
 edit.
@@ -290,9 +290,9 @@ own result string, and the turn loop decodes and applies it in-process.
 
 - Registry: `DIRECTIVE_TOOLS` (`session_directive.py`) — add `section_marker`.
 - Tool side: return `session_directive.encode(kind, validated_args, human)`
-  (`session_directive.py`); see `mcp_tools/control.py` for the pattern.
-- Consumer side: `chat_runner.py` decodes at the tool-result event and
-  calls `apply_session_directive`.
+  (`session_directive.py`); see `mcp_tools/control_parts/directive.py` for the pattern.
+- Consumer side: `_on_tool_result` (`dashboard/chat_turn/tool_results.py`) decodes at the
+  tool-result event and calls `apply_session_directive`.
 - Applier: a new branch in `dashboard/session_directive_apply.py` alongside
   `_suggest_followup`, dashboard-gated via `_DASHBOARD_ONLY_DIRECTIVES`.
 
@@ -402,11 +402,11 @@ stacked.
 ### 5.9 Persistence
 
 No new storage. `Slot.append(role=…, content=…, meta=…)`
-(`dashboard/state.py`) → in-memory window → `_build_message_entry_uncached`
+(`dashboard/state_parts/slot_transcript.py`) → in-memory window → `_build_message_entry_uncached`
 (`dashboard/slot_persistence/message_entries.py`) → the session jsonl. `meta` persists for
 all roles, carrying the label. The role is not in the
 never-persisted transient set `{chunk, done, streaming, queued, permission}`
-(`dashboard/state.py`).
+(`dashboard/state_parts/transcript_rows.py`).
 
 ## 6. Phases
 
@@ -516,7 +516,7 @@ absent.
 `_recall_rows` — an old session resumed by a new gateway, or the
 reverse, sees no prompt change.
 
-**Read path.** No role allowlist (`history_projection.py`,
+**Read path.** No role allowlist (`history_projection_reads.py`,
 `TranscriptReadProjection`), so an older gateway
 reading a transcript containing markers parses them as ordinary rows.
 
@@ -527,7 +527,7 @@ existing write-boundary redaction rather than needing its own: because the role 
 not `user`, `_build_message_entry_uncached` runs `redact_exfiltration_urls` and
 `redact_credentials` over `content` (`dashboard/chat_persistence.py`),
 and `meta` goes through `_redact_meta_for_role`
-(`dashboard/chat_utils.py`, called at `chat_persistence.py`). Validation
+(`dashboard/chat_utils_display.py`, called at `chat_persistence.py`). Validation
 is still required at the boundary — length cap and control-character rejection
 (§5.6) — and the rendered label must go through the same markdown/escaping path as
 other row content rather than being injected as markup.
@@ -568,7 +568,7 @@ rendering preference a client can compute; it is an assertion about the work.
 conversational ones.* A view-only event is not a new category. `RECALL_ROLES` is
 `{user, assistant, inject}` (`context_assembly/replay.py`), and the only roles excluded from
 the transcript are the transient/streaming set
-`{chunk, done, streaming, queued, permission}` (`dashboard/state.py`).
+`{chunk, done, streaming, queued, permission}` (`dashboard/state_parts/transcript_rows.py`).
 Everything else persists *and* is never replayed to a model — `tool`, `error`,
 `subagent`, `system`, `file`. Measured across a sample of 60 dashboard transcripts
 (5,664 rows): **3,152 rows — 55.6% — are persisted and non-recall-eligible**, of
@@ -670,7 +670,7 @@ marker would vanish on one of the two write paths.
    whether the virtualizer needs more than a shorter `items` array, or whether
    scroll anchoring needs a hint at the collapse boundary.
 6. **Fork and transfer.** `chat_fork` and `session_transfer` re-append historical
-   rows with `broadcast=False` (`dashboard/state.py`). Should a fork
+   rows with `broadcast=False` (`dashboard/state_parts/slot_transcript.py`). Should a fork
    inherit markers, and should the fork point itself become one?
 7. **Interaction with `collapseAllSteps`.** Should the global setting
    (`pages/chat/ChatSettings.tsx`) gain a sibling for section collapse, or is

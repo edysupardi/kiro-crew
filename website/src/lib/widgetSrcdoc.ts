@@ -38,7 +38,7 @@
 //
 // Used by:
 // - WidgetFrame.tsx (inline <mcwidget> rendering in chat)
-// - ArtifactDetailPage.tsx (full-screen artifact view at /artifacts/<slug>)
+// - useArtifactDetailPageDocument.ts (full-screen artifact view at /artifacts/<slug>)
 
 import { parseCssColor, relativeLuminance } from './iconContrast'
 import { TAILWIND_RUNTIME_PATH as TAILWIND_RUNTIME_PATH_ROOT } from './vendorPaths'
@@ -102,6 +102,18 @@ const cspFor = (scriptOrigin: string, offlineScripts = false): string =>
 const BASE_BODY_CSS =
   "body { margin: 0; padding: 16px; font-family: -apple-system, " +
   "BlinkMacSystemFont, 'Segoe UI', sans-serif; }"
+
+/** `cspFor`'s policy with `'unsafe-inline'` swapped for a nonce, so only a script
+ * the HOST built runs: page-authored <script>, inline handlers and javascript:
+ * URLs are all refused by the browser. A crewmate's report uses it
+ * (`pageScripts: false`): the page is a static snapshot by contract, and a page
+ * script could navigate its own frame to a host the crewmate's egress rules
+ * forbid. Throws rather than return a policy that still admits inline script. */
+function withScriptNonce(policy: string, nonce: string): string {
+  const inline = "script-src 'unsafe-inline' "
+  if (!policy.includes(inline)) throw new Error('cspFor no longer grants inline script; update withScriptNonce')
+  return policy.replace(inline, `script-src 'nonce-${nonce}' `)
+}
 
 /** Sub-threshold height jitter (px) the in-iframe reporter ignores. Animated
  * widgets (canvas, CSS transitions) reflow the body by a pixel or two every
@@ -598,6 +610,53 @@ const FRAME_TOUCH_RELAY_BODY = `(function(){
   window.addEventListener('touchcancel',function(e){if(on){on=false;send('cancel',e);}},opts);
 })();`
 
+/** A static page's links do nothing when clicked. Installed (with the nonce) ahead
+ * of the page, as capture-phase listeners on the window that the page has no
+ * script to undo, so a click cannot navigate the frame to a host carrying the
+ * page's text. A click or auxclick loses its default action when any node on its
+ * path is an `a` or `area` (HTML or SVG), whatever its `href`, since an SVG
+ * animation can change the href a click follows. Every other click keeps its
+ * default, so a `<details>` still opens. The path is the whole tree: a static
+ * page has no shadow root, since its declarative ones are dropped (see
+ * STATIC_PAGE_DROPPED) and it has no script to attach one. */
+const STATIC_LINK_GUARD_BODY = `(function(){function stop(e){` +
+  `var p=e.composedPath?e.composedPath():[];for(var i=0;i<p.length;i++){` +
+  `var l=p[i]&&p[i].localName;if(l==='a'||l==='area'){e.preventDefault();return;}}}` +
+  `window.addEventListener('click',stop,true);window.addEventListener('auxclick',stop,true);})();`
+
+/** Page markup that leaves the frame with no script and no click: a refresh
+ * `meta`, a `link` hint, and `noscript`, which the host parses with scripting
+ * off and the frame with scripting on, so its content is read twice. Plus a
+ * declarative shadow root, which the host's parsers keep as a `template` and the
+ * frame's attaches, so markup inside it is out of the host's reach. */
+const STATIC_PAGE_DROPPED = 'meta, link, noscript, template[shadowrootmode], template[shadowroot]'
+/** Rounds of parse, drop and re-serialize before the page is given up. */
+const STATIC_PAGE_SETTLE_ROUNDS = 3
+
+/** The finished document, parsed exactly as the frame will parse it, with every
+ * {@link STATIC_PAGE_DROPPED} element in the body removed until a parse finds
+ * none. Checked on the final string rather than on the fragment, because markup
+ * can re-parse into a different tree than the one first built. A page that has
+ * not settled after {@link STATIC_PAGE_SETTLE_ROUNDS} keeps only the host's own
+ * scripts: the check fails closed. */
+function settleStaticPage(serialized: string, nonce: string): string {
+  let out = serialized
+  for (let round = 0; round < STATIC_PAGE_SETTLE_ROUNDS; round++) {
+    const parsed = new DOMParser().parseFromString(out, 'text/html')
+    const found = Array.from(parsed.body.querySelectorAll(STATIC_PAGE_DROPPED))
+    if (found.length === 0) return out
+    for (const el of found) el.remove()
+    out = `<!DOCTYPE html>\n${parsed.documentElement.outerHTML}`
+  }
+  const parsed = new DOMParser().parseFromString(out, 'text/html')
+  if (parsed.body.querySelectorAll(STATIC_PAGE_DROPPED).length === 0) return out
+  for (const child of Array.from(parsed.body.childNodes)) {
+    const host = child.nodeName === 'SCRIPT' && (child as Element).getAttribute('nonce') === nonce
+    if (!host) child.remove()
+  }
+  return `<!DOCTYPE html>\n${parsed.documentElement.outerHTML}`
+}
+
 const EXTERNAL_LINK_TARGET_SHIM_BODY = `(function(){
   window.addEventListener('click', function(e){
     var path = typeof e.composedPath === 'function' ? e.composedPath() : null;
@@ -853,26 +912,49 @@ const LIGHT_CANVAS_FALLBACK_VARS: Readonly<Record<(typeof THEME_VAR_NAMES)[numbe
   '--info': '#1d4ed8',
 }
 
+// The Tailwind token grammar the class regexes below share, kept in one place
+// so a new hue, stop or variant form is added once. Each piece is written as a
+// regex literal and read back through `.source`, so the escapes are exactly
+// what a hand-written literal would hold.
+//
+// TW_VARIANT_PREFIX: a token boundary, then optional variant prefixes in
+// Tailwind's full token syntax -- `hover:`, `md:`, `@md:`, `*:`, and bracketed
+// arbitrary variants such as `min-[300px]:` or `[&:hover]:` (name capped at 64
+// chars, bracket body at 256, so a long attribute value cannot make the scan
+// quadratic).
+const TW_VARIANT_PREFIX = /(?:^|[\s"'`])(?:(?=[a-zA-Z0-9@*\[-])[a-zA-Z0-9@*-]{0,64}(?:\[[^\]\s"'`]{1,256}\])?:)*/.source
+// Every default Tailwind hue, as a regex alternation.
+const TW_HUES =
+  /slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose/.source
+// The end of a class token: end of input, a separator, or an opacity `/`.
+const TW_CLASS_END = /(?=$|[\s"'`\/])/.source
+
+/** A Tailwind background-class detector: `bg-<solid>` or `bg-<hue>-<stop>` for
+ * every default hue, behind any variant prefix. `solid` and `stops` are regex
+ * alternations (`'white'`, `'50|100|200'`). No flags: callers only `.test()`. */
+function twBgClassRe(solid: string, stops: string): RegExp {
+  return new RegExp(`${TW_VARIANT_PREFIX}bg-(?:${solid}|(?:${TW_HUES})-(?:${stops}))${TW_CLASS_END}`)
+}
+
 // Tailwind utility classes that paint a light background: `bg-white` and the
-// 50/100/200 stops of every default hue. Optional variant prefixes are
-// allowed in Tailwind's full token syntax -- `hover:`, `md:`, `@md:`, `*:`, and
-// bracketed arbitrary variants such as `min-[300px]:` or `[&:hover]:` (name
-// capped at 64 chars, bracket body at 256, so a long attribute value cannot
-// make the scan quadratic); `dark:` is handled separately below.
-const LIGHT_TAILWIND_BG_RE =
-  /(?:^|[\s"'`])(?:(?=[a-zA-Z0-9@*\[-])[a-zA-Z0-9@*-]{0,64}(?:\[[^\]\s"'`]{1,256}\])?:)*bg-(?:white|(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-(?:50|100|200))(?=$|[\s"'`\/])/
+// 50/100/200 stops of every default hue; `dark:` is handled separately below.
+const LIGHT_TAILWIND_BG_RE = twBgClassRe('white', '50|100|200')
 // The mirror of LIGHT_TAILWIND_BG_RE: `bg-black` and the 700-950 stops. A
 // widget carrying one of these next to a light card is a mixed palette, and
 // flipping it wholesale to light would only trade which half is unreadable.
-const DARK_TAILWIND_BG_RE =
-  /(?:^|[\s"'`])(?:(?=[a-zA-Z0-9@*\[-])[a-zA-Z0-9@*-]{0,64}(?:\[[^\]\s"'`]{1,256}\])?:)*bg-(?:black|(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-(?:700|800|900|950))(?=$|[\s"'`\/])/
+const DARK_TAILWIND_BG_RE = twBgClassRe('black', '700|800|900|950')
+// A `dark:` variant, bare or behind chained prefixes such as `md:dark:`.
+const DARK_VARIANT_RE = new RegExp(`${TW_VARIANT_PREFIX}dark:`)
 // Inline `background` / `background-color` declarations carrying a literal
 // color. Captures the value for a luminance check.
 const INLINE_BG_DECL_RE = /background(?:-color)?\s*:\s*(#[0-9a-f]{3,8}\b|rgba?\([^)]*\)|white\b)/gi
 // Tailwind arbitrary-value backgrounds (`bg-[#f0fdf4]`, `bg-[rgb(250,250,250)]`,
 // `bg-[white]`), which neither regex above sees. Captures the literal for the
 // same luminance check; `_` inside the brackets is Tailwind's space escape.
-const ARBITRARY_BG_CLASS_RE = /(?:^|[\s"'`])(?:(?=[a-zA-Z0-9@*\[-])[a-zA-Z0-9@*-]{0,64}(?:\[[^\]\s"'`]{1,256}\])?:)*bg-\[(#[0-9a-f]{3,8}|rgba?\([^\]]*\)|white)\]/gi
+const ARBITRARY_BG_CLASS_RE = new RegExp(
+  `${TW_VARIANT_PREFIX}${/bg-\[(#[0-9a-f]{3,8}|rgba?\([^\]]*\)|white)\]/.source}`,
+  'gi',
+)
 
 /** Relative luminance (0..1) of a CSS `#hex` / `rgb()` / `white` literal, or
  * null when it cannot be parsed. `parseCssColor` (the favicon-contrast parser)
@@ -946,7 +1028,7 @@ function isLightCanvasAuthored(html: string): boolean {
   if (!html) return false
   const styled = styledSurfaces(html)
   if (/var\(\s*--/.test(styled)) return false
-  if (/(?:^|[\s"'`])(?:(?=[a-zA-Z0-9@*\[-])[a-zA-Z0-9@*-]{0,64}(?:\[[^\]\s"'`]{1,256}\])?:)*dark:/.test(styled)) return false
+  if (DARK_VARIANT_RE.test(styled)) return false
   if (DARK_TAILWIND_BG_RE.test(styled)) return false
   let sawLight = LIGHT_TAILWIND_BG_RE.test(styled)
   for (const re of [INLINE_BG_DECL_RE, ARBITRARY_BG_CLASS_RE]) {
@@ -978,11 +1060,25 @@ export function resolveWidgetTheme(
   return { themeVars, mode }
 }
 
+/** Common "surface" names no theme defines, pointed at the injected names they
+ * mean. A widget reaching for `var(--surface, #1e1e1e)` otherwise always gets
+ * its dark literal, which is unreadable under a light theme. Each alias is a
+ * `var()` reference, so it follows the theme (and the light-canvas fallback),
+ * and when its target is missing the widget's own fallback still applies. */
+const THEME_VAR_ALIASES: Readonly<Record<string, (typeof THEME_VAR_NAMES)[number]>> = {
+  '--surface': '--card',
+  '--surface-secondary': '--bg-elevated',
+}
+
 function buildThemeCss(vars: Record<string, string>, mode: 'dark' | 'light'): string {
-  const rootBody = Object.entries(vars).map(([k, v]) => `${k}:${v}`).join(';')
+  const declarations = Object.entries(vars).map(([k, v]) => `${k}:${v}`)
   // No readable vars means no theme to apply, and inventing one is worse than
   // the browser's own defaults — a guard pins that this path emits no `:root`.
-  if (!rootBody) return ''
+  if (!declarations.length) return ''
+  for (const [alias, target] of Object.entries(THEME_VAR_ALIASES)) {
+    if (!(alias in vars)) declarations.push(`${alias}:var(${target})`)
+  }
+  const rootBody = declarations.join(';')
   return (
     `:root{${rootBody};color-scheme:${mode}}` +
     // On the root element as well as the body: background propagates from html
@@ -1045,6 +1141,13 @@ export function recloneScripts(root: ParentNode, doc: Document): void {
   }
 }
 
+/** 128 random bits as hex: a CSP nonce, so attribute-safe as written. */
+function mintScriptNonce(): string {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
 interface BuildSrcdocOptions {
   html: string
   themeVars: Record<string, string>
@@ -1068,6 +1171,13 @@ interface BuildSrcdocOptions {
    * `connect-src 'none'` does not close. Off by default, so no widget surface
    * changes. */
   offlineScripts?: boolean
+  /** Let the page's own scripts run. On by default. Set false by a crewmate's
+   * report: the document CSP then admits only the host's scripts, each carrying a
+   * nonce minted for this document, so a page script, inline handler or
+   * `javascript:` URL never runs while the height reporter and comment bridge do.
+   * The page's links are inert and its refresh `meta`, `link` and `noscript` are
+   * dropped (see settleStaticPage), so nothing moves the frame without a script. */
+  pageScripts?: boolean
   /** Localized label for that indicator. Required when `showLoadingOverlay` is
    * set — the iframe cannot reach the parent's i18n catalog, so an untranslated
    * default here would visibly flip to English mid-load in every non-English
@@ -1099,6 +1209,7 @@ export function buildSrcdoc({
   loadingLabel = '',
   rewriteBareLinks = true,
   offlineScripts = false,
+  pageScripts = true,
   relayTouches = false,
 }: BuildSrcdocOptions): string {
   // A widget hardcoded for a light canvas renders on a light canvas even when
@@ -1139,10 +1250,20 @@ export function buildSrcdoc({
   // path returns above), so location.origin is always defined.
   const scriptOrigin = window.location.origin
 
+  // Minted per document and never derived from the page, so a page cannot carry it.
+  const nonce = pageScripts ? '' : mintScriptNonce()
+  const hostScript = (): HTMLScriptElement => {
+    const script = doc.createElement('script')
+    if (nonce) script.setAttribute('nonce', nonce)
+    return script
+  }
+
   // <meta CSP>
   const csp = doc.createElement('meta')
   csp.setAttribute('http-equiv', 'Content-Security-Policy')
-  csp.setAttribute('content', cspFor(scriptOrigin, offlineScripts))
+  csp.setAttribute('content', nonce
+    ? withScriptNonce(cspFor(scriptOrigin, offlineScripts), nonce)
+    : cspFor(scriptOrigin, offlineScripts))
   head.appendChild(csp)
 
   // Tailwind v4 dark-mode directives (compiled by the runtime on load). Placed
@@ -1215,7 +1336,7 @@ export function buildSrcdoc({
   // on-load attempt sees the wrapper too; without user activation its fallback
   // still fails rather than gaining an ambient clipboard-write path.
   // textContent assignment only — no LLM/user content interpolated.
-  const clipboardShim = doc.createElement('script')
+  const clipboardShim = hostScript()
   clipboardShim.textContent = CLIPBOARD_FALLBACK_SHIM_BODY
   body.appendChild(clipboardShim)
 
@@ -1225,15 +1346,23 @@ export function buildSrcdoc({
   // Skipped for hosts whose sandbox withholds popups, where the rewrite would
   // be a dead click. textContent assignment only.
   if (rewriteBareLinks) {
-    const linkTargetShim = doc.createElement('script')
+    const linkTargetShim = hostScript()
     linkTargetShim.textContent = EXTERNAL_LINK_TARGET_SHIM_BODY
     body.appendChild(linkTargetShim)
+  }
+
+  // A static page's links are inert (see STATIC_LINK_GUARD_BODY), registered
+  // ahead of the page. textContent assignment only.
+  if (nonce) {
+    const linkGuard = hostScript()
+    linkGuard.textContent = STATIC_LINK_GUARD_BODY
+    body.appendChild(linkGuard)
   }
 
   // Touch relay (see FRAME_TOUCH_RELAY_BODY), ahead of the LLM html so its
   // capture-phase listeners are registered first. textContent assignment only.
   if (relayTouches) {
-    const touchRelay = doc.createElement('script')
+    const touchRelay = hostScript()
     touchRelay.textContent = FRAME_TOUCH_RELAY_BODY
     body.appendChild(touchRelay)
   }
@@ -1265,7 +1394,7 @@ export function buildSrcdoc({
     overlay.appendChild(doc.createTextNode(loadingLabel))
     body.insertBefore(overlay, body.firstChild)
 
-    const revealScript = doc.createElement('script')
+    const revealScript = hostScript()
     revealScript.textContent = `(function(){
       var el=document.getElementById('mc-tw-loading');
       if(!el)return;
@@ -1294,14 +1423,14 @@ export function buildSrcdoc({
 
   // Height reporter (optional). textContent assignment, not template-literal.
   if (includeHeightReporter) {
-    const reporter = doc.createElement('script')
+    const reporter = hostScript()
     reporter.textContent = HEIGHT_REPORTER_BODY
     body.appendChild(reporter)
   }
 
   // Unsafe-centering guard: keeps the top of flex/grid-centered artifact
   // bodies reachable when the content overflows the iframe viewport.
-  const safeCenter = doc.createElement('script')
+  const safeCenter = hostScript()
   safeCenter.textContent = SAFE_CENTER_GUARD_BODY
   body.appendChild(safeCenter)
 
@@ -1311,7 +1440,7 @@ export function buildSrcdoc({
     const hlStyle = doc.createElement('style')
     hlStyle.textContent = COMMENT_HIGHLIGHT_CSS
     head.appendChild(hlStyle)
-    const bridge = doc.createElement('script')
+    const bridge = hostScript()
     bridge.textContent = COMMENT_BRIDGE_BODY
     body.appendChild(bridge)
   }
@@ -1345,10 +1474,16 @@ export function buildSrcdoc({
   //     body script executes, so only the element's own handler is free of
   //     that ordering hazard. Static trusted string — no LLM content.
   const serialized = `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`
-  return serialized.replace(
+  const finished = serialized.replace(
     /<meta name="x-script-placeholder" data-src="([^"]*)">/,
-    (_match, src) => `<script src="${src}" crossorigin="anonymous" onerror="${TW_ERROR_INLINE_HANDLER}"></script>`,
+    // With a nonce the inline `onerror` would be refused, so the tag drops it; the
+    // overlay's hang backstop still uncovers the page.
+    (_match, src) => nonce
+      ? `<script src="${src}" crossorigin="anonymous" nonce="${nonce}"></script>`
+      : `<script src="${src}" crossorigin="anonymous" onerror="${TW_ERROR_INLINE_HANDLER}"></script>`,
   )
+  // A static page also loses what navigates the frame without a script.
+  return nonce ? settleStaticPage(finished, nonce) : finished
 }
 
 /** SSR fallback for environments without a DOM. Used only by unit tests

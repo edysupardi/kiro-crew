@@ -100,7 +100,10 @@ class AgentConfig:
             "(agent.model) and then to the provider default, so an unpinned "
             "role stays usable on every subscription tier. Pin a cheaper model "
             "here to run background / sub-agent work on it without changing the "
-            "interactive chat default.",
+            "interactive chat default. A 'subagent' pin runs each spawned "
+            "sub-agent in its own runtime (its own agent process and MCP "
+            "servers, about 0.55 GB of memory each) where it could otherwise "
+            "share the parent chat's.",
         ),
     )
     role_efforts: dict[str, str] = field(
@@ -110,7 +113,10 @@ class AgentConfig:
             "Optional per-task-class reasoning effort, paired with role_models "
             "(keys: 'background', 'subagent'). Empty for a role inherits the chat "
             "default (agent.reasoning_effort) and then the provider/model default. "
-            "Only applies on reasoning-capable models.",
+            "Only applies on reasoning-capable models. Like a model pin, a "
+            "'subagent' effort runs each spawned sub-agent in its own runtime "
+            "(about 0.55 GB of memory each) where it could otherwise share the "
+            "parent chat's.",
         ),
     )
     model_context_tokens: dict[str, int] = field(
@@ -229,12 +235,10 @@ class AgentConfig:
         metadata=_meta(
             "Crew member ACP backend",
             "Backend for crew-member DM sessions: 'kas' (default when omitted or '') "
-            "or another dispatch-capable backend (claude, codex, opencode, goose); "
-            "'kiro' selects kiro-cli. "
-            "Members dispatch work into worker sessions through session-control "
-            "tools mounted per session over the wire, which the kiro-cli v2 "
-            "backend cannot carry — a value resolving to kiro leaves member "
-            "threads as plain chat (no dispatch tools), logged at session start.",
+            "or another dispatch-capable backend (claude, codex, opencode, goose). "
+            "Crewmates run on KAS as their Kiro backend, so 'kiro' here also "
+            "selects KAS. Members dispatch work into worker sessions through "
+            "session-control tools mounted per session over the wire.",
             # Same no-enum reasoning as acp_backend above: the live selectable
             # set comes from the registry via resolve_selected_backend, never a
             # frozen literal.
@@ -253,6 +257,23 @@ class AgentConfig:
             "with nothing installed refuses the spawn and names the install command.",
             # The running KAS runtime keeps its process across the switch, so
             # sessions move routes only once that process is replaced.
+            restart=True,
+        ),
+    )
+    kas_persist_mcp_sign_in: bool = field(
+        default=False,
+        metadata=_meta(
+            "KAS: keep remote MCP sign-ins across sessions",
+            "When true, the 'kas' backend lets Kiro Crew keep a remote MCP server's "
+            "OAuth sign-in (client registration and tokens) in a dedicated encrypted "
+            "vault under the data home (kas/mcp-grants/), so new sessions, subagents "
+            "and crons reuse it until the refresh token expires or is revoked. The "
+            "vault is not the Secrets vault: it is not listed there and cannot be "
+            "granted to a cron, and the agent cannot read it. When false (the "
+            "default), the engine keeps each sign-in in memory and a new session "
+            "asks again.",
+            # Declared in the engine's initialize, so a running KAS process keeps
+            # what it declared until it is replaced.
             restart=True,
         ),
     )
@@ -420,6 +441,16 @@ class AgentConfig:
             "refuses if that name later resolves to a different repository. "
             "Legacy repository-backed grants without an entry require one-time "
             "re-consent before code execution.",
+        ),
+    )
+    apps_default_installs_applied: list[str] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Applied Default App Installs",
+            "App names already installed once because their registry marked "
+            "them defaultInstall. A name here is never installed again "
+            "automatically, so an app you uninstall or disable stays that way. "
+            "Remove a name to let it be installed again on the next start.",
         ),
     )
     apps_ui_stream_timeout_secs: int = field(

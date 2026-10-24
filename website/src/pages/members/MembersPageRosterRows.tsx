@@ -51,6 +51,7 @@ export function MemberRow({
   scrollActiveRowIntoView,
   slugCollides,
   indented,
+  faceOnStage,
 }: {
   m: MemberRosterRow
   t: TFn
@@ -71,6 +72,9 @@ export function MemberRow({
   slugCollides: boolean
   /** The row sits under a team header: stepped in so the header reads as its group. */
   indented: boolean
+  /** This crewmate's face is centre stage in the first Mate's entrance (#23207):
+   *  the row keeps its box and holds the face unpainted until it lands. */
+  faceOnStage: boolean
 }) {
   // Withheld for a colliding slug, exactly as the page's merged list and drawer
   // do: this row shares its slug with another member, so a slug-keyed frame
@@ -156,7 +160,12 @@ export function MemberRow({
           )}
           aria-current={view.name === activeName ? 'true' : undefined}
         >
-          <span className="relative shrink-0">
+          <span
+            className="relative shrink-0"
+            style={faceOnStage ? { visibility: 'hidden' } : undefined}
+            data-testid="member-row-face"
+            data-entrance-empty={faceOnStage ? '' : undefined}
+          >
             {/* The face reacts: it animates while the member works and
                 flashes its finished / failed expression on the turn's
                 trailing edge. The dot below stays presence-only — a
@@ -297,7 +306,7 @@ export function MemberRow({
  *  tokens follow `EmptyState` in components/ui.tsx; the face is the real ghost at
  *  full strength rather than EmptyState's 12%-opacity icon, because here the
  *  avatar IS the subject (what a crewmate looks like), not decoration. */
-export function CrewmateEmptyHero({ onCreate, onAdvanced, held }: {
+export function CrewmateEmptyHero({ onCreate, onAdvanced, held, onImport }: {
   onCreate: () => void
   /** Opens the New crewmate card with its Advanced settings unfolded. */
   onAdvanced: () => void
@@ -309,6 +318,8 @@ export function CrewmateEmptyHero({ onCreate, onAdvanced, held }: {
    * the dialog reads the same hold.
    */
   held: string | null
+  /** Opens Import from file (rfc-crewmate-share.md §5.4). */
+  onImport?: () => void
 }) {
   const { t } = useTranslation()
   return (
@@ -341,6 +352,20 @@ export function CrewmateEmptyHero({ onCreate, onAdvanced, held }: {
       >
         {t('pages.membersPage.create_advanced')}
       </button>
+      {/* The header "+" menu and the switcher are both hidden here, so the
+          first crewmate can only be imported from this hero. */}
+      {onImport && (
+        <button
+          type="button"
+          onClick={onImport}
+          disabled={held !== null}
+          className="text-[12.5px] text-muted underline-offset-2 hover:underline bg-transparent border-none cursor-pointer disabled:cursor-default disabled:opacity-60"
+          data-testid="crewmate-empty-import"
+          {...uiLocation('members.empty.import')}
+        >
+          {t('pages.membersPage.import_from_file')}
+        </button>
+      )}
     </div>
   )
 }

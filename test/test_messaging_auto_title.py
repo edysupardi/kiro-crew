@@ -25,6 +25,7 @@ import pytest
 
 from kiro_crew.acp.types import EVENT_COMPLETE, EVENT_PERMISSION_REQUEST, EVENT_TEXT_CHUNK
 from kiro_crew.messaging import auto_title
+from kiro_crew.testing.wait import finished
 
 _KEY = "telegram:kirocrew:direct:4242"
 
@@ -535,7 +536,7 @@ class TestDeletedDuringTheTurn:
         ``state != RECORD_PRESENT`` is known at entry and no title the model could
         produce would change the verdict, so streaming one first would spend a
         whole background turn on an answer that is discarded either way. All three
-        dispatchers persist the turn before they pin -- ``slack/handler.py`` and
+        dispatchers persist the turn before they pin -- ``slack/handler_runtime/delivery.py`` and
         ``slack/transport_dispatch.py`` always did, and Telegram was reordered to
         match -- so a record that cannot be pinned is one that is genuinely gone,
         not a conversation whose first turn has not been written yet.
@@ -602,7 +603,7 @@ class TestDeletedDuringTheTurn:
         nothing checks is an ordering that comes back.
         """
         sites = {
-            "slack/handler.py": "conversation_log, session_key",
+            "slack/handler_runtime/delivery.py": "conversation_log, session_key",
             "slack/transport_dispatch.py": "conversation_log, session_key",
             "telegram/dispatch/turn_engine.py": "self.conv_log, session_key",
         }
@@ -679,7 +680,7 @@ class TestDeletedDuringTheTurn:
         reproduces that. The ordering is invisible to every behavioural test, which
         is exactly why it needs a structural one.
 
-        The anchor is the verdict step rather than any ``_release_permit()`` text.
+        The anchor is the verdict step rather than any ``turn.release_permit()`` text.
         Earlier releases in the file belong to paths that return before the title
         block, and the last one trails it, so neither bounds the window. The
         verdict step is where the permit is released on the path that reaches the
@@ -687,7 +688,9 @@ class TestDeletedDuringTheTurn:
         so a pin above the verdict step is held on both.
         """
         package_root = os.path.dirname(os.path.dirname(auto_title.__file__))
-        with open(os.path.join(package_root, "slack/handler.py"), encoding="utf-8") as handle:
+        with open(
+            os.path.join(package_root, "slack/handler_runtime/delivery.py"), encoding="utf-8"
+        ) as handle:
             body = handle.read()
         code = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
         pin_at = code.find("auto_title.pin_record(conversation_log, session_key)")
@@ -713,7 +716,9 @@ class TestDeletedDuringTheTurn:
         the permit-held pin closes.
         """
         package_root = os.path.dirname(os.path.dirname(auto_title.__file__))
-        with open(os.path.join(package_root, "slack/handler.py"), encoding="utf-8") as handle:
+        with open(
+            os.path.join(package_root, "slack/handler_runtime/delivery.py"), encoding="utf-8"
+        ) as handle:
             body = handle.read()
         code = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
         reread_at = code.rfind("auto_title.pin_record(conversation_log, session_key)")
@@ -733,7 +738,7 @@ class TestDeletedDuringTheTurn:
         circuit without weakening the pin-before-claim order.
         """
         sites = {
-            "slack/handler.py": "conversation_log, session_key",
+            "slack/handler_runtime/delivery.py": "conversation_log, session_key",
             "slack/transport_dispatch.py": "conversation_log, session_key",
             "telegram/dispatch/turn_engine.py": "self.conv_log, session_key",
         }
@@ -1364,7 +1369,7 @@ class TestLock:
         assert fresh is not held, "reset must install a lock, not reuse the held one"
         assert not fresh.locked()
         # And it is actually usable, not merely reporting itself free.
-        await asyncio.wait_for(fresh.acquire(), timeout=1)
+        await finished(fresh.acquire(), "acquiring the fresh lock")
         fresh.release()
 
     def test_the_lock_still_works_when_the_event_loop_changes(self):

@@ -1,7 +1,7 @@
 """``session_fork``: a new session that CARRIES a transcript, opened by an agent.
 
 Three layers, three suites. The core (``session_control.fork_session``) is
-exercised against real slot objects, as ``test_session_control.py`` does for the
+exercised against real slot objects, as ``test_session_control*.py`` do for the
 other verbs, because every refusal reads production attributes off the slot and a
 permissive double would let a dead guard look alive. The HTTP route is asserted
 through the handler with the same request double the other routes use. The tool
@@ -44,7 +44,7 @@ def _enabled(monkeypatch):
 @pytest.fixture(autouse=True)
 def _fresh_create_budget():
     """The per-caller create-rate window is process-wide module state (see the
-    sibling fixture in ``test_session_control.py``); a fork spends the same budget."""
+    sibling fixture in ``session_control_helpers.py``); a fork spends the same budget."""
     create_rate_limit.reset_for_tests()
     yield
     create_rate_limit.reset_for_tests()
@@ -250,10 +250,11 @@ def test_a_source_moved_to_another_workspace_mid_fork_is_refused(tmp_path, monke
     with pytest.raises(sc.SessionControlError) as exc:
         _fork(state, caller, source=peer.key)
     # The containment re-check answers first, with read's own code; the frozen
-    # fork identity (which now carries the workspace) is the backstop behind it.
+    # fork identity (which now carries the workspace and the agent kind) is the
+    # backstop behind it.
     assert exc.value.code == "workspace_mismatch"
     assert set(state._slots) == before, "a refused fork leaves no child behind"
-    assert chat_fork.ForkSource.__dataclass_fields__["identity"].type.count("str") == 6
+    assert chat_fork.ForkSource.__dataclass_fields__["identity"].type.count("str") == 7
 
 
 def test_the_frozen_fork_identity_refuses_a_self_source_that_moved_workspace(tmp_path, monkeypatch):
@@ -721,9 +722,12 @@ class TestTheRoute:
         assert owners, "expected the server_runtime owners beside server.py"
         routes = source + "".join(path.read_text(encoding="utf-8") for path in owners)
         assert '_deferred("session_control", "api_session_control_fork")' in routes
-        # The strict set is the only one left in server.py, so its segment ends at the
-        # mixed set that follows it.
-        strict = source.split("_STRICT_INTERNAL_API_PATHS")[1].split("_MIXED_INTERNAL_API_PATHS")[0]
+        # The strict set is defined in the internal-paths data module, so its segment
+        # ends at the mixed set that follows it there.
+        paths = (Path(server_mod.__file__).parent / "server_internal_paths.py").read_text(
+            encoding="utf-8"
+        )
+        strict = paths.split("_STRICT_INTERNAL_API_PATHS")[1].split("_MIXED_INTERNAL_API_PATHS")[0]
         assert '"/api/session-control/fork",' in strict
 
 

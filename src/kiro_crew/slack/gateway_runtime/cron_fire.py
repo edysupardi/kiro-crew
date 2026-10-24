@@ -5,7 +5,9 @@ runs a crewmate's goal reminder, captures what the fire needs, checks the overla
 guard, and dispatches: the command and script arms, the message job's fire-time gate
 and first-run tab, then the agent sequence or the single-agent turn. This module
 also owns what a fire needs before its turn runs: the capture, resolving a crew alias
-to the agent it dispatches, and acquiring the session that agent runs in.
+to the agent it dispatches, and acquiring the session that agent runs in; and
+arming the scheduler once memory is ready, and saying when startup moved an
+unreadable cron store aside.
 
 Orchestrator fields read: ``_cfg``, ``_no_crons``, ``_running_script_ids``,
 ``ctx_builder``, ``dashboard_state``, ``sessions``.
@@ -232,6 +234,9 @@ async def _init_cron(self: GatewayOrchestrator, *, arm: bool = True) -> None:
     self._cron_quarantine = moved if isinstance(moved, Path) else None
     if self.dashboard_state:
         self.cron_svc.set_refresh_callback(self.dashboard_state.push_refresh)
+    # A run its deadline ends never returns to _cron_callback, whose failure
+    # paths are the only ones that alert; the service hands it back here.
+    self.cron_svc.set_timeout_alert(self._alert_cron_failure)
     if self._no_crons:
         logger.info("Cron scheduler disabled (--no-crons)")
     else:
@@ -318,7 +323,7 @@ async def _cron_capture(self: GatewayOrchestrator, job: CronJob) -> _CronCapture
     # "kirocrew" floor instead of failing the dispatch.
     _default_agent = ""
     # True once the dispatched agent came from ``agent.default_agent``.
-    # That field is the TEMPLATE namespace (config/sections.py, free-form
+    # That field is the TEMPLATE namespace (config/sections_agent.py, free-form
     # str, no alias validation) -- unlike the alias-namespaced default,
     # which has its own `default_agent_not_alias` guard. The collapse in
     # _resolve_cron_agent treats ANY name that keys ``cfg.agents`` as a
@@ -368,6 +373,24 @@ async def _cron_capture(self: GatewayOrchestrator, job: CronJob) -> _CronCapture
             )
 
         cron_execution = await asyncio.to_thread(resolve_legacy_execution)
+    if not agent_sequence_dispatches(cron_agents):
+        # A crewmate's scheduled turn is work, so it runs on that crewmate's
+        # worker (its kit, servers and permissions), never on the conductor its
+        # chat runs on. The key, store, member and mode are the capture's; only
+        # the selection becomes the worker's. Read at every fire, so a job
+        # captured before the crewmate owned its file needs no migration.
+        from kiro_crew.mate_worker import cron_worker_execution
+
+        # The live config the resolver below reads, never a reload: the capture
+        # runs on the loop's behalf and a fire must not reread config.json.
+        _cfg_live = live.snapshot() or getattr(self, "_cfg", None)
+        worker_execution = (
+            await asyncio.to_thread(cron_worker_execution, cron_execution, _cfg_live)
+            if _cfg_live is not None
+            else None
+        )
+        if worker_execution is not None:
+            cron_execution = worker_execution
     cron_memory_store, cron_agent = (
         cron_execution.store.legacy_name,
         cron_execution.template_id,
@@ -530,7 +553,7 @@ def _resolve_cron_agent(
     "Agent mode 'in-3d' is not available … its ~/.kiro/agents/
     in-3d.json is likely missing". The dashboard chat path already
     collapses the alias the right way — see
-    ``chat_runner._allocation_kwargs``, which passes
+    ``_turn_admit``'s ``_allocation_kwargs``, which passes
     ``agent=<kiro_agent>`` alongside ``crew_agent=<alias>`` so
     ``prepare_runtime`` still resolves the member identity from the
     alias. The cron path was the one turn-running surface that
@@ -563,7 +586,7 @@ def _resolve_cron_agent(
     # A template-namespace name is NOT a crew alias, even when it
     # happens to key ``cfg.agents``. ``agent.default_agent`` is a
     # free-form str in the template namespace with no alias
-    # validation (config/sections.py), so an operator naming a crew
+    # validation (config/sections_agent.py), so an operator naming a crew
     # member there is ordinary input -- and the collapse below keys
     # only on membership in ``cfg.agents``, then returns the alias as
     # ``crew_agent``, which ``resolve_crew_identity`` honours
@@ -622,6 +645,9 @@ def _resolve_cron_agent(
         # through to the by-alias path below instead.
         resolved_alias = alias
         captured_member = None if sequence_step else getattr(cron_execution, "member_id", None)
+        from kiro_crew.mate_worker import MATE_WORKER_AGENT, is_own_worker_execution
+
+        own_worker = not sequence_step and is_own_worker_execution(cron_execution)
         if captured_member:
             try:
                 from kiro_crew.execution_context import member_config_for_id
@@ -653,6 +679,12 @@ def _resolve_cron_agent(
         # execution-context resolution validates the store later.
         bindings = resolve_agent_bindings(cfg, resolved_alias, validate_memory_files=False)
         kiro_agent = bindings.kiro_agent or None
+        if own_worker:
+            # The crewmate's alias resolves to its chat agent, the conductor; a
+            # scheduled turn runs on its worker instead, in the crewmate's
+            # workspace. No crew alias: a worker is a template session whose
+            # identity is its record (member, store), as a hand-off opens it.
+            kiro_agent = MATE_WORKER_AGENT
         # Anchor the workspace dir by the one placement rule. The
         # resolved bindings.workspace_dir is the RAW configured value
         # (e.g. the shipped relative default "workspace"); handing
@@ -680,7 +712,7 @@ def _resolve_cron_agent(
         # prepare_runtime needs it to resolve the member identity (the
         # kiro_agent name alone is not a config.agents key), and it is
         # the alias pinned to the captured member_id above.
-        return kiro_agent, cwd, resolved_alias
+        return kiro_agent, cwd, ("" if own_worker else resolved_alias)
     except Exception:
         logger.debug("cron agent resolve failed for %r", alias, exc_info=True)
         return None, None, None
@@ -732,6 +764,12 @@ async def _acquire_with_model_fallback(
         )
     else:
         await asyncio.to_thread(bind_session_execution, key, bound_execution)
+    # A crewmate's scheduled turn runs on its worker (``cron_worker_execution``),
+    # so its key takes the worker's backend route (``select_provider_backend``:
+    # the crewmate's member backend), as a hand-off's worker does.
+    from kiro_crew.mate_worker import note_worker_session
+
+    note_worker_session(key, bound_execution)
     modes = getattr(self.ctx_builder, "_session_memory_modes", None)
     if isinstance(modes, dict):
         # A separately scheduled run is durable work, not a child
@@ -843,3 +881,36 @@ def _retained_session_agent_mismatch(
     if isinstance(live_agent, str) and live_agent and live_agent != (agent or ""):
         return live_agent
     return None
+
+
+def _announce_cron_quarantine(self: GatewayOrchestrator) -> None:
+    """Tell the dashboard that startup moved an unreadable cron store aside."""
+    moved = getattr(self, "_cron_quarantine", None)
+    if moved is None or self.dashboard_state is None:
+        return
+    self.dashboard_state.notify(
+        "cron",
+        "Scheduled tasks could not be read",
+        "The schedule file was not a readable schedule (invalid JSON, or no jobs "
+        f"list), so Kiro Crew moved it to {moved} and started with no scheduled "
+        "tasks. Nothing was deleted. To restore: fix that copy, stop Kiro Crew, "
+        f"move it back to {data_home() / 'crons.json'}, and start again. "
+        "`kirocrew doctor` shows the same steps.",
+    )
+
+
+async def _start_cron_after_memory_ready(self: GatewayOrchestrator) -> None:
+    """Arm overdue jobs only after the memory preparation fence completes."""
+    if self._no_crons or self.cron_svc is None or not self._cron_reconciled:
+        return
+    if self._cron_armed:
+        return
+    startup = getattr(self, "_memory_startup", None)
+    if startup is not None and (startup.stopped or not startup.ready):
+        raise RuntimeError("Cron scheduler cannot start before memory preparation completes")
+    await self.cron_svc.start()
+    self._cron_armed = True
+    if self.sessions:
+        self.cron_svc.start_reaper(self.sessions)
+    else:
+        logger.warning("Cron reaper not started: sessions not available")

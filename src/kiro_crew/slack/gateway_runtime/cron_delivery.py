@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     import time
 
     from kiro_crew.slack.gateway import (
-        _CRON_MSG_LIMIT,
         _SUCCESS_REMINDER_SECS,
         Any,
         CronJob,
@@ -52,6 +51,12 @@ async def _deliver_cron_agent_result(
     Runs inside the turn's ``try``, so a delivery error reaches the turn's
     failure handler as before. Returns the result the job stores.
     """
+    if rh != job.last_posted_hash and self.dashboard_state:
+        # A changed result of a crewmate's scheduled turn reaches that crewmate's
+        # thread as one of its worker reports; an identical one wakes nobody.
+        from kiro_crew.dashboard.mate_thread_wakes import note_cron_result
+
+        await note_cron_result(self.dashboard_state, job, session_key, result_text)
     if rh == job.last_posted_hash:
         job.consecutive_dupes += 1
         # Time-based reminder: re-post after 24h so persistent identical
@@ -371,3 +376,8 @@ async def _deliver_cron_agent_result(
                     meta={"job_id": job.id},
                 )
     return result_text
+
+
+# Slack Block Kit section.text hard limit is 3000 chars.
+# We split cron output at this boundary so each chunk fits in a section block.
+_CRON_MSG_LIMIT = 3000

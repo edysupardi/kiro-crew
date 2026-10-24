@@ -83,14 +83,23 @@ _ALL_DRIFT = {
 
 #: Distinct names other packages import from the pipeline's modules. May only fall.
 _EXPORT_BUDGET = 31
-_PIPELINE_MODULES = ("kiro_crew.messaging.dispatch", "kiro_crew.messaging.turn_bracket")
+_PIPELINE_MODULES = (
+    "kiro_crew.messaging.dispatch",
+    "kiro_crew.messaging.dispatch_admission",
+    "kiro_crew.messaging.dispatch_contract",
+    "kiro_crew.messaging.dispatch_crew_log",
+    "kiro_crew.messaging.dispatch_recovery",
+    "kiro_crew.messaging.dispatch_tools",
+    "kiro_crew.messaging.turn_bracket",
+)
 
 
 def _dispatcher_files() -> dict[str, list[Path]]:
     """Each channel's dispatch modules, keyed by the channel's package name."""
     root = src_root()
     found: dict[str, list[Path]] = {}
-    for path in sorted(root.glob("*/transport_dispatch.py")) + sorted(root.glob("*/dispatch/*.py")):
+    owners = sorted(root.glob("*/dispatch/*.py")) + sorted(root.glob("*/transport_dispatch_*.py"))
+    for path in sorted(root.glob("*/transport_dispatch.py")) + owners:
         channel = path.relative_to(root).parts[0]
         found.setdefault(channel, []).append(path)
     return found

@@ -1,8 +1,8 @@
 """The tracked background maintenance both entrypoints start once the listener serves.
 
 The warm-mint scavenge and its cleanup, the local decision model, the session search
-indexer, the knowledge orphan reclaim, the data home's owner-only mode repair, and the
-own-address read for the ssh self-target floor.
+indexer, the knowledge orphan reclaim, the data home's owner-only mode repair, the
+pinned-session order load, and the own-address read for the ssh self-target floor.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from kiro_crew.dashboard.server import (
         _OWN_HOST_WARM_TASKS,
         DashboardState,
+        chat,
         data_home,
         logger,
         shutdown_event,
@@ -225,6 +226,22 @@ def _kick_session_search_index(state: DashboardState) -> None:
                 "search falls back to scanning the transcripts"
             )
 
+    def _warm_search() -> None:
+        """Pay the first search's query-independent cost before a user does.
+
+        Runs once the index schema is current, off the loop and after readiness,
+        so a cold gateway's first searches do not each start from an unread
+        session list and an unopened index. Best effort: a failure only means
+        the first search pays that cost itself.
+        """
+        log = state.conversation_log
+        if log is None:
+            return
+        try:
+            log.warm_search()
+        except Exception:  # noqa: BLE001 — a warm-up must never stop indexing
+            logger.warning("Session search warm-up failed", exc_info=True)
+
     async def _session_index_supervisor() -> None:
         log = state.conversation_log
         if log is None:
@@ -250,6 +267,7 @@ def _kick_session_search_index(state: DashboardState) -> None:
             # improve by retrying, such as a transcript directory that is not
             # there, sets ``gave_up`` inside ``start`` and so exits immediately.
             await asyncio.to_thread(supervisor.start)
+            await asyncio.to_thread(_warm_search)
             while not supervisor.gave_up:
                 wait_secs = await asyncio.to_thread(supervisor.poll)
                 await asyncio.sleep(wait_secs)
@@ -372,6 +390,42 @@ def _kick_knowledge_orphan_reclaim(state: DashboardState) -> None:
     task.add_done_callback(state._background_tasks.discard)
 
 
+def _kick_otel_crew_log_subscriber(state: DashboardState) -> None:
+    """Install the OTel usage export's crew-log subscription post-bind, off the loop.
+
+    ``install_otel_crew_log_subscriber`` reads telemetry consent through
+    ``get_recorder()``, and on an opted-in host the first ``get_recorder()`` builds
+    the recorder synchronously: it imports the OTel SDK (about 57 ms) and writes the
+    install id. Called inline between the bind and the ``KIROCREW_READY`` publish, that
+    import and file write sit on the one ordered path the listener's readiness waits on
+    (``no-new-work-on-gateway-boot-path``). So the install runs on a worker thread,
+    the same shape as the ``_kick_*`` calls above it, and nothing is awaited in front
+    of the publish.
+
+    A no-op for an unopted host (``telemetry.enabled`` off, the default): the consent
+    read returns, the thread finds nothing to subscribe, and the task ends. The bus
+    subscription the install registers is a process-global write guarded by the bus's
+    own lock, not loop-bound, so it is safe off the loop; a fold delivered before the
+    subscription lands is simply not exported, which is the baseline the exporter
+    already treats as its floor.
+    """
+
+    def _install_in_thread() -> None:
+        from kiro_crew.metrics.crew_log_export import install_otel_crew_log_subscriber
+
+        install_otel_crew_log_subscriber()
+
+    async def _otel_crew_log_install() -> None:
+        try:
+            await asyncio.to_thread(_install_in_thread)
+        except Exception:  # noqa: BLE001 -- telemetry must never take the gateway down
+            logger.warning("OTel crew-log subscriber install failed", exc_info=True)
+
+    task = asyncio.create_task(_otel_crew_log_install())
+    state._background_tasks.add(task)
+    task.add_done_callback(state._background_tasks.discard)
+
+
 def _register_own_host_warm(app: web.Application) -> None:
     """Start reading this machine's own addresses at boot, without waiting on it.
 
@@ -401,3 +455,15 @@ def _own_host_warm_done(task: "asyncio.Future[None]") -> None:
     exc = task.exception()
     if exc is not None:
         logger.warning("own-address read failed at startup", exc_info=exc)
+
+
+def _kick_pinned_order_load(state: DashboardState) -> None:
+    """Read the pinned-session order after the bind, as a tracked background task.
+
+    Off the boot path (``no-new-work-on-gateway-boot-path``): the file is
+    read after the listener accepts requests, and every writer reads it first
+    if it has not landed (``chat_folders.ensure_pinned_order_loaded``).
+    """
+    task = asyncio.create_task(chat.load_pinned_order_after_listen(state))
+    state._background_tasks.add(task)
+    task.add_done_callback(state._background_tasks.discard)

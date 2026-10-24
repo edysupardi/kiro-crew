@@ -163,10 +163,10 @@ already set the precedent the #14169 ruling asked for:
   merge.
 - **Skills →** the skill-root enumerators already form a pluggable, namespaced
   list: `_edition_skill_roots()` / `_canonical_skill_roots()` in
-  `src/kiro_crew/dashboard/handlers/_shared.py` and
+  `src/kiro_crew/dashboard/handlers/_shared_skill_roots.py` and
   `_trusted_skill_roots()` in `src/kiro_crew/skills_discovery.py`. App skills are
   already namespaced (`{app}/{skill}`) by `_register_skills` in
-  `src/kiro_crew/apps/bridges.py`. An **enabled** Power's skills attach as a
+  `src/kiro_crew/apps/bridges_skills.py`. An **enabled** Power's skills attach as a
   `power-<slug>/` root and the catalog/index (`skill_runtime/catalog.py`,
   `skill_search_index.py`) pick them up.
 - **Dashboard view →** `src/kiro_crew/dashboard/handlers/mcp_discover.py` already

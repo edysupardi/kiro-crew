@@ -12,6 +12,7 @@ from __future__ import annotations
 from kiro_crew.sandbox_leaves import (
     _AUTH_STORE_STAGING_LEAF,
     _LIVE_TARGET_STAGING_LEAF,
+    _MD_NOTEBOOK_RETIRED_STATE_LEAVES,
     _MD_NOTEBOOK_STAGING_LEAF,
     _MD_NOTEBOOK_STATE_LEAVES,
     MD_NOTEBOOK_APP_NAME,
@@ -82,6 +83,10 @@ from kiro_crew.sandbox_leaves import (
 #: name), and ``_CREW_HIDDEN_LEAVES`` has no reader to prove an empty document is
 #: absent-equivalent, so each leaf needs its own argument.
 _CREW_PRECREATE_READONLY_DIR_LEAVES: tuple[str, ...] = (
+    # The app-agent launch directory. Absent, the seal is skipped and a sandbox could
+    # create it and plant the spec a launch copy's kiro-cli would read; its only
+    # writer (``launch_process_cwd``) accepts the existing empty 0700 directory.
+    "app-agent-launch",
     # Empty roots confer no run authority; directory mounts expose later
     # gateway records without letting a sandbox create the missing root.
     "subagents",
@@ -137,6 +142,13 @@ _CREW_PRECREATE_READONLY_DIR_LEAVES: tuple[str, ...] = (
     # directory on every install until that first spawn, which is the window a
     # sandboxed shell would use to plant the record a later resume resolves through.
     "skill-projection",
+    # The settings-seed provenance directory, on the ``profiles`` argument. (1) Its
+    # reader (``acp.seed_provenance._read_disk_seeds``) reads a missing sidecar file
+    # as no records, exactly as it reads an absent directory. (2) The bind is live,
+    # so every later seed write is seen.
+    # Without this entry the seal skips the directory until the first seed, and the
+    # name is one an agent could create to forge the record.
+    "seed-provenance",
 )
 #: Read-only directory leaves whose NAME must remain the mounted name. A resolving
 #: symlink is unsafe here: the mount follows its target and leaves the lexical name
@@ -145,6 +157,7 @@ _CREW_PRECREATE_READONLY_DIR_LEAVES: tuple[str, ...] = (
 #: its target was sealed instead of the leaf. Every seal here is the load-bearing
 #: half of a control, so none may be satisfied by a link the governed party planted.
 _CREW_NOFOLLOW_READONLY_DIR_LEAVES: tuple[str, ...] = (
+    "app-agent-launch",
     "playwright-cli",
     "engines",
     "subagents",
@@ -156,6 +169,7 @@ _CREW_NOFOLLOW_READONLY_DIR_LEAVES: tuple[str, ...] = (
     "mcp-launch-approvals",
     "mcp/resolved",
     "skill-projection",
+    "seed-provenance",
 )
 assert set(_CREW_NOFOLLOW_READONLY_DIR_LEAVES) <= set(_CREW_PRECREATE_READONLY_DIR_LEAVES)
 #: Read-only FILE leaves whose NAME must remain the sealed name, for the same reason
@@ -238,6 +252,15 @@ _DELEGATED_OVERLAP_LEAF_REASONS: "dict[str, tuple[str, str]]" = {
         "sealed skill-view records",
         "the agent could forge the record that maps a stored skill-view name to the agent "
         "a later resume runs as",
+    ),
+    "seed-provenance": (
+        "sealed settings-seed record",
+        "the agent could forge the record that lets Kiro Crew overwrite and delete a "
+        "settings.local.json the user wrote",
+    ),
+    "app-agent-launch": (
+        "sealed app-agent launch directory",
+        "the agent could plant the agent spec kiro-cli runs for an app's own agent",
     ),
 }
 assert set(_DELEGATED_OVERLAP_LEAF_REASONS) == set(_CREW_NOFOLLOW_READONLY_FILE_LEAVES) | set(
@@ -447,6 +470,9 @@ _CREW_PRECREATE_HIDDEN_DIR_LEAVES: tuple[str, ...] = (
     # otherwise the first sandbox spawned before the first grant write sees an
     # unmasked leaf appear later.
     "tag-grants",
+    # The pinned-order store is created on the first reorder, so it is
+    # materialised here for the same reason as tag-grants.
+    "pinned-order",
     # The crewmate-teams store is created on the first team the owner makes, so a
     # sandbox spawned before that finds the name absent and the mask is vacuous
     # for its lifetime; materialised empty at 0700 so the bind always has a
@@ -527,12 +553,26 @@ _CREW_PRECREATE_HIDDEN_DIR_LEAVES: tuple[str, ...] = (
 #: The STALE-read criterion that excludes most hidden leaves does not arise: the agent's
 #: view is the pinned empty MASK file either way, never this document, which is exactly
 #: the mask's intent.
+#:
+#: The files now sit INSIDE the wholly-masked state directory, which gets its own mount
+#: target from :data:`_CREW_PRECREATE_HIDDEN_DIR_LEAVES`. Each still gets a regular-file
+#: stub, so a link or special file at a state name is refused before launch, and the
+#: gateway's legacy move (``md_notebook_state``) treats these exact bytes as "no state".
+#:
+#: The retired bare names get the same stubs, so their masks always mount: an absent bare
+#: name would let an agent create a file or a link there, and a link at a masked leaf
+#: refuses every later spawn. The legacy move skips a stub source, so a stub is never moved.
 _MD_NOTEBOOK_PRECREATE_CONTENT: dict[str, bytes] = {
+    f"{_MD_NOTEBOOK_STAGING_LEAF}/pat": b"",
+    f"{_MD_NOTEBOOK_STAGING_LEAF}/vaults.json": b"[]\n",
+    f"{_MD_NOTEBOOK_STAGING_LEAF}/settings.json": b"{}\n",
     f"workspace/{MD_NOTEBOOK_APP_NAME}/pat": b"",
     f"workspace/{MD_NOTEBOOK_APP_NAME}/vaults.json": b"[]\n",
     f"workspace/{MD_NOTEBOOK_APP_NAME}/settings.json": b"{}\n",
 }
-assert set(_MD_NOTEBOOK_PRECREATE_CONTENT) == set(_MD_NOTEBOOK_STATE_LEAVES)
+assert set(_MD_NOTEBOOK_PRECREATE_CONTENT) == set(_MD_NOTEBOOK_STATE_LEAVES) | set(
+    _MD_NOTEBOOK_RETIRED_STATE_LEAVES
+)
 
 #: The masked live-target pointer materialised before a namespace spawn, and what it
 #: holds. Same gap as :data:`_MD_NOTEBOOK_PRECREATE_CONTENT` closes, arrived at from the

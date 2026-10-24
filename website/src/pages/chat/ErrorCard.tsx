@@ -18,14 +18,40 @@ import { withOriginLink } from '../../components/withOriginLink'
 import { SessionTurnLimitButton } from '../../components/SessionTurnLimitMenu'
 import { injectOpensTurn } from './RecoveryCard'
 
-/** Error code the backend stamps (`meta.code`) when a crew member's private
- *  agent file no longer matches what was last reviewed in Capabilities
- *  (`agent_capabilities.prepare_member_capabilities`). A retry re-runs the same
- *  check, so the row links to the member's Capabilities pane instead. */
-const MATERIALIZATION_CHANGED = 'materialization_changed'
+/** Where a capability refusal's fix lives: the member's Approvals section in
+ *  the crewmate editor, or the editor itself (its Built from field picks the
+ *  agent). */
+export type CapabilityFix = 'capabilities' | 'member'
 
-export const isCapabilitiesChanged = (m: Pick<ChatMessage, 'meta'>): boolean =>
-  (m.meta as { code?: string } | undefined)?.code === MATERIALIZATION_CHANGED
+/** Session-start refusals the backend stamps (`meta.code`) from
+ *  `agent_capabilities.prepare_member_capabilities`
+ *  (`chat_runner._SESSION_START_REFUSAL_TEXT`). A retry re-runs the same check, so each row
+ *  shows its own copy and fix instead of Resume. No `fix`: the fix is outside
+ *  the dashboard, and the copy names it. */
+const CAPABILITY_REFUSAL_COPY = {
+  materialization_changed: 'pages.chat.errorCard.capabilities_changed',
+  parent_identity_changed: 'pages.chat.errorCard.capabilities_parent_changed',
+  foreign_private_copy: 'pages.chat.errorCard.capabilities_foreign_copy',
+  project_identity_changed: 'pages.chat.errorCard.capabilities_project_changed',
+  private_template_shadowed: 'pages.chat.errorCard.capabilities_template_shadowed',
+}
+type CapabilityRefusalCode = keyof typeof CAPABILITY_REFUSAL_COPY
+const CAPABILITY_REFUSAL_FIX: Readonly<Record<CapabilityRefusalCode, CapabilityFix | undefined>> = {
+  materialization_changed: 'capabilities',
+  // No dashboard surface detaches a member from its parent, so the in-app fix
+  // is the editor's Built from field (or putting the parent back, as the copy says).
+  parent_identity_changed: 'member',
+  foreign_private_copy: 'member',
+  project_identity_changed: undefined,
+  private_template_shadowed: undefined,
+}
+
+export const capabilityRefusal = (m: Pick<ChatMessage, 'meta'>): { code: CapabilityRefusalCode; fix?: CapabilityFix } | undefined => {
+  const code = (m.meta as { code?: unknown } | undefined)?.code
+  if (typeof code !== 'string' || !Object.hasOwn(CAPABILITY_REFUSAL_COPY, code)) return undefined
+  const known = code as CapabilityRefusalCode
+  return { code: known, fix: CAPABILITY_REFUSAL_FIX[known] }
+}
 
 /** Row kind the backend stamps on a terminal model-entitlement rejection
  *  (`chat_utils.MODEL_UNENTITLED_KIND`). Both carriers are load-bearing for the
@@ -94,6 +120,16 @@ const APP_AGENT_REFUSED_KIND = 'app_agent_refused'
 
 export const isAppAgentRefused = (m: Pick<ChatMessage, 'kind' | 'meta'>): boolean =>
   m.kind === APP_AGENT_REFUSED_KIND || (m.meta as { kind?: string } | undefined)?.kind === APP_AGENT_REFUSED_KIND
+
+/** Row kind the backend stamps on the terminal error a session start leaves
+ *  when kiro-cli is not installed (`chat_utils.KIRO_CLI_MISSING_KIND`).
+ *  The prose names the install fix. A feature-request chat offers the
+ *  repository's form on this row, since that action is an agent turn and no
+ *  agent can start. Same two carriers as above. */
+const KIRO_CLI_MISSING_KIND = 'kiro_cli_missing'
+
+export const isKiroCliMissing = (m: Pick<ChatMessage, 'kind' | 'meta'>): boolean =>
+  m.kind === KIRO_CLI_MISSING_KIND || (m.meta as { kind?: string } | undefined)?.kind === KIRO_CLI_MISSING_KIND
 
 /** Consecutive tagged session-start failures at which the card stops offering
  *  Resume and the server refuses the re-run (`session_start_repeat`). Two, not
@@ -261,10 +297,17 @@ export interface ErrorCardProps {
    */
   featureRequestFormUrl?: string
   /**
-   * The fix affordance for a `materialization_changed` row: open this crew
-   * member's Capabilities pane, where the changed agent file is reviewed and
-   * saved. Offered INSTEAD of Continue: a retry repeats the same check.
-   * Omitted on a surface with no crew editor route (embed, popout).
+   * Set beside `featureRequestFormUrl` when the row is a `kiro_cli_missing`
+   * start failure rather than a spent allowance: the same form is offered, and
+   * only the hint and the link label change, since the usage-limit copy (no
+   * monthly usage spent) does not describe a host with no kiro-cli.
+   */
+  kiroCliMissing?: boolean
+  /**
+   * The fix affordance for a capability refusal row (`capabilityRefusal`):
+   * open where this member's fix lives. Offered INSTEAD of Continue: a retry
+   * repeats the same check. Omitted on a surface with no crew editor route
+   * (embed, popout) and for a code whose fix is outside the dashboard.
    */
   onOpenCapabilities?: () => void
   /**
@@ -512,6 +555,7 @@ export const ErrorCard = memo(function ErrorCard({
   onOpenSignIn,
   unentitledElsewhere,
   featureRequestFormUrl,
+  kiroCliMissing,
   sessionStartRepeat,
   onRestartGateway,
   onOpenCapabilities,
@@ -544,7 +588,7 @@ export const ErrorCard = memo(function ErrorCard({
           {content}
         </div>
         <div className="text-[12px] leading-5 text-muted" data-testid="error-card-feature-request-hint">
-          {i18nT('pages.chat.errorCard.feature_request_form_hint')}
+          {i18nT(kiroCliMissing ? 'pages.chat.errorCard.feature_request_form_cli_missing_hint' : 'pages.chat.errorCard.feature_request_form_hint')}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <a
@@ -555,13 +599,26 @@ export const ErrorCard = memo(function ErrorCard({
             data-testid="error-card-feature-request-form"
           >
             <ExternalLink size={12} className="lucide-inline shrink-0" aria-hidden="true" />
-            {i18nT('pages.chat.errorCard.feature_request_form')}
+            {i18nT(kiroCliMissing ? 'pages.chat.errorCard.feature_request_form_cli_missing' : 'pages.chat.errorCard.feature_request_form')}
           </a>
         </div>
       </div>
     )
   }
-  if (onOpenCapabilities) {
+  const refusal = capabilityRefusal({ meta })
+  if (refusal) {
+    // The localized copy replaces the backend's English row. `file` is the
+    // basename a `private_template_shadowed` row carries, `project` the project
+    // it lives in, or the saved project a `project_identity_changed` row names
+    // (empty: none was saved).
+    const refusalMeta = meta as { file?: unknown; project?: unknown; member?: unknown } | undefined
+    const refusalVars = {
+      file: String(refusalMeta?.file ?? ''),
+      project: String(refusalMeta?.project ?? ''),
+      name: String(refusalMeta?.member ?? ''),
+      field: i18nT('pages.kiroCrewAgentsPage.built_from'),
+    }
+    const FixIcon = refusal.fix === 'member' ? Settings : ShieldCheck
     return (
       <div
         className="bg-danger-subtle ring-1 ring-inset forced-colors:border ring-danger/20 rounded-md self-center w-full max-w-full min-w-0 px-3 py-2 flex flex-col gap-2 animate-scale-in"
@@ -569,19 +626,27 @@ export const ErrorCard = memo(function ErrorCard({
         data-capabilities-changed="true"
       >
         <div className="text-danger text-[13px] leading-5 min-w-0" style={{ overflowWrap: 'anywhere' }}>
-          {i18nT('pages.chat.errorCard.capabilities_changed')}
+          {refusal.code === 'project_identity_changed' && !refusalVars.project
+            ? i18nT('pages.chat.errorCard.capabilities_project_changed_other', refusalVars)
+            : refusal.code === 'foreign_private_copy' && !refusalVars.name
+              ? i18nT('pages.chat.errorCard.capabilities_foreign_copy_unnamed', refusalVars)
+              : i18nT(CAPABILITY_REFUSAL_COPY[refusal.code], refusalVars)}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={onOpenCapabilities}
-            className={`${ACTION_BTN} bg-accent text-accent-fg hover:bg-accent-hover`}
-            data-testid="error-card-open-capabilities"
-          >
-            <ShieldCheck size={12} className="lucide-inline shrink-0" aria-hidden="true" />
-            {i18nT('pages.chat.errorCard.open_capabilities')}
-          </button>
-        </div>
+        {onOpenCapabilities && refusal.fix && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={onOpenCapabilities}
+              className={`${ACTION_BTN} bg-accent text-accent-fg hover:bg-accent-hover`}
+              data-testid="error-card-open-capabilities"
+            >
+              <FixIcon size={12} className="lucide-inline shrink-0" aria-hidden="true" />
+              {refusal.fix === 'member'
+                ? i18nT('pages.chat.errorCard.open_crewmate', { name: refusalVars.name })
+                : i18nT('pages.chat.errorCard.open_capabilities')}
+            </button>
+          </div>
+        )}
       </div>
     )
   }

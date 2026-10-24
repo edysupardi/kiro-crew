@@ -270,13 +270,16 @@ const FORWARDING_PROVEN = [
   // Proven in src/test/sidePanelAddMenu.test.tsx: the side panel "+" menu's
   // AddMenuItem forwards the marker to the DropdownMenuItem it renders.
   'AddMenuItem',
+  // Proven in src/test/Tablist.test.tsx: a `segments` entry's marker lands on
+  // that tab's <button> and on no other.
+  'Tablist',
   // Proven below: SimpleSelect forwards only the marker, to its trigger (Radix)
   // or its native <select> (touch); SegmentedControl draws a segment's own
   // marker on that segment's radio.
   'SimpleSelect', 'SegmentedControl',
-  // Proven in src/test/CrewEditorRail.test.tsx: a segment's marker lands on
-  // that section's tab in the crew editor's rail.
-  'CrewEditorRail',
+  // Proven in src/test/CrewEditorNextRail.test.tsx: a segment's marker lands
+  // on that section's tab in the crewmate editor's rail.
+  'CrewEditorNextRail',
   // Proven below: the shadcn Table puts the marker (and its name) on the
   // <table> itself, the picker a guide's "choose the job" step points at.
   'Table',
@@ -287,6 +290,10 @@ const FORWARDING_PROVEN = [
   // ContextMenuItem, which spreads its props onto the Radix item the same way
   // (src/components/ui/context-menu.tsx); the row menu draws the dropdown one.
   'Item',
+  // Proven in src/test/NotificationFeed.senderStacks.test.tsx: the feed's
+  // two-press clear forwards its ref to its <button>, and both clear-all
+  // call sites register their location.
+  'NotificationClearButton',
 ]
 
 describe('a marker must register the element it sits on', () => {
@@ -1382,11 +1389,11 @@ describe('the committed index', () => {
     expect(preview.placements[0].parent_ids).toEqual(['page.settings', 'settings.tab.chat', 'settings.sub.chat.transcript'])
   })
 
-  it('keeps Crewmates behind its preview, naming the switch that shows it', () => {
+  it('keeps Mates behind its preview, naming the switch that shows it', () => {
     expect(byId.get('page.members')!.placements[0].requires).toEqual([
-      { kind: 'preview_flag', flag: 'mc-preview-crew', location: 'setting:developer.crewmates' },
+      { kind: 'preview_flag', flag: 'mc-preview-crew', location: 'setting:developer.mates' },
     ])
-    expect(byId.has('setting:developer.crewmates')).toBe(true)
+    expect(byId.has('setting:developer.mates')).toBe(true)
   })
 
   it('resolves every parent, prerequisite and label it references', () => {
@@ -1499,7 +1506,6 @@ describe('the committed index', () => {
       { kind: 'condition', id: 'session_open' },
       // The shelf unmounts with a collapsed message box.
       { kind: 'shown_by', location: 'composer.expand', when: 'composer_collapsed' },
-      { kind: 'condition', id: 'no_response_running' },
     ])
     expect(byId.get('chat.memory-mode')!.placements[0].requires).toEqual([{ kind: 'condition', id: 'empty_session' }])
     // Only a description location carries a description key.

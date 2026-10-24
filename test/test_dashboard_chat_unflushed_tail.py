@@ -248,7 +248,7 @@ class TestSlotDetailPaginationUnflushedTail:
         """A foreign row sharing a ``ts`` must not be accepted as the window's own.
 
         On a coarse clock two writers flooring off the same previous row both emit
-        ``previous + 1µs`` (``history.py:1179-1219``), so a foreign disk row and an
+        ``previous + 1µs`` (``history_schema.monotonic_transcript_ts``), so a foreign disk row and an
         un-flushed window row of the SAME role can carry an identical stamp while
         holding different messages. Accepting a stamp match on its own then treats
         the foreign row as the window row, the boundary advances past the un-flushed
@@ -343,8 +343,8 @@ class TestSlotDetailPaginationUnflushedTail:
         on-disk window region, ``all_msgs[_disk_older_count:]``, may fund a match.
 
         Reachable because a caller-supplied ``mid`` is preserved rather than re-minted
-        (``state.py:1801-1803``), which is what lets a redelivered row carry an id
-        whose original has since been paged into the prefix.
+        (``state_parts/slot_transcript.py`` ``append``), which is what lets a redelivered row carry
+        an id whose original has since been paged into the prefix.
         """
         from types import SimpleNamespace
 

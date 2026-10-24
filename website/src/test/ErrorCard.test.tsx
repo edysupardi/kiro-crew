@@ -9,7 +9,7 @@ const clipboard = vi.hoisted(() => ({ copyCode: vi.fn<(text: string) => Promise<
 vi.mock('../utils/clipboard', async (importOriginal) => ({ ...(await importOriginal<object>()), ...clipboard }))
 
 import { ApiError } from '../api/apiError'
-import { ErrorCard, isAuthRequired, isCapabilitiesChanged, isContextOverflow, isModelUnentitled, isSessionStartFailed, isTurnTimeout, isUsageLimit, retryProse, sessionStartFailureStreak } from '../pages/chat/ErrorCard'
+import { ErrorCard, capabilityRefusal, isAuthRequired, isContextOverflow, isKiroCliMissing, isModelUnentitled, isSessionStartFailed, isTurnTimeout, isUsageLimit, retryProse, sessionStartFailureStreak } from '../pages/chat/ErrorCard'
 import type { ChatMessage } from '../types'
 import { FEATURE_REQUEST_FORM_URL } from '../prompts/featureRequest'
 import { i18nT } from '../i18n/t'
@@ -227,9 +227,71 @@ describe('ErrorCard — member agent file changed', () => {
   })
 
   it('recognises the row only by its structural code', () => {
-    expect(isCapabilitiesChanged({ meta })).toBe(true)
-    expect(isCapabilitiesChanged({ meta: undefined })).toBe(false)
-    expect(isCapabilitiesChanged({ meta: { code: 'memory_unavailable' } })).toBe(false)
+    expect(capabilityRefusal({ meta })).toBeDefined()
+    expect(capabilityRefusal({ meta: undefined })).toBeUndefined()
+    expect(capabilityRefusal({ meta: { code: 'memory_unavailable' } })).toBeUndefined()
+    expect(capabilityRefusal({ meta: { code: 'toString' } })).toBeUndefined()
+  })
+})
+
+describe('ErrorCard — sibling capability refusals', () => {
+  const vars = { file: 'reviewer-private.json', project: '/work/reviewer-project', name: 'reviewer', field: i18nT('pages.kiroCrewAgentsPage.built_from') }
+  const cases = [
+    { code: 'parent_identity_changed', copy: 'capabilities_parent_changed', button: 'open_crewmate' },
+    { code: 'foreign_private_copy', copy: 'capabilities_foreign_copy', button: 'open_crewmate' },
+    { code: 'project_identity_changed', copy: 'capabilities_project_changed', button: null },
+    { code: 'private_template_shadowed', copy: 'capabilities_template_shadowed', button: null },
+  ] as const
+
+  for (const { code, copy, button } of cases) {
+    it(`${code}: readable copy, its own fix, and NO Resume`, () => {
+      const onOpenCapabilities = vi.fn()
+      const meta = { code, member: 'reviewer', file: 'reviewer-private.json', project: '/work/reviewer-project' }
+      render(<ErrorCard content={`${code}: English text`} meta={meta} onContinue={() => {}} onOpenCapabilities={button ? onOpenCapabilities : undefined} />)
+      const card = screen.getByTestId('error-card')
+      expect(card).toHaveTextContent(i18nT(`pages.chat.errorCard.${copy}`, vars))
+      expect(card).not.toHaveTextContent(code)
+      expect(card).not.toHaveTextContent('{{')
+      expect(screen.queryByTestId('error-card-continue')).toBeNull()
+      if (button) {
+        expect(screen.getByTestId('error-card-open-capabilities')).toHaveTextContent(i18nT(`pages.chat.errorCard.${button}`, { name: 'reviewer' }))
+        fireEvent.click(screen.getByTestId('error-card-open-capabilities'))
+        expect(onOpenCapabilities).toHaveBeenCalledTimes(1)
+      } else {
+        expect(screen.queryByTestId('error-card-open-capabilities')).toBeNull()
+      }
+      cleanup()
+    })
+  }
+
+  it('names the mate on its editor button and the project to go to', () => {
+    render(<ErrorCard content="foreign_private_copy: x" meta={{ code: 'foreign_private_copy', member: 'reviewer' }} onOpenCapabilities={() => {}} />)
+    expect(screen.getByTestId('error-card-open-capabilities')).toHaveTextContent('reviewer')
+    cleanup()
+    render(<ErrorCard content="project_identity_changed: x" meta={{ code: 'project_identity_changed', member: 'reviewer', project: '/work/reviewer-project' }} />)
+    expect(screen.getByTestId('error-card')).toHaveTextContent('/work/reviewer-project')
+  })
+
+  it('names the shadowing file and the project that holds it in the copy', () => {
+    render(<ErrorCard content="private_template_shadowed: x" meta={{ code: 'private_template_shadowed', member: 'reviewer', file: 'reviewer-private.json', project: '/work/reviewer-project' }} />)
+    const card = screen.getByTestId('error-card')
+    expect(card).toHaveTextContent('reviewer-private.json')
+    expect(card).toHaveTextContent('/work/reviewer-project')
+  })
+
+  it('says another project when the member saved with no project to name', () => {
+    render(<ErrorCard content="project_identity_changed: x" meta={{ code: 'project_identity_changed', member: 'reviewer' }} />)
+    const card = screen.getByTestId('error-card')
+    expect(card).toHaveTextContent(i18nT('pages.chat.errorCard.capabilities_project_changed_other'))
+    expect(card).not.toHaveTextContent(i18nT('pages.chat.errorCard.capabilities_project_changed', { project: '' }))
+  })
+
+  it('names no empty mate when the foreign-copy row carries no member', () => {
+    render(<ErrorCard content="foreign_private_copy: x" meta={{ code: 'foreign_private_copy', member: '' }} />)
+    const card = screen.getByTestId('error-card')
+    const field = i18nT('pages.kiroCrewAgentsPage.built_from')
+    expect(card).toHaveTextContent(i18nT('pages.chat.errorCard.capabilities_foreign_copy_unnamed', { field }))
+    expect(card).not.toHaveTextContent(i18nT('pages.chat.errorCard.capabilities_foreign_copy', { name: '', field }))
   })
 })
 
@@ -363,6 +425,27 @@ describe('ErrorCard — feature request refused for a usage limit', () => {
     // The icon beside the label keeps its size when the control shrinks.
     expect(link.querySelector('svg')?.getAttribute('class') ?? '').toMatch(/\bshrink-0\b/)
     cleanup()
+  })
+
+  it('says kiro-cli is missing, not that usage ran out, on a kiro-cli refusal', () => {
+    const missing = '❌ kiro-cli not found (searched 2 directories: /a, /b). Install it from https://kiro.dev/cli/, or point KIROCREW_KIRO_BIN at the binary.'
+    render(<ErrorCard content={missing} onContinue={() => undefined} featureRequestFormUrl={FEATURE_REQUEST_FORM_URL} kiroCliMissing />)
+    const card = screen.getByTestId('error-card')
+    expect(card).toHaveTextContent('kiro-cli not found')
+    expect(screen.getByTestId('error-card-feature-request-hint')).toHaveTextContent(i18nT('pages.chat.errorCard.feature_request_form_cli_missing_hint'))
+    expect(card).not.toHaveTextContent(i18nT('pages.chat.errorCard.feature_request_form_hint'))
+    const link = screen.getByTestId('error-card-feature-request-form')
+    expect(link).toHaveAttribute('href', FEATURE_REQUEST_FORM_URL)
+    expect(link).toHaveAccessibleName(i18nT('pages.chat.errorCard.feature_request_form_cli_missing'))
+    expect(screen.queryByTestId('error-card-continue')).toBeNull()
+    cleanup()
+  })
+
+  it('recognises the kiro_cli_missing kind on both the live and the rebuilt carrier', () => {
+    expect(isKiroCliMissing({ kind: 'kiro_cli_missing' })).toBe(true)
+    expect(isKiroCliMissing({ meta: { kind: 'kiro_cli_missing' } })).toBe(true)
+    expect(isKiroCliMissing({ kind: 'usage_limit' })).toBe(false)
+    expect(isKiroCliMissing({})).toBe(false)
   })
 
   it('points at the repo\'s feature_request issue template, not a blank issue', () => {

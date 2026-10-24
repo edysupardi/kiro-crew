@@ -38,7 +38,7 @@ def _conditions(placement: dict[str, Any]) -> list[str]:
 def _has_preview_flag(placement: dict[str, Any]) -> bool:
     # The Crewmates preview prerequisite every control on the page carries.
     return any(
-        r["kind"] == "preview_flag" and r.get("setting_id") == "developer.crewmates"
+        r["kind"] == "preview_flag" and r.get("setting_id") == "developer.mates"
         for r in placement["requires"]
     )
 
@@ -50,7 +50,7 @@ _GOLDENS = [
         "make a new crewmate",
         "en",
         "members.new",
-        ["Crewmates", "New crewmate"],
+        ["Mates", "New mate"],
         ["no_crewmates"],
     ),
     ("新建队友", "zh-CN", "members.new", ["队友", "新建队友"], ["no_crewmates"]),
@@ -58,7 +58,7 @@ _GOLDENS = [
         "advanced crewmate setup",
         "en",
         "members.new-advanced",
-        ["Crewmates", "Advanced"],
+        ["Mates", "Advanced"],
         ["no_crewmates"],
     ),
     ("高级队友设置", "zh-CN", "members.new-advanced", ["队友", "高级"], ["no_crewmates"]),
@@ -67,7 +67,7 @@ _GOLDENS = [
         "advanced crewmate setup",
         "en",
         "members.add-menu",
-        ["Crewmates", "Add…"],
+        ["Mates", "Add…"],
         ["has_crewmates"],
     ),
     (
@@ -83,7 +83,7 @@ _GOLDENS = [
         "edit my crewmate",
         "en",
         "members.edit",
-        ["Crewmates", "Profile"],
+        ["Mates", "Profile"],
         ["crewmate_selected"],
     ),
     ("编辑队友", "zh-CN", "members.edit", ["队友", "资料卡"], ["crewmate_selected"]),
@@ -91,7 +91,7 @@ _GOLDENS = [
         "crewmate details",
         "en",
         "members.details",
-        ["Crewmates", "Dashboard & files"],
+        ["Mates", "Dashboard & files"],
         ["crewmate_selected", "crewmate_panel_not_docked"],
     ),
     (
@@ -102,13 +102,13 @@ _GOLDENS = [
         ["crewmate_selected", "crewmate_panel_not_docked"],
     ),
     # Customize > Crewmates.
-    ("add a new agent", "en", "agents.add", ["Customize", "Crewmates", "New crewmate"], []),
+    ("add a new agent", "en", "agents.add", ["Customize", "Mates", "New mate"], []),
     ("创建代理", "zh-CN", "agents.add", ["自定义", "队友", "新建队友"], []),
     (
         "create a crewmate",
         "en",
         "agents.create-first",
-        ["Customize", "Crewmates", "Create your first crewmate"],
+        ["Customize", "Mates", "Create your first mate"],
         ["no_crewmates"],
     ),
     (
@@ -122,28 +122,28 @@ _GOLDENS = [
         "change my crewmate's avatar",
         "en",
         "agents.edit-avatar",
-        ["Customize", "Crewmates", "Edit avatar"],
+        ["Customize", "Mates", "General", "Edit avatar"],
         ["crewmate_editor_open"],
     ),
     (
         "修改头像",
         "zh-CN",
         "agents.edit-avatar",
-        ["自定义", "队友", "编辑头像"],
+        ["自定义", "队友", "常规", "编辑头像"],
         ["crewmate_editor_open"],
     ),
     (
         "delete an agent",
         "en",
         "agents.delete",
-        ["Customize", "Crewmates", "Danger zone", "Delete crewmate"],
+        ["Customize", "Mates", "Danger Zone", "Delete mate"],
         ["crewmate_editor_open"],
     ),
     (
         "删除代理",
         "zh-CN",
         "agents.delete",
-        ["自定义", "队友", "危险操作区", "删除队友"],
+        ["自定义", "队友", "危险区域", "删除队友"],
         ["crewmate_editor_open"],
     ),
 ]

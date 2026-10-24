@@ -13,6 +13,9 @@ from kiro_crew.config.fields import _meta, field_default
 from kiro_crew.stt.limits import DEFAULT_IDLE_EVICT_SECS as _STT_DEFAULT_IDLE_EVICT_SECS
 from kiro_crew.stt.limits import DEFAULT_PARTIAL_INTERVAL_MS as _STT_DEFAULT_PARTIAL_INTERVAL_MS
 from kiro_crew.stt.limits import DEFAULT_SILENCE_MS as _STT_DEFAULT_SILENCE_MS
+from kiro_crew.stt.limits import MAX_THREADS as _STT_MAX_THREADS
+from kiro_crew.stt.limits import THREADS_AUTO as _STT_THREADS_AUTO
+from kiro_crew.stt.limits import parse_threads as _parse_stt_threads
 from kiro_crew.stt.models import CATALOG as _STT_CATALOG
 from kiro_crew.stt.models import CUSTOM_MODEL as _STT_CUSTOM_MODEL
 from kiro_crew.stt.models import DEFAULT_MODEL as _STT_DEFAULT_MODEL
@@ -55,6 +58,43 @@ STT_LANGUAGE_FALLBACK = "en-US"
 #: ``stt_stream._STREAMING_PROVIDERS``, which grants by positive membership.
 _VALID_STT_PROVIDERS = (STT_PROVIDER_LOCAL, "apple", "transcribe", STT_PROVIDER_OFF)
 
+
+def valid_stt_providers() -> tuple[str, ...]:
+    """Every ``stt.provider`` a stored config may select: built-ins plus the edition's.
+
+    :data:`_VALID_STT_PROVIDERS` stays the built-in set. An edition's registered
+    names (``PlatformContext.speech``) join it ahead of ``off``, so ``off`` stays
+    last in every list a user reads. Boot refuses a registered name that collides
+    with a built-in, so the union never repeats a name. With the default registry
+    this IS :data:`_VALID_STT_PROVIDERS`.
+    """
+    # Imported here, not at module scope: ``config.sections`` mirrors this
+    # module's globals, and a module alias is not part of its surface.
+    from kiro_crew import speech_providers
+
+    registered = speech_providers.registered_stt_names()
+    if not registered:
+        return _VALID_STT_PROVIDERS
+    builtins = tuple(p for p in _VALID_STT_PROVIDERS if p != STT_PROVIDER_OFF)
+    extra = tuple(p for p in registered if p not in _VALID_STT_PROVIDERS)
+    return (*builtins, *extra, STT_PROVIDER_OFF)
+
+
+def default_stt_provider() -> str:
+    """What an absent ``stt.provider`` resolves to: the edition default, else ``local``.
+
+    Only the ABSENT key (or a JSON ``null``) reaches this. A stored value always
+    wins, and an unusable stored value keeps its own fallback, so an edition
+    default is never selected because a value was mistyped.
+    """
+    from kiro_crew import speech_providers
+
+    edition = speech_providers.edition_default_stt()
+    if edition is not None and edition in valid_stt_providers():
+        return edition
+    return field_default(SttConfig, "provider")
+
+
 #: Providers a stored config may still name. Each of these needed an out-of-band
 #: install the user had to perform themselves (a whisper CLI on ``PATH``, or an
 #: ``mlx``/``faster-whisper`` wheel), which is precisely the cost the resident
@@ -78,6 +118,23 @@ _VALID_STT_MODELS = tuple(m.name for m in _STT_CATALOG) + (_STT_CUSTOM_MODEL,)
 # for tests to reset.
 _WARNED_STT_PROVIDERS: set[str] = set()
 
+# Unknown provider values seen before boot on a host where a companion may still
+# register them, keyed like ``_WARNED_STT_PROVIDERS``. Boot re-checks each one.
+_DEFERRED_STT_PROVIDERS: dict[str, object] = {}
+
+
+def warn_deferred_stt_providers() -> None:
+    """Re-check the provider values held back before boot, now the registry is known.
+
+    Called by boot once the context is installed. A value the edition registered
+    is now valid and says nothing; anything else gets the usual unknown-provider
+    notice, once.
+    """
+    pending = list(_DEFERRED_STT_PROVIDERS.values())
+    _DEFERRED_STT_PROVIDERS.clear()
+    for value in pending:
+        _validated_stt_provider(value)
+
 
 def stt_provider_is_coerced(value: object) -> bool:
     """True when a stored ``stt.provider`` cannot take effect and is replaced.
@@ -86,7 +143,7 @@ def stt_provider_is_coerced(value: object) -> bool:
     offers to remove it (``kirocrew config defaults``) cannot come to disagree with
     the loader about which providers are dispatchable.
     """
-    return value not in _VALID_STT_PROVIDERS
+    return value not in valid_stt_providers()
 
 
 def stt_provider_resolution(value: object) -> str:
@@ -103,10 +160,10 @@ def stt_provider_resolution(value: object) -> str:
     the answer -- ``kirocrew config defaults --adopt`` deciding what to write --
     can ask without triggering, or having to suppress, the load-time notice.
     """
-    if value in _VALID_STT_PROVIDERS:
+    if value in valid_stt_providers():
         return str(value)
     if value is None:
-        return field_default(SttConfig, "provider")
+        return default_stt_provider()
     if value in _RETIRED_STT_PROVIDERS:
         return STT_PROVIDER_LOCAL
     return STT_PROVIDER_OFF
@@ -127,10 +184,19 @@ def _validated_stt_provider(value: object) -> str:
     key, not a wrong one.
     """
     resolved = stt_provider_resolution(value)
-    if value in _VALID_STT_PROVIDERS or value is None:
+    selectable = valid_stt_providers()
+    if value in selectable or value is None:
         return resolved
     seen = repr(value)
     if seen in _WARNED_STT_PROVIDERS:
+        return resolved
+    from kiro_crew import speech_providers
+
+    if value not in _RETIRED_STT_PROVIDERS and speech_providers.registry_pending():
+        # Before boot on a companion host the edition may register this name, so
+        # "unknown, drop it" could be false. Boot re-checks it
+        # (``warn_deferred_stt_providers``) once the registry is installed.
+        _DEFERRED_STT_PROVIDERS[seen] = value
         return resolved
     _WARNED_STT_PROVIDERS.add(seen)
     if value in _RETIRED_STT_PROVIDERS:
@@ -150,7 +216,7 @@ def _validated_stt_provider(value: object) -> str:
             "'kirocrew config defaults --adopt stt.provider' to drop the stored value.",
             value,
             resolved,
-            ", ".join(_VALID_STT_PROVIDERS),
+            ", ".join(selectable),
         )
     return resolved
 
@@ -193,6 +259,27 @@ def _validated_stt_model(
         )
         return field_default(SttConfig, "model")
     return _resolve_stt_model(value).name
+
+
+def _validated_stt_threads(value: object) -> int:
+    """``stt.threads`` as stored: ``0`` for auto, or a count up to ``MAX_THREADS``.
+
+    ``"auto"`` and a digit string are accepted spellings and come back as the int,
+    so the field stays an integer on the next save. Anything else (a negative
+    number, a count above ``MAX_THREADS``, a float, a word) is logged and replaced
+    by auto. Auto is the safe fallback because it is what the setting did before it
+    existed. Used by both the schema validator and the section builder, so the
+    resolved value is the same with or without ``jsonschema``.
+    """
+    parsed = _parse_stt_threads(value)
+    if parsed is None:
+        logger.warning(
+            "Unusable stt.threads %r (expected 'auto', 0, or 1-%d); using auto",
+            value,
+            _STT_MAX_THREADS,
+        )
+        return _STT_THREADS_AUTO
+    return parsed
 
 
 #: Amazon Transcribe's own limit on a custom vocabulary name
@@ -497,6 +584,19 @@ class SttConfig:
             "machine short of memory. 0 releases it as soon as you stop speaking.",
         ),
     )
+    threads: int = field(
+        default=_STT_THREADS_AUTO,
+        metadata=_meta(
+            "Decode threads",
+            "How many CPU threads the local model uses to recognise speech. 0 (or "
+            "`auto`) uses half this machine's cores, at most 16, which stays steady "
+            "on a busy host. A larger machine can set more: on a 128-core host the "
+            "largest model took 4 s on an 11-second clip at 16 threads and 1.25 s at "
+            "64. A number above the cores this process may use is lowered to that "
+            "count. The KIROCREW_STT_THREADS environment variable overrides this. A "
+            "change applies at the next dictation, which reloads the model once.",
+        ),
+    )
     endpointing: bool = field(
         default=False,
         metadata=_meta(
@@ -504,6 +604,20 @@ class SttConfig:
             "While dictating, run a fast background model on each finished phrase to "
             "detect when you have asked a complete question, then send it without "
             "you pressing anything. Needs streaming; off by default.",
+        ),
+    )
+    submit_on_release: bool = field(
+        default=False,
+        metadata=_meta(
+            "Send when I stop recording",
+            "Send the message once the transcript is ready when you deliberately "
+            "stop dictating: letting go of hold-to-talk, releasing the push-to-talk "
+            "key, or pressing the mic or the key again. Shift-click the mic, or slide "
+            "sideways on the phone's hold bar, to keep a draft instead; with a "
+            "push-to-talk binding that does not use Shift, Shift as you release works "
+            "too. "
+            "Cancelling, losing focus and the recording time limit never send. Works "
+            "with streaming and batch transcription; off by default.",
         ),
     )
     dictation_panel: bool = field(

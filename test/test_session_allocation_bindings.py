@@ -468,7 +468,7 @@ _TEST_TREE = Path(__file__).resolve().parents[1] / "test"
 
 #: The patches the test trees make through the facade at the split, and where they are.
 _KNOWN_PATCHES = {
-    "ENDING_FENCE_WAIT_SECS": "test_session.py",
+    "ENDING_FENCE_WAIT_SECS": "test_session_get_or_create.py",
     "record_session_started": "test_compaction_stop_declined.py",
     "resolve_project_profile": "test_aws_project_profiles.py",
     "wake_other_drains": "test_compaction_stop_declined.py",
@@ -478,7 +478,7 @@ _KNOWN_PATCHES = {
 def _patched_through_the_facade() -> set[str]:
     import test_facade_mirror_guards as guards
 
-    return guards._corpus_patched_names().get(facade.__name__, set())
+    return guards.facade_patched_names(facade.__name__)
 
 
 def test_every_name_patched_through_the_facade_reaches_every_owner_reading_it() -> None:

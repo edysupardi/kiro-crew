@@ -18,15 +18,24 @@ import type { ChatMessage } from '../types'
  * the error row takes both raw and applies its own per-row remedies
  * (`createTranscriptRenderers`), while the composer takes `composerResume`, the
  * two composed with the cases where the newest error card withholds Resume.
+ *
+ * `sendPending` is the pane's own optimistic local turn: a send that still
+ * waits for the turn that answers it. ChatPage's send marks that turn in the
+ * store (`startLocalTurn`), which only the active slot can carry, so a pane
+ * hands it in instead. Otherwise the person's own confirmed row, newest and
+ * unanswered, reads as an interrupted turn until the slot is seen running.
  */
-export function useChatPaneContinue({ slotKey, messages, turnRunning }: {
+export function useChatPaneContinue({ slotKey, messages, turnRunning, sendPending = false }: {
   slotKey: string
   /** The rows the pane draws. */
   messages: ChatMessage[]
   /** A turn is running on the slot: the press took, or an old refusal is over. */
   turnRunning: boolean
+  /** This pane's send still waits for the turn that answers it. */
+  sendPending?: boolean
 }) {
-  const continuable = useAppSelector((s) => selectContinuable(s, slotKey))
+  const storeContinuable = useAppSelector((s) => selectContinuable(s, slotKey))
+  const continuable = storeContinuable && !sendPending
   const interrupted = useAppSelector((s) => selectTurnInterrupted(s, slotKey))
   // The newest error row has a remedy of its own and has withheld Resume, since
   // a retry replays the rejection. The composer must not urge the press beneath

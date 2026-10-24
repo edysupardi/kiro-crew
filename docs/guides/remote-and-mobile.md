@@ -28,7 +28,7 @@ Four parts, in the order you will need them:
   declares `"node": ">=22.12.0"`; `kirocrew doctor` fails below Node 22.12.0, and startup logs a warning.
 - **RAM**: there is no single published floor, because the footprint scales with
   concurrent sessions, spawned subagents, and MCP servers. Two figures from the
-  code give you the shape of it: `acp/runtime.py` recycles a long-lived
+  code give you the shape of it: `acp/runtime_liveness.py` recycles a long-lived
   multiplexed backend once it passes 500 MiB RSS
   (`_DEFAULT_MAX_RSS_MB = 500.0`), and the embedding model is loaded in-process
   from a ~610MB GGUF file. Measure your own steady state, then leave headroom:
@@ -138,7 +138,7 @@ tmux survives an SSH disconnect but does **not** auto-restart on crash or
 auto-start on reboot. Move to [a real service](#3-keep-it-alive-as-a-service)
 once the smoke test passes, and **kill the tmux session first**: only one
 gateway can own the dashboard port, which defaults to `5476`
-(`config/loader.py` `_DEFAULT_PORT`, overridable with the `KIROCREW_PORT`
+(`config/loader_credentials.py` `_DEFAULT_PORT`, overridable with the `KIROCREW_PORT`
 environment variable). Two gateways on one port means the second one fails to
 bind.
 
@@ -212,7 +212,7 @@ What NOT to carry over:
 
 - `~/.kiro/crew/kiro_pids.txt`, `kiro_session_pids.txt`, and the
   `session_pid_<pid>.txt` / `.sig` sidecars: live PID tracking
-  (`session_pid.py`), meaningless on another host and actively misleading if
+  (`session_pid_tracking.py`), meaningless on another host and actively misleading if
   copied.
 - `~/.kiro/crew/security_events.jsonl`: the tamper-evident SEL audit chain
   (`sel.py`); it belongs to the host that wrote it.
@@ -264,7 +264,7 @@ ssh -fN -L 7779:localhost:7779 user@your-host.example.com   # background
 
 Pass `-C` to enable SSH transport compression. A hand-rolled tunnel gets no
 compression by default, while Kiro Crew's own tunnel manager turns it on for
-exactly this traffic (`src/kiro_crew/instances/ssh_tunnel_manager.py`): the
+exactly this traffic (`src/kiro_crew/instances/ssh_tunnel_manager_child_text.py`): the
 forwarded stream carries the dashboard SPA bundle plus all API/WS payloads,
 which are highly compressible, and the gateway does not gzip at the HTTP layer.
 
@@ -625,7 +625,7 @@ desktop-style command menu first.
 ### Session duration
 
 Three clocks. The first two are signed into the access token payload
-(`dashboard/token_auth.py`), the third into the refresh cookie
+(`dashboard/token_auth_tokens.py`), the third into the refresh cookie
 (`dashboard/refresh_tokens.py`):
 
 | Clock | Value | What it governs |
@@ -653,7 +653,7 @@ expiry**: open the dashboard at least once a month and you need never mint
 another link.
 
 The access-session numbers still govern the initial mint. The chat-command
-default is 1 hour (`ttl = 3600` in `slack/events.py` and `slack/handler_runtime/commands.py`);
+default is 1 hour (`ttl = 3600` in `slack/events_slash.py` and `slack/handler_runtime/commands.py`);
 pass a duration to raise it (`/kirocrew dashboard 6h`,
 `/kirocrew dashboard 20h`). `parse_duration` accepts `<N>h` or `<N>m` and clamps
 to the 20-hour ceiling, so asking for more silently gets you 20 hours rather than
