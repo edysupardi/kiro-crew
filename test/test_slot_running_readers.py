@@ -23,6 +23,8 @@ _BUSY_HELPERS: dict[str, frozenset[str]] = {
     "_switch_target_busy": frozenset({"running"}),
     # Member Fresh start: the slot's task or the session's turn.
     "_turn_busy": frozenset({"running"}),
+    # A failed create's newborn retraction: keeps a slot a turn has reserved.
+    "_retract_failed_newborn": frozenset({"running"}),
 }
 
 
@@ -137,9 +139,11 @@ def test_running_and_turn_running_slot_readers_are_enumerated() -> None:
                 ("mate_thread_wakes.py", "_idle"),
                 ("chat_folders.py", "api_chat_slot_mode"),
                 ("chat_api/slot_guards.py", "_switch_target_busy"),
-                # The palette create's retraction of a newborn whose app-agent
-                # binding did not persist: it reads the RESERVATION, because a
-                # turn that started on the slot during the write keeps it.
+                # The create's retraction of a newborn it answers with a
+                # failure, through _retract_failed_newborn: it reads the
+                # RESERVATION, because a turn that started on the slot during
+                # the create's awaits keeps it.
+                ("chat_api/slot_create.py", "_retract_failed_newborn"),
                 ("chat_api/slot_create.py", "api_chat_slot_create"),
                 ("handlers/members_thread_turns.py", "_turn_busy"),
                 ("handlers/members_thread_turns.py", "_turn_ends_within"),
@@ -157,6 +161,9 @@ def test_running_and_turn_running_slot_readers_are_enumerated() -> None:
                 # Reload refuses a reserved slot or sibling alias through
                 # _switch_target_busy, as the session_reload verb does.
                 ("chat_api/session_relaunch.py", "api_chat_slot_reload"),
+                # A crewmate's worker reload waits for a reserved worker slot the
+                # same way, through _switch_target_busy.
+                ("crewmate_worker_reload.py", "_is_busy"),
                 ("chat_api/slot_lifecycle.py", "api_chat_slot_reset_conversation"),
                 ("chat_api/resume.py", "api_chat_slot_resume"),
                 ("chat_api/session_relaunch.py", "api_chat_slot_workspace"),
@@ -204,6 +211,9 @@ def test_running_and_turn_running_slot_readers_are_enumerated() -> None:
                 # A return brief must not start or publish after a send has
                 # reserved the slot, even before its model turn begins.
                 ("warm_task_brief.py", "_run_warm_task_brief"),
+                # A worker holding a reservation is in-flight work for the
+                # thread that created it, even before its model turn begins.
+                ("warm_task_brief.py", "_running_workers"),
                 ("warm_task_brief.py", "_settled"),
                 ("warm_task_brief.py", "_still_current"),
                 ("warm_task_brief.py", "_wait_for_idle_turn"),

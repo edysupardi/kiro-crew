@@ -75,6 +75,15 @@ a new row in `_session_tools()` (`kiro_crew.mcp_dashboard_session_tools`), its b
 (`kiro_crew.mcp_dashboard_session_runs`), and its schema in
 `MCP_DASHBOARD_SCHEMAS`.
 
+**A conductor's own archived worker is revived on send.** `session_send` from a
+crewmate's conductor (`mate_worker.is_conductor_execution` on its attested record)
+to a session that is not open first runs `session_revive` on it, under revive's
+own ownership fence (created by the caller AND named by the gateway-written
+lineage) and with the fence the send was admitted under (`_carried_fence`, as on
+every route), then sends in the revived conversation
+(`session_revive.revive_own_archived_worker`). A refused revive, and every
+other caller, keeps `target_not_found`.
+
 **Two verbs here write into another session's conversation: `session_send` and
 `session_broadcast`.** Reading returns a transcript tail, stopping cancels a turn
 the way the Stop button does, creating opens an empty session, and sending
@@ -168,6 +177,11 @@ turn opens; persisted transcript metadata records `created_by` at birth, before
 that edge can exist, but is a weaker, agent-editable source. The union is the
 answer, and every row names the sources that placed it (`crew_log`, `history`,
 `live`, joined with `+`).
+
+A live row also carries `process`: `live` while the session manager holds its
+process (`SessionManager.has_session` on the slot's effective key), `released`
+once the idle sweep stopped it; the conversation resumes on the next send either
+way (`session_status.process_state`).
 
 The row's `status` separates `working` / `queued` / `idle` / `closed` / `lost` /
 `unknown`. A tree-backed row absent from the dashboard is `closed` or `lost`: the
@@ -613,7 +627,9 @@ crewmate's backend"), so its pins are judged there; the profile's explicit
 `worker_model` is validated for that harness (`PUT /api/agents/{name}`) and
 crosses freely. A conductor's hand-off whose worker backend cannot carry the
 worker's kit is refused `worker_kit_harness_unsupported` before anything is
-allocated. Either pin is dropped when the child's namespace advertises a list it is
+allocated. A conductor slot with no execution record (one from before records,
+named only by its slot agent) is refused `conductor_record_missing` the same way:
+its worker would carry no crewmate and run on the shared store. Either pin is dropped when the child's namespace advertises a list it is
 not on while another harness claims it; `"auto"` always passes. When the
 mate's own model is dropped, the mate's own effort that rode along for
 it is dropped too; an explicit `worker_reasoning_effort` stays. A caller whose record is a
@@ -812,7 +828,8 @@ behaves the same whether or not it gets a sidebar tab. A crewmate's own
 worker (the conductor's hand-off, `_hands_off_to_own_worker`) takes its
 posture from the crewmate's record instead: the Profile Permissions
 `approval_mode`, seeded through `crewmate_approval.seed_for_turn`, whatever the
-thread itself holds at that moment.
+thread itself holds at that moment. It is read once the child's record is on
+disk (`seed_new_worker`), so a Profile change made during the create reaches it.
 No session-store write happens at creation: the child has no ACP session yet
 (`set_approval_policy` no-ops on a missing session), and `chat_runner` already
 derives the persistable policy from `_trust` on every session create/resume, so

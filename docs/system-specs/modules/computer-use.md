@@ -498,6 +498,12 @@ Mechanics:
 - `is_enabled()` is strict identity against `True`: a hand-edited
   `"enabled": "false"` (a truthy string) or `"enabled": 1` does not enable
   desktop control.
+- An enterprise build ignores the opt-in: `is_enabled()` answers `False`, the
+  config GET carries `locked_by_policy: true`, and a PUT with `enabled: true`
+  answers 409 `locked_by_policy`
+  ([rfc-crew-enterprise-edition](../../request-for-change/rfc-crew-enterprise-edition.md)
+  D3, `kiro_crew.edition_locks`). This is an edition lock, not a governance scope;
+  computer use stays ungoverned, and an `oss` build is unchanged.
 - The only writer is the dashboard PUT handler, which does not route through the
   agent tool gate.
 - `allowed_apps` is an optional narrowing (empty = everything not denied);
@@ -2312,10 +2318,11 @@ The non-web allowlist (`EXTERNAL_URLS`) matches **whole URLs, exactly** — the 
 `SETTINGS_URL_*` panes — not the `x-apple.systempreferences:` scheme. A
 scheme-granular rule would admit unbounded attacker-chosen payloads into
 LaunchServices, and that is reachable rather than theoretical: LLM-authored widget
-and artifact content renders in iframes carrying
-`sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"`, no CSP
-directive constrains a `window.open` target's scheme, and remote-instance frames
-share this same handler — so model-generated JS could otherwise pop *any* pane
+and artifact content renders in `sandbox="allow-scripts"` iframes whose links the
+dashboard opens through its link bridge with `window.open` (`useFrameLinkBridge`,
+http(s) only), other frames such as the browser preview still grant
+`allow-popups`, no CSP directive constrains a `window.open` target's scheme, and
+remote-instance frames share this same handler — so model-generated JS could otherwise pop *any* pane
 (Sharing → Remote Login, Configuration Profiles) beside agent-authored text
 telling the user to enable it. Exact matching also removes a parser-differential
 class: the verdict is computed from `new URL(...)` (WHATWG lowercases the scheme,

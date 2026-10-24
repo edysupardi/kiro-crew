@@ -1390,7 +1390,10 @@
     },
     "designCritique": {
       "askLayer": {
-        "answer_failed_ask_again_below": "Answer failed — ask again below"
+        "answer_failed_ask_again_below": "Answer failed — ask again below",
+        "ask_a_follow_up": "Ask a follow-up…",
+        "ask_again": "Ask again…",
+        "what_dont_you_understand_about_this": "What don’t you understand about this?"
       },
       "constants": {
         "blocked_figma_app_missing_hint": "Open the file in Figma desktop and try again, or export the frames as PNGs and drop them here.",
@@ -2136,6 +2139,8 @@
       "agent_default_source": "Set per agent in config.json (agents.{{agent}}.autocompact_pct). Moving the slider overrides it for this session.",
       "optimize_failed": "Couldn't optimize the prompt. Your original text was restored.",
       "optimize_failed_elsewhere": "Couldn't optimize the prompt you started in another session. Its original text was restored there.",
+      "cancel_optimizing": "Cancel optimizing",
+      "cancel_optimizing_short": "Cancel",
       "session_control_needs_attention": "Needs attention",
       "session_control_ready": "Ready",
       "session_control_chip_label": "{{label}} — {{detail}}",
@@ -4200,6 +4205,14 @@
       "scope_count_other": "Affects {{count}} members",
       "scope_label": "Affects",
       "scope_only_this": "Only this mate changes.",
+      "addition_server": "Give {{name}}’s worker {{server}}.",
+      "addition_from_gateway": "This gateway already runs it, so no new code comes in.",
+      "addition_from_registry": "It is installed from the MCP registry ({{id}}) for {{name}} only.",
+      "addition_from_card": "It is set up on this card for {{name}} only.",
+      "addition_runs_unasked": "Runs without asking you: {{tools}}.",
+      "addition_no_new_grants": "Adds no new grant to run a tool without asking; your current approval settings still apply.",
+      "addition_runs_all_unasked": "Every tool runs without asking you.",
+      "addition_skill": "Give {{name}}’s worker the {{skill}} skill.",
       "secret_hint": "Goes straight to your secrets. {{name}} never sees it.",
       "secret_label": "Value",
       "status_applying": "Applying…",
@@ -4231,9 +4244,11 @@
       "field_model": "Model",
       "field_reasoning_effort": "Reasoning effort",
       "field_approval_mode": "Approval mode",
+      "field_dynamic_capabilities": "Can ask you for tools",
       "approval_mode_hint_normal": "Asks you before doing anything.",
       "approval_mode_hint_trust_reads": "Runs read-only shell commands on its own, asks you for everything else.",
       "approval_mode_hint_trust": "Works in its chat without asking you first.",
+      "dynamic_capabilities_hint": "It can ask you on a card for tools and skills its worker needs. Each one still needs your approval.",
       "kind_crewmate_goal": "Mate goal",
       "primary_crewmate_goal": "Set goal",
       "kind_crewmate_key_results": "Milestones",
@@ -4246,7 +4261,12 @@
       "decline_crewmate_import": "Don't import",
       "note_crewmate_import": "Nothing runs when you import: it asks before each tool, schedules arrive switched off, and skills wait until you trust the mate's workspace folder. After the press, Undo on this card removes it.",
       "title_crewmate_import": "Import mate “{{name}}”",
-      "carried_show_code": "Show code"
+      "carried_show_code": "Show code",
+      "tool_access_title": "Allow {{name}} to ask you for tools its worker needs? Each one still needs your approval.",
+      "tool_access_allowed": "Allowed",
+      "tool_access_not_allowed": "Not allowed",
+      "tool_access_turn_on": "Turn on",
+      "tool_access_not_now": "Not now"
     },
     "assistantWelcome": {
       "default_name": "Mate"
@@ -5358,6 +5378,7 @@
         "sensitive_in_card": "Before you share — the card contains: {{kinds}}",
         "sensitive_in_caption": "Before you share — the post text contains: {{kinds}}",
         "withdrawn_by_policy": "Sharing was turned off by policy. Copy your text now if you want to keep it — it is not saved when you close this dialog.",
+        "sites_unavailable": "Couldn't check which sites you may share to, so none are offered. Try again later.",
         "copy_text_only": "Copy text",
         "copied_text": "Copied",
         "copy_text_failed": "Copy failed",
@@ -5982,6 +6003,7 @@
       "unlink_source_link_failed": "Could not hide. Try again.",
       "waiting_for_memory": "Waiting for free RAM",
       "muted": "Muted: no chime, toast or badge",
+      "process_released": "Asleep: wakes on the next message",
       "chat_with_folder": "Chat with {{folder}} folder",
       "chat_with_folder_desc": "The chat that started this folder's other chats",
       "conductor_tag": "conductor"
@@ -6085,6 +6107,10 @@
       "kind_ruling": "decision",
       "kind_stale": "stale",
       "kind_orphaned": "orphaned",
+      "report_undelivered": "couldn't send its report",
+      "brief_undelivered": "couldn't read its brief",
+      "undelivered_detail": "{{item}}: Its last call failed before reaching the ledger because the harness couldn't resolve the tool name, so the conductor hasn't heard from it. This clears once a call gets through.",
+      "ask_about_item": "Ask the agent about {{title}}",
       "no_report": "no report",
       "role_worker": "worker",
       "role_conductor": "conductor",
@@ -6850,6 +6876,7 @@
       "skillsTab": {
         "adds_new_requirements_to": "Adds new requirements to {{target}} — {{description}}",
         "approve_failed_generic": "Approval refused ({{reason}}).",
+        "approve_failed_changed": "Approval refused: this candidate changed after you read it. It has been read again. Review it, then approve.",
         "approve_failed_live_exists": "Approval refused: a live skill with this name already exists.",
         "approve_failed_not_found": "This candidate is no longer pending — it was approved or dismissed in another window or by your {{productName}} agent, so there was nothing left to approve.",
         "approve_failed_not_found_approved_named": "Candidate “{{name}}” is no longer pending — it was already approved in another window or by your {{productName}} agent and now appears in the Skills list below, so there was nothing left to approve.",
@@ -8958,6 +8985,11 @@
     },
     "membersPage": {
       "drawer_delegated_working": "Delegated work running",
+      "profile_dynamic_capabilities": "Dynamic capabilities",
+      "profile_dynamic_capabilities_switch": "Let {{name}} ask you for tools",
+      "profile_dynamic_capabilities_hint": "{{name}} can ask you on a card in this chat for skills or tools its worker needs. Each one still needs your approval. Off: only you add them, in {{name}}'s advanced settings.",
+      "profile_preview_tag": "Preview",
+      "profile_dynamic_capabilities_failed": "Could not save this setting. Try again.",
       "toggle_roster": "Toggle mates",
       "fresh_start": "Fresh start",
       "fresh_start_failed": "Fresh start didn't finish. The conversation was kept.",
@@ -9704,9 +9736,6 @@
     "preview_title": "Copying {{template}} would make these changes",
     "no_changes": "Nothing would change.",
     "section_prompt": "Instructions",
-    "section_mcp": "Connection",
-    "section_skill": "Skill",
-    "section_approval": "Auto-approval",
     "section_excluded": "Turned off",
     "skills_in_folder": "Skills in {{folder}}",
     "approval_tool_on_server": "{{tool}} on {{server}}",
@@ -9715,6 +9744,22 @@
     "change_removed": "Removed",
     "change_changed": "Changed",
     "cancel": "Cancel",
-    "apply": "Apply"
+    "apply": "Apply",
+    "error_stale_revision": "This mate's config or the template changed after the preview. Press “{{action}}” again to see the new changes.",
+    "error_revision_required": "Press “{{action}}” to see the changes first, then apply them.",
+    "error_template_required": "Choose a template first.",
+    "error_template_unreadable": "That template can't be read. Choose another one, or check that it still exists.",
+    "error_template_restrictions_uncarried": "That template sets permission rules, tool settings or hooks the worker can't keep. Choose another template.",
+    "error_invalid_spec": "This mate's config file can't be read. Fix or restore the file, then try again.",
+    "error_not_a_mate_file": "This mate has no config file of its own, so it has no worker kit.",
+    "error_invalid_request": "The request couldn't be read. Reload the page and try again.",
+    "group_connections": "Connections",
+    "group_tool_access": "Tool access",
+    "group_skills": "Skills",
+    "group_approvals": "Auto-approvals",
+    "change_turns_off": "Turns off",
+    "change_turns_on": "Turns back on",
+    "tool_access_every_tool": "Can use every {{server}} tool",
+    "tool_access_tool_on_server": "Can use {{tool}} on {{server}}"
   }
 }

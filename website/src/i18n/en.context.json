@@ -811,6 +811,9 @@
     "components.jobForm.runs_as_crewmate_hint": "Line under the switch when Mate is chosen. {{name}} is the mate's name. The job runs in that mate's chat with the mate's own memory and files (its workspace), and also shows on its Mates page.",
     "components.jobForm.runs_as_fixed": "Line under the switch when editing a job, explaining why the other option is greyed out: a job cannot switch between custom agent and mate after it is created.",
     "components.jobForm.runs_as_no_crewmates": "Line under the switch, explaining why the Mate option is greyed out: the user has no mates yet, and says where to add one (the Mates page).",
+    "components.jobForm.time_limit": "Label of a number field in the scheduled-job (cron) form. How long one run of the job may take before it is stopped. A noun phrase, not an action.",
+    "components.jobForm.time_limit_description": "Help text under that field, also its tooltip. Explains that a run still going after this many minutes is stopped and reported as timed out, that the limit covers the whole run, and the 30-minute default.",
+    "components.jobForm.time_limit_minutes": "Accessible name of that number field; the value is a whole number of minutes.",
     "components.gitPanel.repos_empty": "Empty state of the Git side-panel tab when the gateway has found no Git repository for this chat. Two sentences: nothing to show, then how a repository joins the list (the agent edits files or runs commands in it). Prospective wording only: say how a row appears, never what the chat did or did not do in the past, and not \"yet\". \"Git\" is the tool name - do not translate.",
     "components.gitPanel.repos_loading": "Status text beside a spinner in the Git side-panel tab while the list of this chat's repositories is being fetched for the first time. Sentence case, ends in an ellipsis.",
     "components.gitPanel.source_project": "Small tag after a repository's folder path in the Git tab, marking the chat's own project folder. One short noun.",
@@ -843,6 +846,7 @@
     "components.meetYourMatesIntro.sample_merge": "Primary pill under the sample message, the answer that tells the Mate to merge the pull request. Imperative, one or two words. Decorative in the dialog, not a real button.",
     "components.meetYourMatesIntro.sample_show_first": "Secondary pill under the sample message, the answer that asks to see the change before merging. Imperative, short. Decorative in the dialog, not a real button.",
     "pages.membersPage.entrance_first_mate": "Speech bubble under Mate's large face the first time its chat opens, before it flies into the header and greets; said only while Mate is the only mate on the roster. Mate is the product's name for the standing teammate agent; keep the teammate word the catalog already uses for it.",
-    "pages.membersPage.entrance_hello": "The same speech bubble when the roster already holds other mates; {{name}} is Mate's display name and is never translated."
+    "pages.membersPage.entrance_hello": "The same speech bubble when the roster already holds other mates; {{name}} is Mate's display name and is never translated.",
+    "pages.settings.instancesPanel.restart_to_activate": "Warning banner in Settings -> Remote Crew (and the older Instances panel) shown when remote crew management is turned on but the gateway has not been restarted yet. <restartCmd/> renders the literal CLI command as monospace code -- keep the tag and do not translate it. 'a terminal' is a command-line shell window; 'the computer this dashboard runs on' is the machine whose gateway serves this page, as opposed to the remote crews listed below it, and it may not be the device showing this page."
   }
 }

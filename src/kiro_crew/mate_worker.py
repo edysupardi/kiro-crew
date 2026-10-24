@@ -105,12 +105,15 @@ def is_legacy_binding(name: str, binding: Any) -> bool:
     """Whether ``config.agents[name]`` is a legacy built-in binding, not a crewmate.
 
     Positive signature: a ``builtin`` binding that never got a member identity
-    (an older install's ``assistant``). The roster surfaces do not list it as a
-    crewmate. The reserved ``default`` member is excluded by name, and a
-    user-created crewmate on shared memory (``source`` ``kirocrew``, no id yet)
-    stays listed.
+    (an older install's ``assistant``, the built-in ``kirocrew-conductor``).
+    ``GET /api/agents`` lists one only once its DM thread holds a message, the
+    rule ``GET /api/members`` applies to every non-dashboard-created row. The
+    reserved ``default`` member is excluded by name, and a user-created crewmate
+    on shared memory (``source`` ``kirocrew``, no id yet) is not legacy.
     """
-    if name == "default" or getattr(binding, "source", "") != "builtin":
+    if name == "default":
+        return False
+    if getattr(binding, "source", "") != "builtin":
         return False
     return not str(getattr(binding, "member_id", "") or "").strip()
 
@@ -130,8 +133,11 @@ def conductor_mcp_servers() -> frozenset[str]:
 
 #: The conductor-only ``kirocrew-mate`` tools the worker does not mount: the
 #: worker does the work, and a capability it lacks is reported back to the
-#: conductor, which alone asks the user for an addition.
-MATE_WORKER_EXCLUDED_TOOLS = ("@kirocrew-mate/request_capabilities",)
+#: conductor, which alone reads the catalog and asks the user for an addition.
+MATE_WORKER_EXCLUDED_TOOLS = (
+    "@kirocrew-mate/request_capabilities",
+    "@kirocrew-mate/find_capabilities",
+)
 
 #: The parts of a crewmate's file that extend the worker. A template copied in as
 #: the worker's extra kit (``mate_worker_kit``) copies exactly these.
@@ -660,11 +666,15 @@ def note_worker_session(session_key: str, execution: Any) -> bool:
     What makes the backend selection (``members.select_provider_backend``) route
     the worker to its crewmate's backend: the selection is an in-memory test, and
     this is the one writer, called wherever the record is read before a session
-    is allocated. Returns whether the key is a worker.
+    is allocated and when an agent switch records a new selection. Returns whether
+    the key is a worker. Any other record (a session switched onto another
+    template) drops the key, so the session leaves the crewmate's backend with its
+    worker template.
     """
-    from kiro_crew.members import note_crewmate_worker_session
+    from kiro_crew.members import forget_crewmate_worker_session, note_crewmate_worker_session
 
     if not is_own_worker_execution(execution):
+        forget_crewmate_worker_session(session_key)
         return False
     note_crewmate_worker_session(session_key)
     return True

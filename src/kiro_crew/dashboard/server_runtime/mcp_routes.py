@@ -215,6 +215,9 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_post(
         "/api/agent-panel/dashboard/rollback", _deferred("agent_panel", "api_dashboard_rollback")
     )
+    app.router.add_get(
+        "/api/agent-panel/dashboard/snapshot", _deferred("agent_panel", "api_dashboard_snapshot")
+    )
     app.router.add_get("/api/members/{slug}/panel", _deferred("agent_panel", "api_member_panel"))
     # The crewmate's dynamic dashboard. Registered through the deferred binder for the
     # reason the panel's routes are: calling the module's own
@@ -278,6 +281,12 @@ def _register_mcp_routes(app: web.Application) -> None:
         ("POST", "/api/members/{slug}/self-changes/{change_id}/undo", "api_member_self_undo"),
     ):
         app.router.add_route(_method, _path, _deferred("member_self", _name))
+    # The crewmate's capability catalog (``find_capabilities``), MCP-only under
+    # the same strict prefix.
+    app.router.add_post(
+        "/api/member/self/capabilities",
+        _deferred("member_capability_catalog", "api_member_self_capabilities"),
+    )
     # A crewmate's goals (``member_goals``). The Goals tab's half is owner-only
     # cookie auth under the member's own "/api/members/{slug}"; the crewmate's
     # half (the kirocrew-mate goal tools) is MCP-only under the strict

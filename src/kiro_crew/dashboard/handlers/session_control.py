@@ -398,7 +398,21 @@ async def api_session_control_create(request: web.Request) -> web.Response:
         note = conductor_patrol.patrol_note(state, caller, reason, has_ledger=ledger)
         if note:
             result["patrol_note"] = note
+        await _add_worker_capabilities(request, state, result)
     return web.json_response(result)
+
+
+async def _add_worker_capabilities(
+    request: web.Request, state: "DashboardState", result: dict
+) -> None:
+    """Add a crewmate conductor's own-worker capability line to *result*, if this is one."""
+    from kiro_crew.dashboard.crewmate_dispatch_capabilities import own_worker_note
+
+    note = await own_worker_note(
+        request.app, state, _read_session_key(request), str(result.get("target") or "")
+    )
+    if note:
+        result["worker_capabilities"] = note
 
 
 @_counted("fork")
@@ -725,10 +739,18 @@ async def api_session_control_send(request: web.Request) -> web.Response:
         handback = await work_ledger_routes.read_send_handback(
             _read_session_key(request), _target(body)
         )
+        # A crewmate's conductor messaging a worker of its own that was archived
+        # (the idle sweep, a closed tab) revives it first, under revive's fence.
+        target = await sc.revive_own_archived_worker(
+            state,
+            _read_session_key(request),
+            _target(body),
+            caller_fenced=_carried_fence(request),
+        )
         result = await sc.send_to_target(
             state,
             caller_session_key=_read_session_key(request),
-            target=_target(body),
+            target=target,
             message=message,
             steer=steer,
             caller_fenced=_carried_fence(request),
@@ -749,6 +771,9 @@ async def api_session_control_send(request: web.Request) -> web.Response:
             delivered_to=str(result.get("target") or ""),
             message=message,
         )
+    if isinstance(result, dict):
+        result = dict(result)
+        await _add_worker_capabilities(request, state, result)
     return web.json_response(result)
 
 

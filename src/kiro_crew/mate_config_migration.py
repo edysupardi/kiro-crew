@@ -9,6 +9,10 @@ re-check the file and its kit record, then, once every candidate is proven,
 repoint each binding under the create path's optimistic lock and move its
 pre-upgrade threads (:func:`repoint_moved_threads`).
 
+Everything carried over is the crewmate's file content, so the worker's catalog
+reports it as already there and no capability card is ever raised for it
+(``mate_capability_catalog.worker_has``).
+
 Nothing is deleted, so pointing ``kiro_agent`` back rolls a crewmate's new chats
 back; threads already moved stay on the conductor (``repointed`` is a record, not
 an undo). ``~/.kiro/mates/migrated.json`` keeps it from moving again. Idempotent, best
@@ -804,8 +808,10 @@ def migrate_existing_crewmates(
             logger.warning("crewmate migration: repoint failed for %s: %s", _label(cfg, name), exc)
             continue
         report.migrated.append(name)
-        from kiro_crew.mate_upgrade_notice import mark_notice_owed
+        from kiro_crew.mate_upgrade_notice import clear_kept_owed, mark_notice_owed
 
+        # A moved crewmate owes no "left as it was" notice from any earlier start.
+        clear_kept_owed(name)
         if name not in unchanged:
             mark_notice_owed(name)
         try:
@@ -823,7 +829,28 @@ def migrate_existing_crewmates(
         )
     # After the repoints, so a thread moves only with a crewmate that moved.
     report.threads_repointed = repoint_moved_threads()
+    _tell_kept(report)
     return report
+
+
+def _tell_kept(report: MigrationReport) -> None:
+    """Owe each crewmate the pass left where it was one notice naming why.
+
+    The dry-run reasons are written for a reader; the other failures are not, so
+    they get a plain cause. The notice is claimed once, so a crewmate still left
+    behind at a later start is not told again.
+    """
+    from kiro_crew.mate_upgrade_notice import mark_kept_owed
+
+    kept = dict(report.dry_run_failed)
+    for name in report.skipped_no_source:
+        kept.setdefault(name, "the agent it runs on could not be read")
+    for name in report.copy_failed:
+        kept.setdefault(name, "its own settings file could not be written")
+    for name in report.repoint_failed:
+        kept.setdefault(name, "its settings could not be switched over")
+    for name, reason in kept.items():
+        mark_kept_owed(name, reason)
 
 
 def _record_kit(name: str, source: str, spec: dict[str, Any]) -> None:

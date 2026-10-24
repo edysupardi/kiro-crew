@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from kiro_crew.dashboard.chat_utils import (
     _tool_identity_fields,
+    open_construct_at_end,
     restore_replacement_if_handover_did_not_land,
     slot_history_key,
     tighten_replacement_to_restricted_original,
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
         crew_log_emit,
         fire_tool_hooks,
         logger,
-        open_construct_at_end,
         redact_credentials,
         redact_exfiltration_urls,
         save_slot_off_loop,
@@ -419,6 +419,13 @@ async def _on_tool_call(turn: _ChatTurn, event) -> None:
                 event.mcp_server_name or "",
                 event.tool_name or "",
             )
+        from kiro_crew import undelivered_call_watch
+
+        if turn._undelivered_watch is None:
+            turn._undelivered_watch = undelivered_call_watch.UndeliveredCallWatch(
+                session_key or "", turn.client
+            )
+        turn._undelivered_watch.on_call(event)
     # If this tool call belongs to a native sub-agent (mapped via
     # _kiro.dev/session/update), stream it onto that sub-agent's card.
     _nat_card = _native_tc_card.get(event.tool_call_id) if event.tool_call_id else None

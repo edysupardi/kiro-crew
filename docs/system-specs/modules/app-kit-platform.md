@@ -28,7 +28,12 @@ An installed app may declare top-level `config.json` object ownership with
 `config_keys`. Config validation unions those declarations with the core
 compatibility fallback before warning. A manifest on disk without
 `installed.json` owns nothing, so stale or merely downloaded apps cannot silence
-unknown-key warnings. Non-gateway CLI commands and slim MCP startup prime
+unknown-key warnings. Install, update and uninstall republish the declarations as
+they finish, and so do both callers of `register_external_app` (the
+`POST /api/apps/register` route and the registry pipeline's self-managed
+install), off the event loop, so a running gateway sees a newly declared key
+without a restart. Non-gateway CLI commands
+and slim MCP startup prime
 installed app and admissible companion declarations before their first config
 load and before an event loop starts. This priming reads the admission policy
 without side effects: it seeds no policy file and writes no SEL record.
@@ -1078,8 +1083,12 @@ its app (the flat path is the namespaced directory itself), when the name is
 reserved (`_RESERVED_SKILL_DIRS`, i.e. `auto`), and when a real directory of that
 name already exists; an existing flat link is repointed, so when two apps ship a
 same-named skill it resolves to the one registered last. A `skill://` mapping of
-an app skill therefore names the namespaced path, as
-`src/kiro_crew/docs/agent-spec-fields.md` (Resources) documents. Each link is a
+an app skill therefore names the namespaced path, one skill or `<app>/*/SKILL.md`
+for all of them, as `src/kiro_crew/docs/agent-spec-fields.md` (Resources)
+documents. The catalog lists each skill once, under whichever link its walk reached
+first; `_alias_selected` in `skill_runtime/catalog.py` still selects a row listed
+under its flat link when the namespaced link one level under the mapping's literal
+prefix resolves to the same target. Each link is a
 symlink on POSIX and a **directory junction** on Windows, via
 `platform_compat.symlink_or_junction`.
 

@@ -490,7 +490,7 @@ quarantine exclusion, and the discover-and-sync step (`sync_discovered_servers`,
 | Owner | Owns |
 |---|---|
 | `mcp_discovery_server_info.py` | `McpServerInfo`, the scope names and config-source tables, and `redact_mcp_headers` / `redact_mcp_error` |
-| `mcp_discovery_probe_state.py` | the protocol revision the remote probe offers and steps down to, the probe timeouts and error cap, the once-only warning ledgers, and the probe-result cache |
+| `mcp_discovery_probe_state.py` | the protocol revision every client handshake offers and steps down to, the probe timeouts and error cap, the once-only warning ledgers, and the probe-result cache |
 | `mcp_discovery_managed.py` | the managed servers' subcommand and tool-module tables, `managed_server_is_session_bound`, the in-process tool read, and stale-command repair |
 | `mcp_discovery_config.py` | loading the agent config and the `mcp.json` sources per scope, and `list_servers` |
 | `mcp_discovery_remote.py` | `_probe_remote`: the SSRF vet and pinned connection, the HTTP handshake, header expansion, and the authorization checks |
@@ -529,8 +529,9 @@ Probes run from `POST /api/mcp/probe`:
   retry once with the newest such revision. Every request after `initialize`
   carries `MCP-Protocol-Version` set to the revision the server answered with.
   The connection L1 smoke test (`connections/l1_smoke.py`) imports the same
-  helpers, so both paths negotiate the same way. The stdio probe offers
-  `2024-11-05`.
+  helpers, so both paths negotiate the same way. The stdio probe and the
+  gateway's stdio backend handshake (`send_initialize`) offer the same revision
+  and take the same one step down.
 - **Disabled servers are never spawned.** `probe_all()` returns a muted row as
   an unprobed `status: "disabled"` placeholder with no error text, keeping the
   tools of its last real probe, and writes nothing to the probe cache.
@@ -785,6 +786,19 @@ answer, and the process exits with status `75` so the pool relaunches it from th
 current install. Otherwise nothing would bring it back, so it keeps its transport
 and refuses each call with a message to restart Kiro Crew.
 
+## Servers that ask the person (MCP elicitation)
+
+An MCP server the agent calls may gate a tool on a human answer -- a confirmation,
+a short form, a link to visit -- by sending its agent an `elicitation/create`. Kiro
+Crew is the ACP CLIENT of that agent, so the ask reaches it as a server->client
+request (`elicitation/create` on a standard harness, `_kiro/mcp/elicitation` on
+KAS) and is put to the person as a card; no trust tier answers it, and a session
+with no person reachable declines. The wire shapes, the fail-closed parse, the
+consumer opt-in and the dashboard route are in
+[acp-client.md, *MCP elicitation*](../system-specs/modules/acp-client.md#mcp-elicitation-acpelicitationpy).
+This is distinct from everything else in this document, which is about the MCP
+servers Kiro Crew itself SERVES to the agent.
+
 ## Shareability verdicts
 
 `GET /api/mcp-gateway/servers` returns a `recommendation` per row: whether the
@@ -873,8 +887,8 @@ binary on disk: every live provider — the registered sessions plus the warm
 pool the reset would drain — must declare `LLMProvider.mcp_config_hot_reload`
 as a literal `True` (default `False`, harness-parity H14). `AcpProvider`
 answers it from membership in `ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD` (kiro-cli
-only — KAS gets its servers injected on `session/new`, claude reads no agent
-file) AND the `agentInfo.version` its own process reported at `initialize`
+only — KAS gets its servers injected on `session/new` and applies a change by
+re-injection, below; claude reads no agent file) AND the `agentInfo.version` its own process reported at `initialize`
 being at or above `MCP_HOT_RELOAD_MIN_KIRO_CLI_VERSION`. That floor is
 2.21.0 — the release the reconcile semantics were observed on — not 2.10.0,
 where the watcher first shipped: a release in between keeps the always-correct
@@ -890,6 +904,55 @@ declared the capability at all resets every session. `POST
 `sessions_reset: 0` is the observable outcome. With no live process at all
 there is nothing a reset could reach, so the answer is also to skip.
 `POST /api/sessions/restart` stays the unconditional manual path.
+
+KAS satisfies the same gate by a SECOND mechanism, its own membership
+(`ACP_BACKENDS_MCP_WIRE_REINJECT`, declared as `LLMProvider.mcp_config_wire_reinject`
+by `AcpSessionProvider`, read through `AcpProvider`): nothing in that engine
+watches a file, because its servers travel inside the projected agent
+(`_meta.kiro.customAgents`), and the engine registers a session's batch exactly
+once -- a `session/set_mode` re-sent with a new batch is answered `{}` and
+ignored, and a `session/load` of a session the engine still holds is ignored the
+same way. What it does take is `session/close` on the resident session,
+`session/load` of the SAME session id carrying the new batch, then
+`session/set_mode`: the engine replays the conversation it kept, the
+`_kiro/tools/didChange` after the activation lists the added server's tools (and
+no longer lists a withdrawn one's), and the model's next turn reaches the new tool
+while recalling the earlier turns. Measured on KAS 0.66.62 behind kiro-cli 2.34.0:
+`test/fixtures/acp_frames/kas/mcp-live-apply-live.jsonl` (an added server, with
+the refused re-injection in the same session) and `mcp-live-remove-live.jsonl` (a
+withdrawn one). The bundle route runs the same engine over the same wire. So the
+gate is `live_sessions_apply_mcp_live` -- every live provider hot-reloads OR
+re-injects -- and when it holds, `_mcp_hot_reload_active` MARKS each re-injecting
+provider (`mark_mcp_config_changed`, a flag, never on the wire) in the same call
+that skips the reset. The provider applies the mark at its next turn boundary,
+under the shared-turn claim and before the prompt
+(`acp/session_provider_mcp_reinject.py`): `AcpRuntime.evict_session` (the
+standard `session/close`, which keeps the stored record -- unlike KAS's own
+teardown verb `_kiro/session/delete`, which removes it), then
+`AcpRuntime.load_session` on the same id, which re-reads the spec, re-projects
+the batch, re-declares the broker stubs, hoists the managed servers and activates
+the mode with every guard the first load had. The new handle replaces the
+provider's first, and a pinned model is re-applied last, as `new_conversation`
+does -- a cancel during that round trip leaves a usable session on the engine's
+restored model. The mark is
+consumed before the first await and never cleared after one, so a Settings write
+that lands while the load runs marks the provider again and that mark survives
+the apply: the next boundary re-loads from the spec as it is then. Never
+mid-turn: a close on a running prompt would cut it, so a mark landing during a
+turn waits for the next one. The load runs inside
+`AcpRuntime.keep_record_on_teardown`: every failure arm of `load_session` (an
+activation refusal, a stale spec, a timed-out `set_mode`) ends the session
+through `terminate_session`, whose KAS verb `_kiro/session/delete` removes the
+stored record -- the conversation the apply exists to keep -- and inside the
+scope that call is the record-keeping `evict_session` instead. A failed load
+restores the mark and refuses that turn with the restart remedy, so the next
+boundary retries; a close of an id the host does not hold is an error the evict
+ignores, which is what makes a half-done apply converge. The warm pool is marked too: a pre-spawned KAS session applies the
+change at its first turn rather than being drained -- and a fill IN FLIGHT,
+whose provider sits between its `start()` and its enqueue in neither snapshot,
+is reached through `SessionManager.mark_mcp_config_changed`, a generation
+fence the gate bumps in the same call and the fill loop compares across its
+start, marking that provider at its enqueue re-check.
 
 The skip is inferred from that declaration, not observed: kiro-cli's
 `_kiro.dev/mcp/server_initialized` notification is the signal that a reconcile
@@ -1740,9 +1803,9 @@ Managed servers, registered by `agent._MANAGED_MCP_SERVERS` and installed into
 | `kirocrew-work` | `kirocrew mcp-work` (`mcp_work.py`) | `work_brief`, `work_report`, `work_ledger_read`, `work_ledger_rebuild`, `work_ledger_record` |
 | `kirocrew-crew-log` | `kirocrew mcp-crew-log` (`mcp_crew_log.py`) | `crew_log_list`, `crew_log_read`, `crew_log_projection` |
 | `kirocrew-debug` | `kirocrew mcp-debug` (`mcp_debug.py`) | `debug_gateway`, `debug_refusals`, `debug_threads`, `debug_processes`, `debug_snapshots` |
-| `kirocrew-panel` | `kirocrew mcp-panel` (`mcp_panel.py`) | `panel_publish`, `panel_templates`, `dashboard_fields`, `dashboard_types`, `dashboard_write`, `dashboard_templates`, `dashboard_preview`, `dashboard_apply`, `dashboard_rollback` |
+| `kirocrew-panel` | `kirocrew mcp-panel` (`mcp_panel.py`) | `panel_publish`, `panel_templates`, `dashboard_fields`, `dashboard_types`, `dashboard_write`, `dashboard_templates`, `dashboard_preview`, `dashboard_apply`, `dashboard_rollback`, `dashboard_snapshot` |
 | `kirocrew-guide` | `kirocrew mcp-guide` (`mcp_guide.py`) | `guide_list_actions`, `guide_start`, `guide_status`, `guide_cancel`, `list_change_kinds`, `find_setting`, `get_member_capabilities`, `diagnose_settings`, `propose_change`, `get_change_status`, `search_docs`, `find_ui` |
-| `kirocrew-mate` | `kirocrew mcp-mate` (`mcp_mate.py`) | `update_self`, `set_model`, `set_approval_mode`, `request_capabilities`, `goal_read`, `set_goal`, `set_key_results`, `key_result_progress`, `save_goal_report`, `save_notes` |
+| `kirocrew-mate` | `kirocrew mcp-mate` (`mcp_mate.py`) | `update_self`, `set_model`, `set_approval_mode`, `find_capabilities`, `request_capabilities`, `goal_read`, `set_goal`, `set_key_results`, `key_result_progress`, `save_goal_report`, `save_notes` |
 
 `kirocrew-guide` is a platform capability: it is always emitted (not `opt_in`),
 so the default `kirocrew` template, every mate built from it, the worker
@@ -1807,9 +1870,19 @@ turn, as every card outcome does. A `set_approval_mode` for the mode the thread
 already runs in (a record pinning none opens in
 `MEMBER_APPROVAL_MODE_UNSET_EFFECTIVE`) is refused `no_change` rather than
 drawn as a card from an empty value.
-Pressing a `request_capabilities` card writes the crewmate's own file in place
-(crew-mode.md, "Conductor and worker"). The worker does not mount it
-(`MATE_WORKER_EXCLUDED_TOOLS`).
+`find_capabilities` is a read for the crewmate's conductor: `POST
+/api/member/self/capabilities` (`handlers/member_capability_catalog.py`)
+answers what the crewmate's worker has (`mate_worker.resolve_worker_spec`), the
+servers and skills this gateway has loaded that it lacks, and, for a `query`,
+the MCP registry search the MCP page runs (`mcp_discover.search_registry`,
+external text redacted). Data only, never a transport. A `request_capabilities`
+draft that names `additions` has them resolved by the gateway into the card's
+operations (`additions_to_draft`): a gateway server's own entry, an official
+registry install plan (`mcp_discover.official_install_plan`, the spec
+`/api/mcp/discover/install` would write), or a loaded skill; the card states
+where each comes from and which tools would run without asking, and pressing it
+writes the crewmate's own file in place (crew-mode.md, "Conductor and
+worker"). The worker mounts neither tool (`MATE_WORKER_EXCLUDED_TOOLS`).
 The crewmate's goal (`member_goals.py`, `trust/member-goals/<slug>.json`, never
 `member-rules/`) splits the same way. `set_goal` and `set_key_results` are card
 asks (`crewmate.goal`, `crewmate.key_results`, applied and undone through

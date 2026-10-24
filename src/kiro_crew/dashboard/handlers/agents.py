@@ -459,6 +459,8 @@ def _supply_live_enum(entry: dict) -> None:
 
 async def api_config_schema(request: web.Request) -> web.Response:
     """GET /api/config/schema — return config schema entries."""
+    from kiro_crew.edition_locks import LOCKED_BY_POLICY, config_path_locked
+
     entries = SCHEMA_REGISTRY
 
     # Filter by tags (comma-separated, intersection)
@@ -480,6 +482,9 @@ async def api_config_schema(request: web.Request) -> web.Response:
         if entry.sensitive or dataclasses.is_dataclass(d.get("defaultValue")):
             d["defaultValue"] = None
         _supply_live_enum(d)
+        # An enterprise build ignores this local value (RFC D3, kiro_crew.edition_locks).
+        if config_path_locked(entry.path):
+            d["lockedByPolicy"] = LOCKED_BY_POLICY
         result.append(d)
 
     return web.json_response({"entries": result})
@@ -1651,16 +1656,21 @@ async def api_kirocrew_agents(request: web.Request) -> web.Response:
     from kiro_crew.dashboard.handlers.source_providers import is_owner_dashboard_request
 
     redact = request.app.get("state") is None or not is_owner_dashboard_request(request)
-    # A legacy binding with no member id is not a crewmate, so no roster lists it.
-    from kiro_crew.mate_worker import is_legacy_binding
+    state: DashboardState | None = request.app.get("state")
 
+    # A legacy built-in binding (``builtin``, no member id) is listed once its DM
+    # thread holds a message, the rule ``GET /api/members`` applies to every
+    # non-dashboard-created row. The binding and transcript reads are file IO:
+    # one thread hop for the candidates, then the live-slot check on the loop.
+    # Through the members facade, so a patch on it reaches this read too.
+    from kiro_crew.dashboard.handlers.members import unchatted_legacy_bindings
+
+    hidden = await unchatted_legacy_bindings(cfg, state)
     agents = [
         _agent_roster_row(name, "global", agent_cfg, redact=redact)
         for name, agent_cfg in cfg.agents.items()
-        if not is_legacy_binding(name, agent_cfg)
+        if name not in hidden
     ]
-
-    state: DashboardState | None = request.app.get("state")
 
     # Project rows come from a directory scan, so it runs on the discovery
     # pool — same rule as every other agent listing: no filesystem I/O on the

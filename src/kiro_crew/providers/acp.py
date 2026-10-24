@@ -233,6 +233,8 @@ class AcpProvider(LLMProvider):
         # consumers (dashboard chat) BEFORE startup; re-applied when
         # _start_kiro_runtime_impl swaps in the real AcpSessionProvider.
         self._child_fidelity_aware: bool = False
+        # Same shape for the MCP elicitation opt-in (see accepts_elicitation).
+        self._accepts_elicitation: bool = False
         # Canonical Kiro Crew identity (a cfg.agents key), resolved by the
         # factory at provider-creation time — ``agent`` above is the bound kiro
         # template, a different namespace. Threaded into the kiro-shared
@@ -340,6 +342,32 @@ class AcpProvider(LLMProvider):
                 inner.child_fidelity_aware = bool(value)
             except Exception:  # pragma: no cover - read-only shapes
                 pass
+
+    @property
+    def accepts_elicitation(self) -> bool:
+        """See AcpSessionHandle.accepts_elicitation.
+
+        Stored here and forwarded to the live inner client for the same reason
+        ``child_fidelity_aware`` is: the kiro backend's placeholder client is
+        replaced at runtime startup, and the stored value is re-applied then.
+        """
+        return self._accepts_elicitation
+
+    @accepts_elicitation.setter
+    def accepts_elicitation(self, value: bool) -> None:
+        self._accepts_elicitation = bool(value)
+        inner = getattr(self, "_client", None)
+        if inner is not None and hasattr(inner, "accepts_elicitation"):
+            try:
+                inner.accepts_elicitation = bool(value)
+            except Exception:  # pragma: no cover - read-only shapes
+                pass
+
+    async def answer_elicitation(
+        self, request_id: str | int, action: str, content: dict[str, Any] | None = None
+    ) -> bool:
+        """Answer a pending MCP elicitation on the inner client."""
+        return await self._client.answer_elicitation(request_id, action, content)
 
     @property
     def model_pin_refused(self) -> str:
@@ -703,6 +731,25 @@ class AcpProvider(LLMProvider):
         return mcp_hot_reload_supported(
             self._client.backend, parse_kiro_cli_version(self.agent_version)
         )
+
+    @property
+    def mcp_config_wire_reinject(self) -> bool:
+        """True when this provider's LIVE session takes a re-sent MCP projection.
+
+        Answered by the inner session provider (``AcpSessionProvider``, from
+        ``ACP_BACKENDS_MCP_WIRE_REINJECT`` membership -- harness-parity H6/H14).
+        Before startup ``self._client`` is the placeholder ``AcpClient``, which
+        has no session to re-load and no such attribute, so this reads False
+        and a session still starting is reset like one that cannot apply the
+        change. Only a literal ``True`` passes, so a mock never reads as a skip.
+        """
+        return getattr(self._client, "mcp_config_wire_reinject", False) is True
+
+    def mark_mcp_config_changed(self) -> None:
+        """Hand the mark to the inner session provider; nothing to mark before startup."""
+        mark = getattr(self._client, "mark_mcp_config_changed", None)
+        if callable(mark):
+            mark()
 
     def available_models(self) -> list[dict[str, str]]:
         """Models the backend advertised at session init (may be empty).
