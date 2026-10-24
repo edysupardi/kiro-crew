@@ -988,11 +988,16 @@ export default function PapyrusPage() {
     if (trimmed) createFileMutation.mutate(trimmed)
   }, [createFileMutation])
 
-  const onDeleteFileClick = useCallback((path: string) => {
-    if (window.confirm(i18nT('apps.papyrus.workspace.delete_file_confirm', { file: path }))) {
+  const onDeleteFileClick = useCallback(async (path: string) => {
+    if (
+      await confirm({
+        title: i18nT('apps.papyrus.workspace.delete_file_confirm', { file: path }),
+        confirmLabel: i18nT('apps.papyrus.fileTree.delete_file', { file: path }),
+      })
+    ) {
       deleteFileMutation.mutate(path)
     }
-  }, [deleteFileMutation])
+  }, [deleteFileMutation, confirm])
 
   if (!project) {
     return (

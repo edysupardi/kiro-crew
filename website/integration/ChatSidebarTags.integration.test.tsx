@@ -406,6 +406,19 @@ describe('ChatSidebar tag/column UI', () => {
     await user.click(screen.getByTestId('column-edit-c1'))
     await waitFor(() => expect(screen.getByTestId('tag-delete-todo')).toBeInTheDocument())
     await user.click(screen.getByTestId('tag-delete-todo'))
+    // The delete now asks through the themed ConfirmDialog; accept it there.
+    // ChatSidebar's row-animation renders keep replacing the dialog's subtree,
+    // so re-query and require a CONNECTED node inside waitFor — a stale node
+    // click reaches nothing. The column popover is ALSO a role=dialog, so the
+    // confirm is the /delete tag/ button inside a dialog that is not it.
+    await waitFor(() => {
+      const btn = screen.getAllByRole('dialog')
+        .filter(d => !d.hasAttribute('data-column-popover'))
+        .map(d => within(d).queryByRole('button', { name: /delete tag/i }))
+        .find(b => b && b.isConnected)
+      expect(btn ?? null).toBeTruthy()
+      fireEvent.click(btn!)
+    }, { timeout: 3000 })
     await waitFor(() => expect(backend.state.tags.find(t => t.id === 'todo')).toBeUndefined())
   })
 
@@ -431,6 +444,9 @@ describe('ChatSidebar tag/column UI', () => {
     renderBoard()
     await waitFor(() => expect(screen.getByTestId('column-c1')).toBeInTheDocument())
     await user.click(screen.getByTestId('column-delete-c1'))
+    // The themed ConfirmDialog answers the delete: press its confirm button.
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Delete column' }))
     await waitFor(() => expect(backend.state.columns.length).toBe(0))
   })
 

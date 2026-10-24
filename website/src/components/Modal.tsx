@@ -208,6 +208,7 @@ function ModalDialog({ onClose, title, ariaLabel, footer, headerActions, maxWidt
 }
 
 export default function Modal({ open, onClose, maxWidth = 640, guardAccidentalDismiss = false, dismissDisabled = false, layer = 'dialog', ...rest }: ModalProps) {
+  if (process.env.NODE_ENV !== 'production') console.log('DBG modal render open=', open)
   const top = layer === 'top'
   /** Backdrop + Escape only. Suppressed while the caller guards unsaved input
    *  and while every dismissal is refused. */

@@ -35,6 +35,7 @@ import { useColumnCount } from '../hooks/useColumnCount'
 import { i18nT } from '../i18n/t'
 import { uiLocation } from '../uiLocations/uiLocation'
 import { useGuideSelection } from '../guide/guidePredicates'
+import { useConfirm } from '../components/ConfirmDialog'
 
 import { KIND_OPTIONS, ARTIFACT_SORT_STORAGE_KEY, readPersistedSort, sortArtifacts } from './artifactsPageModel'
 import {
@@ -631,6 +632,7 @@ export default function ArtifactsPage() {  const navigate = useNavigate()
       qc.invalidateQueries({ queryKey: ['artifacts'] })
     },
   })
+  const { confirm, confirmDialog } = useConfirm()
   const handleTogglePin = useCallback((a: Artifact) => {
     pinMut.mutate({ slug: a.slug, pinned: !a.pinned })
   }, [pinMut])
@@ -721,11 +723,15 @@ export default function ArtifactsPage() {  const navigate = useNavigate()
   // reported by the artifact's own page (ArtifactDetailPage).
   useGuideSelection('artifact_open', { selected: false, available: gridEntries.length > 0 })
 
-  const handleDelete = useCallback((a: Artifact) => {
-    if (window.confirm(i18nT('pages.artifactsPage.remove_artifact_confirm', { slug: a.slug }))) {
-      deleteMut.mutate(a.slug)
-    }
-  }, [deleteMut])
+  const handleDelete = useCallback(async (a: Artifact) => {
+    if (!(await confirm({
+      title: i18nT('pages.artifactsPage.remove_artifact'),
+      body: i18nT('pages.artifactsPage.remove_artifact_confirm', { slug: a.slug }),
+      confirmLabel: i18nT('pages.artifactsPage.remove_artifact'),
+      danger: true,
+    }))) return
+    deleteMut.mutate(a.slug)
+  }, [confirm, deleteMut])
 
   const errMessage = error ? (error instanceof Error ? error.message : String(error)) : null
   const asMessage = (e: unknown) => (e instanceof Error ? e.message : String(e))
@@ -1361,6 +1367,7 @@ export default function ArtifactsPage() {  const navigate = useNavigate()
             showItemTitle />
         )}
       </AnimatePresence>
+      {confirmDialog}
     </>
   )
 }

@@ -17,6 +17,7 @@ import {
 import { api } from '../api/client'
 import { Badge } from '../components/ui'
 import ErrorNotice from '../components/ErrorNotice'
+import { useConfirm } from '../components/ConfirmDialog'
 import SimpleSelect from '../components/SimpleSelect'
 import { framablePreviewUrl, safeHttpUrl } from '../lib/safeUrl'
 import { useCloudDeploymentEnabled } from '../hooks/useCloudDeploymentEnabled'
@@ -345,6 +346,7 @@ export default function WebAppArtifactCard({
       onTornDown?.()
     },
   })
+  const { confirm, confirmDialog } = useConfirm()
 
   const [urlCopied, setUrlCopied] = useState(false)
   const handleCopy = useCallback(async () => {
@@ -434,12 +436,17 @@ export default function WebAppArtifactCard({
     ? i18nT('components.webAppArtifactCard.estimated_cost_over_ttl_window', { hours: cost.window_hours })
     : i18nT('components.webAppArtifactCard.estimated_monthly_cost')
 
-  const handleTeardown = () => {
+  const handleTeardown = async () => {
     const resourceList = architecture.resources
       .map((r: { type: string; id: string }) => `  ${r.type}: ${r.id}`)
       .join('\n')
     const msg = i18nT('components.webAppArtifactCard.tear_down_confirm', { resources: resourceList })
-    if (!window.confirm(msg)) return
+    if (!(await confirm({
+      title: i18nT('components.webAppArtifactCard.cancel_tear_down'),
+      body: msg,
+      confirmLabel: i18nT('components.webAppArtifactCard.cancel_tear_down'),
+      danger: true,
+    }))) return
     teardownMut.mutate()
   }
 
@@ -724,7 +731,7 @@ export default function WebAppArtifactCard({
           )}
           <button
             type="button"
-            onClick={handleTeardown}
+            onClick={() => { void handleTeardown() }}
             disabled={teardownMut.isPending || isExpired}
             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[12px] font-medium border border-danger/40 text-danger hover:text-danger-text hover:bg-danger/10 cursor-pointer transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-transparent"
             title={i18nT('components.webAppArtifactCard.cancel_tear_down_marks_the_deployment_expired_in')}
@@ -738,6 +745,7 @@ export default function WebAppArtifactCard({
       </div>
 
       {/* No hand-off: on the artifact page this card sits beside the comments sidebar, whose composer draft is local state the hand-off would discard. */}
+      {confirmDialog}
       {teardownMut.error && (
         <ErrorNotice
           title={i18nT('components.webAppArtifactCard.teardown_failed')}

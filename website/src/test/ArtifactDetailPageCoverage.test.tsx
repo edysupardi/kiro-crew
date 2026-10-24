@@ -179,6 +179,18 @@ async function pickVersion(label: string) {
   fireEvent.click(await screen.findByRole('option', { name: label }))
 }
 
+/** Answer the in-app ConfirmDialog. Re-query and require a CONNECTED button
+ *  inside waitFor: the dialog subtree re-renders, so a node held across ticks
+ *  goes stale and a click on it reaches nothing. */
+async function answerConfirm(confirmLabel: string, yes: boolean) {
+  await waitFor(() => {
+    const dialog = screen.getByRole('dialog')
+    const btn = within(dialog).getByRole('button', { name: yes ? confirmLabel : 'Cancel' })
+    expect(btn.isConnected).toBe(true)
+    fireEvent.click(btn)
+  }, { timeout: 3000 })
+}
+
 describe('ArtifactDetailPage — mutation paths', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -400,9 +412,8 @@ describe('ArtifactDetailPage — mutation paths', () => {
     await mount(mkArtifact({ version: 2 }))
     await pickVersion('v1')
     const revert = await screen.findByRole('button', { description: 'Revert to v1' })
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     fireEvent.click(revert)
-    expect(confirmSpy).toHaveBeenCalled()
+    await answerConfirm('Revert to v1', false)
     expect(vi.mocked(api).updateArtifact).not.toHaveBeenCalled()
   })
 
@@ -414,8 +425,7 @@ describe('ArtifactDetailPage — mutation paths', () => {
     await mount(mkArtifact({ version: 2 }))
     await pickVersion('v1')
     fireEvent.click(await screen.findByRole('button', { description: 'Revert to v1' }))
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
-    fireEvent.click(screen.getByRole('button', { description: 'Revert to v1' }))
+    await answerConfirm('Revert to v1', true)
     await waitFor(() => expect(screen.getByText('version gone')).toBeInTheDocument())
   })
 

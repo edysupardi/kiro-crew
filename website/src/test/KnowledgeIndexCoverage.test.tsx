@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
@@ -300,6 +300,17 @@ describe('KnowledgePage — keyboard shortcuts', () => {
   })
 })
 
+// Answers the useConfirm dialog. Re-query and require a CONNECTED button inside
+// waitFor: a node held across renders goes stale and a click on it reaches nothing.
+async function answerConfirm(confirmLabel: string, yes: boolean) {
+  await waitFor(() => {
+    const dialog = screen.getByRole('dialog')
+    const btn = within(dialog).getByRole('button', { name: yes ? confirmLabel : 'Cancel' })
+    expect(btn.isConnected).toBe(true)
+    fireEvent.click(btn)
+  }, { timeout: 3000 })
+}
+
 describe('KnowledgePage — bulk actions', () => {
   async function selectFlatItem() {
     render(<KnowledgePage />, { wrapper: Wrapper })
@@ -335,23 +346,19 @@ describe('KnowledgePage — bulk actions', () => {
   })
 
   it('deletes the selection only after the confirm prompt is accepted', async () => {
-    const confirmSpy = vi.fn(() => true)
-    vi.stubGlobal('confirm', confirmSpy)
     await selectFlatItem()
     await userEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    await answerConfirm('Delete', true)
     await waitFor(() => expect(mutationCalls('DELETE')).toHaveLength(1))
     expect(mutationCalls('DELETE')[0][0]).toBe('/items/f1')
-    expect(confirmSpy).toHaveBeenCalled()
-    vi.unstubAllGlobals()
   })
 
   it('writes nothing when the delete prompt is dismissed', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => false))
     await selectFlatItem()
     await userEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    await answerConfirm('Delete', false)
     expect(mutationCalls('DELETE')).toHaveLength(0)
     expect(screen.getByText('1 selected')).toBeInTheDocument()
-    vi.unstubAllGlobals()
   })
 
   it('copies the content of the selected items', async () => {

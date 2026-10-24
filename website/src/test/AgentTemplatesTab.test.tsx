@@ -117,6 +117,13 @@ const openMore = () => {
   return screen.findAllByRole('menuitem')
 }
 
+/** The themed ConfirmDialog answers a dirty-guard ask: press its confirm button
+ *  (`yes`) or Cancel (`!yes`), by the action's label. */
+const answerConfirm = async (confirmLabel: string, yes: boolean) => {
+  const dialog = await screen.findByRole('dialog')
+  fireEvent.click(within(dialog).getByRole('button', { name: yes ? confirmLabel : 'Cancel' }))
+}
+
 beforeEach(() => {
   Object.values(mockApi).forEach(m => m.mockReset())
   mockDispatch.mockReset(); mockNavigate.mockReset(); mockCreateSlot.mockClear()
@@ -358,11 +365,9 @@ describe('AgentTemplatesTab editing', () => {
     const prompt = await screen.findByRole('textbox', { name: 'Prompt' })
     await waitFor(() => expect(prompt).toHaveValue('prompt of reviewer'))
     fireEvent.change(prompt, { target: { value: 'changed' } })
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     fireEvent.click(option('atlas'))
-    expect(confirmSpy).toHaveBeenCalled()
+    await answerConfirm('Discard', false)
     expect(mockApi.agentDetail).not.toHaveBeenCalledWith('atlas')
-    confirmSpy.mockRestore()
   })
 
   it('reports a refused save inside the save bar, beside the Save button', async () => {
@@ -381,14 +386,15 @@ describe('AgentTemplatesTab editing', () => {
     expect(alert.closest('div')).toBe(saveBtn.closest('div'))
     // Discard asks first (one click must not erase a long edit for good), then
     // clears the error along with the draft. Declined, both stay.
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
-    fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
-    expect(confirm).toHaveBeenLastCalledWith('Discard unsaved changes?')
+    const saveBarDiscard = () => within(saveBtn.parentElement!).getByRole('button', { name: 'Discard' })
+    fireEvent.click(saveBarDiscard())
+    expect(await screen.findByRole('dialog')).toHaveTextContent('Discard unsaved changes?')
+    await answerConfirm('Discard', false)
     expect(screen.getByRole('alert')).toBeInTheDocument()
     expect(prompt).toHaveValue('x')
-    confirm.mockReturnValue(true)
-    fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
-    expect(screen.queryByRole('alert')).toBeNull()
+    fireEvent.click(saveBarDiscard())
+    await answerConfirm('Discard', true)
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
     expect(prompt).toHaveValue('prompt of reviewer')
   })
 
@@ -468,12 +474,11 @@ describe('AgentTemplatesTab actions', () => {
     fireEvent.change(prompt, { target: { value: 'dirty' } })
     const chat = screen.getByRole('button', { name: /Chat with this custom agent/ })
     expect(chat).toBeEnabled()
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     fireEvent.click(chat)
-    expect(confirmSpy).toHaveBeenCalled()
+    await answerConfirm('Discard', false)
     expect(mockCreateSlot).not.toHaveBeenCalled()
-    confirmSpy.mockReturnValue(true)
     fireEvent.click(chat)
+    await answerConfirm('Discard', true)
     await waitFor(() => expect(mockCreateSlot).toHaveBeenCalledWith({ agent: 'reviewer', agent_kind: 'template' }))
   })
 
@@ -485,15 +490,12 @@ describe('AgentTemplatesTab actions', () => {
       code: 'template_referenced',
       references: [{ kind: 'crew', id: 'pr-bot', label: 'pr-bot' }, { kind: 'schedule', id: 'job-1', label: 'nightly triage' }],
     }))
-    // The spy is shared across this file's tests; count from here.
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
-    confirm.mockClear()
     renderTab()
     await waitFor(() => expect(mockApi.agentDetail).toHaveBeenCalledWith('reviewer'))
     const items = await openMore()
     fireEvent.click(items.find(i => i.textContent === 'Delete')!)
+    await answerConfirm('Delete', true)
     const dialog = await screen.findByRole('dialog', { name: /Can’t delete reviewer yet/ })
-    expect(confirm).toHaveBeenCalledTimes(1)
     expect(within(dialog).getByText('nightly triage')).toBeInTheDocument()
     expect(within(dialog).getByText('pr-bot')).toBeInTheDocument()
     // The roster is untouched: the row is still listed.
@@ -581,11 +583,11 @@ describe('AgentTemplatesTab actions', () => {
     await waitFor(() => expect(prompt).toHaveValue('prompt of reviewer'))
     fireEvent.change(prompt, { target: { value: 'edited reviewer prompt' } })
     // New template is a row switch: the dirty guard asks first.
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     fireEvent.click(screen.getByRole('button', { name: /New custom agent/ }))
-    expect(screen.queryByRole('dialog')).toBeNull()
-    expect(confirmSpy).toHaveBeenCalled()
-    confirmSpy.mockReturnValue(true)
+    await answerConfirm('Discard', false)
+    expect(screen.queryByRole('dialog', { name: 'New custom agent' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /New custom agent/ }))
+    await answerConfirm('Discard', true)
     const CREATED = row({ name: 'fresh', filename: 'fresh.json' })
     mockApi.agentTemplateCreate.mockImplementation(async () => {
       mockApi.agentTemplates.mockResolvedValue({ templates: [MINE, CREATED, PKG, RUNTIME, COPY] })
@@ -715,13 +717,13 @@ describe('AgentTemplatesTab actions', () => {
     mockApi.agentTemplates.mockResolvedValue({ templates: [FREE, PKG, RUNTIME, COPY] })
     renderTab()
     await waitFor(() => expect(mockApi.agentDetail).toHaveBeenCalledWith('reviewer'))
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     mockApi.agentTemplateDelete.mockImplementation(async () => {
       mockApi.agentTemplates.mockResolvedValue({ templates: [PKG, RUNTIME, COPY] })
       return { ok: true }
     })
     const items = await openMore()
     fireEvent.click(items.find(i => i.textContent === 'Delete')!)
+    await answerConfirm('Delete', true)
     await waitFor(() => expect(mockApi.agentTemplateDelete).toHaveBeenCalledWith('reviewer'))
     // The list picks another row and the line rides over its detail, so it
     // names what went rather than reading as a verdict on the row on screen.
@@ -741,13 +743,13 @@ describe('AgentTemplatesTab actions', () => {
       await waitFor(() => expect(prompt).toHaveValue('prompt of reviewer'))
       fireEvent.change(prompt, { target: { value: 'dirty' } })
       expect(screen.queryByRole('listbox')).toBeNull()
-      vi.spyOn(window, 'confirm').mockReturnValue(true)
       mockApi.agentTemplateDelete.mockImplementation(async () => {
         mockApi.agentTemplates.mockResolvedValue({ templates: [PKG, RUNTIME, COPY] })
         return { ok: true }
       })
       const items = await openMore()
       fireEvent.click(items.find(i => i.textContent === 'Delete')!)
+      await answerConfirm('Delete', true)
       await waitFor(() => expect(mockApi.agentTemplateDelete).toHaveBeenCalledWith('reviewer'))
       // Back on the list, with the deleted template's draft gone -- not a
       // detail pane over a hidden list with nothing selected.
@@ -770,8 +772,8 @@ describe('AgentTemplatesTab actions', () => {
     fireEvent.change(prompt, { target: { value: 'dirty' } })
     await waitFor(() => expect(added.mock.calls.filter(c => c[0] === 'beforeunload').length).toBe(1))
     // Discard (confirmed) cleans the draft; the reload warning goes with it.
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
+    await answerConfirm('Discard', true)
     await waitFor(() => expect(removed.mock.calls.filter(c => c[0] === 'beforeunload').length).toBe(1))
     added.mockRestore(); removed.mockRestore()
   })

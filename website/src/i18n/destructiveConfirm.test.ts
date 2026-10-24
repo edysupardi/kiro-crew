@@ -208,6 +208,7 @@ export const QUOTED_OPERAND_CONFIRM_KEYS = [
   'pages.artifactDeployPage.recall_confirm',
   'pages.artifactDeployPage.remove_profile_confirm',
   'pages.artifactsPage.remove_artifact_confirm',
+  'components.tagManagerList.confirm_delete_tag', // quoted in all catalogs with the wave's themed-confirm migration
   'pages.chatSidebar.delete_folder_confirm',
   'hooks.useSessionActions.close_confirm.reason_setting', // {{setting}} = the settings toggle's label, quoted per locale
   'pages.chatSidebar.unlink_source_link_confirm', // {{label}} = PR/Issue chip label, glyph-quoted per locale (UX #8072)

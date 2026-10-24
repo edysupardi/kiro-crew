@@ -170,6 +170,18 @@ function makeDirty(text: string) {
   fireEvent.change(screen.getByLabelText('editor'), { target: { value: text } })
 }
 
+// The delete guard is the themed ConfirmDialog, not window.confirm. Re-query the
+// dialog and require a CONNECTED button inside waitFor: a node held across renders
+// goes stale while the tree keeps re-rendering, so a click on it reaches nothing.
+async function answerConfirm(confirmLabel: string, yes: boolean) {
+  await waitFor(() => {
+    const dialog = screen.getByRole('dialog')
+    const btn = within(dialog).getByRole('button', { name: yes ? confirmLabel : 'Cancel' })
+    expect(btn.isConnected).toBe(true)
+    fireEvent.click(btn)
+  }, { timeout: 3000 })
+}
+
 const compileBtn = () => screen.getByRole('button', { name: /^Compile$/ })
 
 beforeEach(() => {
@@ -421,7 +433,6 @@ describe('Papyrus file tree mutations', () => {
     // The main document has no delete control, so the open-file case is reached by
     // deleting a chapter the user is currently editing.
     api.deleteFile.mockResolvedValue({ ok: true, path: CHAPTER })
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     const { user } = openWorkspace()
     await workspaceReady()
     await user.click(screen.getByRole('button', { name: CHAPTER }))
@@ -431,6 +442,7 @@ describe('Papyrus file tree mutations', () => {
       ))
 
     await user.click(screen.getByRole('button', { name: `Delete ${CHAPTER}` }))
+    await answerConfirm(`Delete ${CHAPTER}`, true)
 
     await waitFor(() => expect(api.deleteFile).toHaveBeenCalledWith(PROJECT, CHAPTER))
     await waitFor(() =>
@@ -440,22 +452,22 @@ describe('Papyrus file tree mutations', () => {
   })
 
   it('does not delete when the confirmation is declined', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false)
     const { user } = openWorkspace()
     await workspaceReady()
 
     await user.click(screen.getByRole('button', { name: `Delete ${CHAPTER}` }))
+    await answerConfirm(`Delete ${CHAPTER}`, false)
 
     expect(api.deleteFile).not.toHaveBeenCalled()
   })
 
   it('reports a failed delete', async () => {
     api.deleteFile.mockRejectedValue(new Error('file is locked'))
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     const { user } = openWorkspace()
     await workspaceReady()
 
     await user.click(screen.getByRole('button', { name: `Delete ${CHAPTER}` }))
+    await answerConfirm(`Delete ${CHAPTER}`, true)
 
     expect(await screen.findByText('file is locked')).toBeInTheDocument()
   })

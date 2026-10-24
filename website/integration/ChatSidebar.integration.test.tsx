@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { screen, waitFor, fireEvent, act, cleanup } from '@testing-library/react'
+import { screen, waitFor, fireEvent, act, cleanup, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 vi.mock('@radix-ui/react-dropdown-menu', () => import('./__mocks__/@radix-ui/react-dropdown-menu'))
@@ -295,6 +295,9 @@ describe('ChatSidebar Folder Grouping', () => {
     fireEvent.click(screen.getByTestId('folder-menu-f1'))
     const deleteBtn = await screen.findByTestId('folder-delete-f1')
     fireEvent.click(deleteBtn)
+    // The themed ConfirmDialog answers the delete: press its confirm button.
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete folder' }))
 
     await waitFor(() => expect(screen.queryByText('Delete Me')).not.toBeInTheDocument())
     // Slot previously in the deleted folder is still visible, now ungrouped

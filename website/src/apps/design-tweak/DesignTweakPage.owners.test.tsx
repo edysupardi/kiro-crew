@@ -113,7 +113,9 @@ describe('DesignTweakPage owners', () => {
     // `useDesignTweakPageState` holds the page's state and effect hooks in the
     // order the page registers them; the component calls it once, so a state or
     // effect hook added to the component would interleave a second sequence.
-    expect(hookCalls(bodyOf(join(DIR, 'DesignTweakPage.tsx'), 'DesignTweak'))).toEqual(['useDesignTweakPageState'])
+    // `useConfirm` is the page's own dialog hook for `deleteReq`; it holds no page
+    // state, so it sits beside the one owner call rather than inside the owner.
+    expect(hookCalls(bodyOf(join(DIR, 'DesignTweakPage.tsx'), 'DesignTweak'))).toEqual(['useDesignTweakPageState', 'useConfirm'])
     expect(hookCalls(bodyOf(join(DIR, 'useDesignTweakPageState.ts'), 'useDesignTweakPageState')).length).toBeGreaterThan(0)
     // One instance per page: a second caller in the page file would mount a
     // second copy of every state, effect and poll.

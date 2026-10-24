@@ -14,6 +14,7 @@ import { useImeGuard } from '../../hooks/useImeGuard'
 import { fetchDashboardConfig } from '../../api/dashboardConfigQuery'
 import { servedUploadMb } from '../../utils/fileTokens'
 import ErrorNotice from '../../components/ErrorNotice'
+import { useConfirm } from '../../components/ConfirmDialog'
 
 /**
  * Indexing progress and the Kiro requests a source still owes.
@@ -399,6 +400,7 @@ export default function SourcesList({ onIngest, uploadNamespace, setUploadNamesp
     renameMutation.mutate({ id: editingId, name })
   }
 
+  const { confirm, confirmDialog } = useConfirm()
   const deleteMutation = useMutation({
     mutationFn: (id: string) => knowledgeApi(`/sources/${id}`, { method: 'DELETE' }),
     onMutate: async (id) => {
@@ -512,6 +514,7 @@ export default function SourcesList({ onIngest, uploadNamespace, setUploadNamesp
         </div>
       )}
 
+      {confirmDialog}
       {pendingConfirm && (
         <FolderConfirmDialog
           fileCount={pendingConfirm.fileCount}
@@ -657,7 +660,7 @@ export default function SourcesList({ onIngest, uploadNamespace, setUploadNamesp
                     : <><RefreshCw size={12} /> {i18nT('pages.knowledge.sourcesList.sync')}</>}
                 </button>
               )}
-              <button aria-label={i18nT('pages.knowledge.sourcesList.remove_source')} onClick={() => { if (confirm(i18nT('pages.knowledge.sourcesList.remove_this_source_and_all_its_ingested_items'))) deleteMutation.mutate(s.id) }}
+              <button aria-label={i18nT('pages.knowledge.sourcesList.remove_source')} onClick={async () => { if (await confirm({ title: i18nT('pages.knowledge.sourcesList.remove_this_source_and_all_its_ingested_items'), confirmLabel: i18nT('pages.knowledge.sourcesList.remove_source') })) deleteMutation.mutate(s.id) }}
                 disabled={isDeleting}
                 className="px-2 py-1 text-[11px] border border-border rounded hover:bg-bg-elevated text-danger/70 hover:text-danger disabled:opacity-50 flex items-center gap-0.5">
                 {isDeleting ? <RefreshCw size={12} className="animate-spin" /> : <X size={12} />}

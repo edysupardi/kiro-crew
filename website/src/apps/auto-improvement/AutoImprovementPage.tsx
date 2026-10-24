@@ -26,6 +26,7 @@ import {
 
 import Clickable from '../../components/Clickable'
 import { Badge, Card, CardTitle, StatCard } from '../../components/ui'
+import { useConfirm } from '../../components/ConfirmDialog'
 import { i18nT } from '../../i18n/t'
 
 import FindingDetail from './FindingDetail'
@@ -248,6 +249,7 @@ function PrRow({ finding, repo }: { finding: Finding; repo: string }) {
 
 export default function AutoImprovementPage() {
   const { openSession } = useAgentSession()
+  const { confirm, confirmDialog } = useConfirm()
   // Fingerprint of the finding whose evidence panel is open, or null. One at a
   // time: each panel fetches its own detail, and the interesting comparison is
   // between a finding and the code, not between two findings.
@@ -472,11 +474,13 @@ export default function AutoImprovementPage() {
                         // `englishIdentity` forbids a hardcoded confirm string, since those
                         // are call arguments the i18n codemod never saw. Raised by the UX
                         // review.
-                        onClick={() => {
+                        onClick={async () => {
                           if (
-                            !window.confirm(
-                              i18nT('autoImprovement.commitConfirm', { branch }),
-                            )
+                            !(await confirm({
+                              title: i18nT('autoImprovement.commitFinding'),
+                              body: i18nT('autoImprovement.commitConfirm', { branch }),
+                              confirmLabel: i18nT('autoImprovement.commitFinding'),
+                            }))
                           ) {
                             return
                           }
@@ -562,6 +566,7 @@ export default function AutoImprovementPage() {
           </p>
         ) : null}
       </Card>
+      {confirmDialog}
     </div>
   )
 }

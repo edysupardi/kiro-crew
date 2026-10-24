@@ -47,7 +47,7 @@ export { isEditableKind }
 export default function ArtifactDetailPage({ popout = false }: { popout?: boolean } = {}) {
   const stateRead = useArtifactDetailPageState()
   const {
-    slug, navigate, confirmDialog, queryClient, dispatch, selectedVersion, setSelectedVersion, editing,
+    slug, navigate, confirmDialog, confirm, queryClient, dispatch, selectedVersion, setSelectedVersion, editing,
     setSaving, setSaveError,
   } = stateRead
   // ── Inline-comment state (durable via /api/artifacts/:slug/comments) ──
@@ -134,9 +134,11 @@ export default function ArtifactDetailPage({ popout = false }: { popout?: boolea
     if (!artifact || !selectedVersion || isCurrent) return
     const targetVersion = selectedVersion
     const newVersion = (detailQuery.data?.version ?? 1) + 1
-    const ok = window.confirm(
-      i18nT('pages.artifactDetailPage.revert_confirm', { version: targetVersion, newVersion }),
-    )
+    const ok = await confirm({
+      title: i18nT('pages.artifactDetailPage.revert_to_v', { version: targetVersion }),
+      body: i18nT('pages.artifactDetailPage.revert_confirm', { version: targetVersion, newVersion }),
+      confirmLabel: i18nT('pages.artifactDetailPage.revert_to_v', { version: targetVersion }),
+    })
     if (!ok) return
     setSaving(true)
     setSaveError(null)
@@ -162,7 +164,7 @@ export default function ArtifactDetailPage({ popout = false }: { popout?: boolea
     } finally {
       setSaving(false)
     }
-  }, [artifact, selectedVersion, isCurrent, detailQuery.data?.version, queryClient, slug, setSaveError, setSaving, setSelectedVersion])
+  }, [artifact, selectedVersion, isCurrent, detailQuery.data?.version, queryClient, slug, setSaveError, setSaving, setSelectedVersion, confirm])
   const commentsRead = useArtifactDetailPageComments({ durableComments, stateRead, documentRead })
   const { postAnchoredMut } = commentsRead
   // Anchored add (from the selection toolbar's composer).

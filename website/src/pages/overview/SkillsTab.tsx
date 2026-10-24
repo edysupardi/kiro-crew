@@ -8,6 +8,7 @@ import AskAgentButton from '../../components/AskAgentButton'
 import { Badge, Card, Btn, SearchInput, EmptyState, Toggle } from '../../components/ui'
 import InfoTip from '../../components/InfoTip'
 import Modal from '../../components/Modal'
+import { useConfirm } from '../../components/ConfirmDialog'
 import SkillForm, { assembleSkillContent, parseSkillContent, skillPathProblem, skillPostPath, type SkillFormData } from '../../components/SkillForm'
 import SkillDirectoryBrowser from '../../components/SkillDirectoryBrowser'
 import SkillBrowserModal from '../../components/SkillBrowserModal'
@@ -134,6 +135,7 @@ export default function SkillsTab() {
   const [conflictReading, setConflictReading] = useState(false)
   // Bumped when a conflict's Discard reseeds the editor, to remount SkillForm.
   const [formGen, setFormGen] = useState(0)
+  const { confirm, confirmDialog } = useConfirm()
 
   // Deep-linkable view param: ?view=budget swaps to the control plane.
   // Entering the budget view PUSHES a history entry so browser Back returns to
@@ -469,6 +471,7 @@ export default function SkillsTab() {
   return (<>
     <PendingSkillsPanel />
     <ProjectSkillsTrustList />
+    {confirmDialog}
     {/* Create Skill Modal */}
     {/* The gate reads the SANITIZED name and category, not the raw ones and not
         the combined path: a segment that sanitizes to nothing (typically one
@@ -690,7 +693,7 @@ export default function SkillsTab() {
                           would clear the second's failure notice, and the
                           optimistic snapshots would restore each other's
                           rows. One delete at a time, like the create modal. */}
-                      <Btn danger disabled={deleteSkill.isPending} onClick={() => { if (deleteSkill.isPending) return; if (confirm(i18nT('pages.overview.skillsTab.delete_confirm', { name: selectedSkill.key }))) deleteSkill.mutate(selectedSkill.key) }}>{i18nT('pages.overview.skillsTab.delete')}</Btn>
+                      <Btn danger disabled={deleteSkill.isPending} onClick={async () => { if (deleteSkill.isPending) return; if (await confirm({ title: i18nT('pages.overview.skillsTab.delete_confirm', { name: selectedSkill.key }), confirmLabel: i18nT('pages.overview.skillsTab.delete') })) deleteSkill.mutate(selectedSkill.key) }}>{i18nT('pages.overview.skillsTab.delete')}</Btn>
                     </div>
                   )}
                 </div>
@@ -880,6 +883,7 @@ function PendingCandidateRow({ p, autoOpen, approveRefusal, mixedQueue, onApprov
   onDismiss: (slug: string) => void
 }) {
   const [open, setOpen] = useState(false)
+  const { confirm, confirmDialog } = useConfirm()
   const rowRef = useRef<HTMLDivElement>(null)
   // Deliberately an effect and not a `useState(autoOpen)` initializer: the panel
   // latches the deep-linked slug in an effect of its own, so `autoOpen` can flip
@@ -910,6 +914,7 @@ function PendingCandidateRow({ p, autoOpen, approveRefusal, mixedQueue, onApprov
   })
   return (
     <div ref={rowRef} className={`p-2 rounded-md border ${autoOpen ? 'border-accent ring-1 ring-accent' : 'border-border'}`}>
+      {confirmDialog}
       <div className="flex items-center gap-3">
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium text-text-strong truncate">
@@ -974,7 +979,7 @@ function PendingCandidateRow({ p, autoOpen, approveRefusal, mixedQueue, onApprov
             >{i18nT('pages.overview.skillsTab.approve')}</Btn>
           )
         })()}
-        <Btn danger onClick={() => { if (confirm(i18nT('pages.overview.skillsTab.dismiss_confirm', { name: p.name }))) onDismiss(p.slug) }}>{i18nT('pages.overview.skillsTab.dismiss')}</Btn>
+        <Btn danger onClick={async () => { if (await confirm({ title: i18nT('pages.overview.skillsTab.dismiss_confirm', { name: p.name }), confirmLabel: i18nT('pages.overview.skillsTab.dismiss') })) onDismiss(p.slug) }}>{i18nT('pages.overview.skillsTab.dismiss')}</Btn>
       </div>
       {p.script_validation?.ok === false && approveRefusal?.code !== 'script_validation_failed' && (
         /* Visible everywhere the flagged badge is, collapsed AND expanded:
@@ -1489,6 +1494,7 @@ function PendingSkillsPanel() {
       qc.invalidateQueries({ queryKey: ['skills-pending'] })
     },
   })
+  const { confirm, confirmDialog } = useConfirm()
   const dismissAll = useMutation({
     mutationFn: () => api.dismissAllPendingSkills(pending.map(p => p.slug)),
     onMutate: () => {
@@ -1547,6 +1553,7 @@ function PendingSkillsPanel() {
   // of `:first-child` with the pending count.
   return (
     <div className="mb-2">
+      {confirmDialog}
       {/* Suppressed when the ONLY thing to show is the resolved-candidate
           notice: a "Pending review (0)" heading over a sentence explaining
           there is nothing to review reads like a broken count. */}
@@ -1554,7 +1561,7 @@ function PendingSkillsPanel() {
         <h4 className="text-sm font-semibold text-text-strong mb-2 flex items-center gap-2">
           {i18nT('pages.overview.skillsTab.pending_review_count', { count: pending.length })}
           <InfoTip text={i18nT('pages.overview.skillsTab.auto_generated_skill_candidates_awaiting_your_ap')} />
-          <Btn danger className="ml-auto text-[11px]" onClick={() => { if (confirm(i18nT('pages.overview.skillsTab.dismiss_all_confirm', { count: pending.length }))) dismissAll.mutate() }}>{i18nT('pages.overview.skillsTab.dismiss_all')}</Btn>
+          <Btn danger className="ml-auto text-[11px]" onClick={async () => { if (await confirm({ title: i18nT('pages.overview.skillsTab.dismiss_all_confirm', { count: pending.length }), confirmLabel: i18nT('pages.overview.skillsTab.dismiss_all') })) dismissAll.mutate() }}>{i18nT('pages.overview.skillsTab.dismiss_all')}</Btn>
         </h4>
       )}
       {pending.length > 0 && (

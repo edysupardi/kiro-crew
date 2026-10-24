@@ -316,6 +316,7 @@ export default function PortabilityTab() {
   const [chatLines, setChatLines] = useState<string[]>(carried?.chats ?? [])
   const fileRef = useRef<HTMLInputElement>(null)
   const { confirm: confirmShare, confirmDialog } = useConfirm()
+  const { confirm: confirmReplace, confirmDialog: replaceConfirmDialog } = useConfirm()
   // A memory bundle carries nothing else, so it only ever imports with Merge.
   const previewMemoryOnly = isMemoryOnlyManifest(preview)
   const memoryImport = importMemoryOnly || previewMemoryOnly
@@ -411,7 +412,10 @@ export default function PortabilityTab() {
   const handleImport = async () => {
     const file = fileRef.current?.files?.[0]
     if (!file) return
-    if (effectiveMode === 'replace' && !confirm(i18nT('pages.overview.portabilityTab.replace_mode_will_overwrite_existing_data_contin'))) return
+    if (effectiveMode === 'replace' && !(await confirmReplace({
+      title: i18nT('pages.overview.portabilityTab.replace_mode_will_overwrite_existing_data_contin'),
+      confirmLabel: i18nT('pages.overview.portabilityTab.replace'),
+    }))) return
 
     setImportStatus({ type: 'loading', msg: i18nT('pages.overview.portabilityTab.importing') })
     setImportWarnings([])
@@ -778,6 +782,7 @@ export default function PortabilityTab() {
         )}
       </Card>
       {confirmDialog}
+      {replaceConfirmDialog}
     </div>
   )
 }

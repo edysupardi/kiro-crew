@@ -19,6 +19,7 @@ import { papyrusApi, PapyrusApiError, type Project } from './api'
 import { projectErrorText, pruneSlots, renameErrorText, PROJECTS_QUERY_KEY, projectQueryKey } from './lib'
 
 import { i18nT } from '../../i18n/t'
+import { useConfirm } from '../../components/ConfirmDialog'
 import { useImeGuard } from '../../hooks/useImeGuard'
 import { guideCaution } from '../../guide/trustRoot'
 
@@ -43,6 +44,7 @@ function formatModified(epochSeconds: number): string {
 export default function ProjectList({ onOpenProject }: ProjectListProps) {
   // One instance covers both inputs; the binding's focus/blur reset makes sharing safe.
   const ime = useImeGuard()
+  const { confirm, confirmDialog } = useConfirm()
   const queryClient = useQueryClient()
   const [newName, setNewName] = useState('')
   const [cloneUrl, setCloneUrl] = useState('')
@@ -525,16 +527,19 @@ export default function ProjectList({ onOpenProject }: ProjectListProps) {
                         aria-label={i18nT('apps.papyrus.page.delete_paper', { name: project.name })}
                         {...guideCaution}
                         title={i18nT('apps.papyrus.page.delete_paper', { name: project.name })}
-                        onClick={() => {
+                        onClick={async () => {
                           // Deleting a paper is `rmtree` on the server with no
                           // undo, including uncommitted work — so it confirms,
                           // exactly as deleting a single file already does.
                           if (
-                            window.confirm(
-                              i18nT('apps.papyrus.page.delete_paper_confirm', {
+                            await confirm({
+                              title: i18nT('apps.papyrus.page.delete_paper_confirm', {
                                 name: project.name,
                               }),
-                            )
+                              confirmLabel: i18nT('apps.papyrus.page.delete_paper', {
+                                name: project.name,
+                              }),
+                            })
                           ) {
                             deleteMutation.mutate(project.name)
                           }
@@ -552,6 +557,7 @@ export default function ProjectList({ onOpenProject }: ProjectListProps) {
           )}
         </Card>
       </div>
+      {confirmDialog}
     </>
   )
 }

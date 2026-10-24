@@ -22,6 +22,7 @@ import {
 import Clickable from '../../components/Clickable'
 import ErrorNotice from '../../components/ErrorNotice'
 import { FolderBody } from '../../components/FolderBody'
+import { useConfirm } from '../../components/ConfirmDialog'
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
 } from '../../components/ui/dropdown-menu'
@@ -371,9 +372,7 @@ function RequestGroup({
 
 
 export default function DesignTweak() {
-  // The page's state, effects and actions (`useDesignTweakPageState.ts`), except
-  // `deleteReq` below: its native `confirm()` keeps it in this module, which
-  // `eslint.config.js` allows a native dialog in.
+  // The page's state, effects and actions (`useDesignTweakPageState.ts`).
   const {
     ime, selectedId, ddOpen, setDdOpen, ddIn, ddTriggerRef, ddPanelRef, adding, setAdding, newPath,
     setNewPath, detecting, devOpen, setDevOpen, devDraft, setDevDraft, starting, devError, histOpen,
@@ -388,13 +387,18 @@ export default function DesignTweak() {
 
   // Delete → permanently remove the request, its comments, and their pins.
   // It sits one icon away from Archive but is irreversible, so it takes the same
-  // `confirm()` guard the Sessions sidebar uses for its destructive deletes.
+  // `useConfirm()` guard the Sessions sidebar uses for its destructive deletes.
   // Archive stays un-confirmed on purpose: the request is still in History.
+  const { confirm, confirmDialog } = useConfirm()
   const deleteReq = useCallback(async (req: Request) => {
-    if (!confirm(i18nT('apps.designTweak.requests.delete_confirm', { number: req.number }))) return
+    if (!(await confirm({
+      title: i18nT('apps.designTweak.requests.delete_request'),
+      body: i18nT('apps.designTweak.requests.delete_confirm', { number: req.number }),
+      confirmLabel: i18nT('apps.designTweak.requests.delete_request'),
+    }))) return
     try { await deleteRequest(req.id); refresh() }
     catch (err) { setStatus(i18nT('apps.designTweak.status.delete_failed', { error: errMsg(err) })) }
-  }, [refresh, setStatus])
+  }, [confirm, refresh, setStatus])
 
   const HistChevron = histOpen ? ChevronDown : ChevronRight
 
@@ -1003,6 +1007,7 @@ export default function DesignTweak() {
           </div>
         </div>
       </div>
+      {confirmDialog}
     </div>
   )
 }

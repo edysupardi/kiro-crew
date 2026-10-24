@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { MockedFunction } from 'vitest'
-import { screen, waitFor, fireEvent } from '@testing-library/react'
+import { screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { Routes, Route, useNavigate } from 'react-router-dom'
 import { chooseMore, commentsShown, findMoreItem, hasMoreItem } from './artifactMoreMenu'
 import ArtifactDetailPage from '../pages/ArtifactDetailPage'
@@ -63,6 +63,18 @@ const versionTrigger = () => screen.getByRole('combobox', { name: /Version/i })
 async function pickVersion(label: string) {
   fireEvent.click(versionTrigger())
   fireEvent.click(await screen.findByRole('option', { name: label }))
+}
+
+// The themed ConfirmDialog (useConfirm) replaces the native window.confirm.
+// Re-query the dialog and require a CONNECTED button inside waitFor: the
+// dialog subtree can re-render between ticks, so a node held outside it goes stale.
+async function answerConfirm(confirmLabel: string, yes: boolean) {
+  await waitFor(() => {
+    const dialog = screen.getByRole('dialog')
+    const btn = within(dialog).getByRole('button', { name: yes ? confirmLabel : 'Cancel' })
+    expect(btn.isConnected).toBe(true)
+    fireEvent.click(btn)
+  }, { timeout: 3000 })
 }
 
 /** The version rows' labels. They exist in the DOM only while the popup is open. */
@@ -860,12 +872,12 @@ describe('ArtifactDetailPage', () => {
     )
     const updateSpy = vi.fn().mockResolvedValue(mkArtifact({ kind: 'markdown' }))
     vi.mocked(api).updateArtifact = updateSpy
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     renderRoute()
     await waitFor(() => expect(screen.getByText('CR Queue')).toBeInTheDocument())
     await pickVersion('v2')
     await waitFor(() => expect(screen.getByRole('button', { description: /Revert to v2/ })).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { description: /Revert to v2/ }))
+    await answerConfirm('Revert to v2', true)
     await waitFor(() =>
       expect(updateSpy).toHaveBeenCalledWith('cr-queue', expect.objectContaining({
         content: 'v2 content',
@@ -873,7 +885,6 @@ describe('ArtifactDetailPage', () => {
         from_version: 2,
       })),
     )
-    confirmSpy.mockRestore()
   })
 
   it('Cancel button confirms before discarding while dirty', async () => {

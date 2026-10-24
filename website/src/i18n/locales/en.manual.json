@@ -3280,6 +3280,7 @@
       "change_color": "Change color of {{name}}",
       "delete_tag": "Delete tag \"{{name}}\"",
       "delete_tag_2": "Delete tag {{name}}",
+      "confirm_delete_tag": "Delete tag “{{name}}”?",
       "filter_by_tag": "Filter by tag",
       "include_in_filter": "Include {{name}} in filter",
       "make_a_status_tag": "Make {{name}} a status tag",
@@ -4796,6 +4797,7 @@
       "published_distribution_disabled": "Published — delivery network disabled",
       "published_notice_generic": "Published — link may not work yet",
       "published_sync_issue": "Published (sync issue)",
+      "remove_artifact": "Remove artifact",
       "remove_artifact_confirm": "Remove artifact “{{slug}}” from your library?\n\nThis deletes the artifact entry and its version history. If this artifact came from a file on disk or a chat widget, the original is NOT touched — you can re-add it later.",
       "remove_star_from_artifact": "Remove star from artifact",
       "scope_chat": "From chat {{name}}",
@@ -6400,6 +6402,7 @@
       "index": {
         "embedding_model_loading": "Embedding model loading ({{name}})",
         "items_count": "({{count}} items)",
+        "delete_items_permanently": "Delete {{count}} items permanently?",
         "copied": "Copied!",
         "copy_content": "Copy Content",
         "embeddings_loading": "embeddings loading",

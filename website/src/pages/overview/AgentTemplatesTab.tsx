@@ -15,6 +15,7 @@ import SimpleSelect from '../../components/SimpleSelect'
 import AgentSkillsEditor from '../../components/AgentSkillsEditor'
 import { useSidePanelLeaveGuard } from '../../components/SidePanelLayout'
 import { useGuardedLeave } from '../../components/NavigationLeaveGuard'
+import { useConfirm } from '../../components/ConfirmDialog'
 import { useListDetailView } from '../../hooks/useListDetailView'
 import { useAvailableModels } from '../../hooks/useAvailableModels'
 import { parseErrorCode, parseErrorField } from '../../utils/errorReport'
@@ -365,6 +366,10 @@ export default function AgentTemplatesTab() {
   // name that decides whether it has already happened.
   const enrolled = !!selected && selected.used_by.some(u => u.kind === 'crew' && u.id === selected.name)
   const dirtyMessage = i18nT('pages.overview.agentTemplatesTab.discard_unsaved_changes')
+  // Renamed so the native `confirm` still used by the sync side-panel guard
+  // below cannot be confused with the async one.
+  const { confirm: confirmAction, confirmDialog } = useConfirm()
+  const discardOptions = { title: dirtyMessage, confirmLabel: i18nT('pages.overview.agentTemplatesTab.discard') }
   // The rail click belongs to the shell; it consults this guard before
   // unmounting the pane and taking an unsaved draft with it.
   useSidePanelLeaveGuard(useCallback(() => !dirty || confirm(dirtyMessage), [dirty, dirtyMessage]), dirty)
@@ -569,7 +574,7 @@ export default function AgentTemplatesTab() {
   const chatWith = async (row: TemplateRow) => {
     // Leaving for the chat unmounts the editor: the same dirty confirm a row
     // switch uses, instead of a disabled button whose reason hides in a title.
-    if (dirty && !confirm(dirtyMessage)) return
+    if (dirty && !(await confirmAction(discardOptions))) return
     try {
       // The template namespace, so a same-name crewmate is not what answers.
       await dispatch(createSlot({ agent: row.name, agent_kind: 'template' })).unwrap()
@@ -579,9 +584,9 @@ export default function AgentTemplatesTab() {
     }
   }
 
-  const select = (row: TemplateRow) => {
+  const select = async (row: TemplateRow) => {
     if (row.name === selectedName) { openDetail(); return }
-    if (dirty && !confirm(dirtyMessage)) return
+    if (dirty && !(await confirmAction(discardOptions))) return
     setNotice(null); setSaveError(null); setSaveOk(null)
     setDraft(null); setBaseline(null)
     setSelectedName(row.name)
@@ -697,8 +702,8 @@ export default function AgentTemplatesTab() {
 
   // Creating lands on the new template, which is a row switch: the dirty
   // guard applies here exactly as it does to a click in the list.
-  const openCreate = (from = '') => {
-    if (dirty && !confirm(dirtyMessage)) return
+  const openCreate = async (from = '') => {
+    if (dirty && !(await confirmAction(discardOptions))) return
     setNotice(null); setCreateForm({ name: '', description: '', from }); setCreateViaDuplicate(!!from); setCreating(true)
   }
   const nameProblem = (n: string) => n.trim() && !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/.test(n.trim())
@@ -895,13 +900,13 @@ export default function AgentTemplatesTab() {
                             <span>{editable ? i18nT('pages.overview.agentTemplatesTab.duplicate') : i18nT('pages.overview.agentTemplatesTab.duplicate_to_edit')}</span>
                           </DropdownMenuItem>
                           {editable && (
-                            <DropdownMenuItem disabled={remove.isPending} className="text-danger focus:text-danger" onSelect={() => {
+                            <DropdownMenuItem disabled={remove.isPending} className="text-danger focus:text-danger" onSelect={async () => {
                               // The confirm says "nothing points at it any more"; when the row
                               // already shows holders that claim is false and the server would
                               // refuse anyway, so open the reference list straight away (the
                               // server's own refusal still wins if a holder landed since).
                               if (selected.used_by.length) { setBlocked({ name: selected.name, references: selected.used_by }); return }
-                              if (confirm(i18nT('pages.overview.agentTemplatesTab.delete_confirm', { name: selected.name }))) remove.mutate(selected.name)
+                              if (await confirmAction({ title: i18nT('pages.overview.agentTemplatesTab.delete'), body: i18nT('pages.overview.agentTemplatesTab.delete_confirm', { name: selected.name }), confirmLabel: i18nT('pages.overview.agentTemplatesTab.delete') })) remove.mutate(selected.name)
                             }}>
                               <Trash2 className="lucide-inline shrink-0" aria-hidden />
                               <span>{i18nT('pages.overview.agentTemplatesTab.delete')}</span>
@@ -1099,7 +1104,7 @@ export default function AgentTemplatesTab() {
                       {/* The bar's text can wrap; its buttons must not. */}
                       {/* Same ask as a row switch over this draft: one click must not
                           erase a long prompt edit irreversibly. */}
-                      <Btn className="shrink-0 whitespace-nowrap" disabled={save.isPending} onClick={() => { if (!window.confirm(dirtyMessage)) return; if (baseline) setDraft(baseline); setSaveError(null) }}>{i18nT('pages.overview.agentTemplatesTab.discard')}</Btn>
+                      <Btn className="shrink-0 whitespace-nowrap" disabled={save.isPending} onClick={async () => { if (!(await confirmAction(discardOptions))) return; if (baseline) setDraft(baseline); setSaveError(null) }}>{i18nT('pages.overview.agentTemplatesTab.discard')}</Btn>
                       <Btn primary className="shrink-0 whitespace-nowrap" disabled={save.isPending} onClick={() => { if (draft && baseline) save.mutate({ name: selected.name, d: draft, base: baseline }) }}>{i18nT('pages.overview.agentTemplatesTab.save')}</Btn>
                     </div>
                   )}
@@ -1111,6 +1116,7 @@ export default function AgentTemplatesTab() {
       )}
     </div>
 
+    {confirmDialog}
     {/* Titled by entry point: the three Duplicate affordances and New custom agent
         are one flow, and the title is where that is said. */}
     <Modal open={creating} onClose={() => { if (!create.isPending) { setCreating(false); setNotice(null) } }} title={createForm.from ? i18nT('pages.overview.agentTemplatesTab.duplicate_title', { name: createForm.from }) : i18nT('pages.overview.agentTemplatesTab.new_template')} maxWidth={560} guardAccidentalDismiss footer={<>

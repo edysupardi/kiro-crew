@@ -9,6 +9,7 @@ import ErrorNotice from './ErrorNotice'
 import SegmentedControl from './SegmentedControl'
 import { Btn } from './ui'
 import { FOLDER_COLOR_PALETTE } from './folderColorCatalog'
+import { useConfirm } from './ConfirmDialog'
 
 import { i18nT } from '../i18n/t'
 import { crudErrorMessage, policyErrorMessage } from './tagMutationError'
@@ -250,9 +251,12 @@ export default function TagManagerList({ mode, selectedIds = [], onToggleTag, cr
       failMutation(context, { kind: 'crud', rowId: id, message: crudErrorMessage(error) })
     },
   })
+  const { confirm, confirmDialog } = useConfirm()
+  if (process.env.NODE_ENV !== 'production') console.log('DBG tml render', typeof confirm, !!confirmDialog)
 
   return (
     <>
+      {confirmDialog}
       {storeDegraded && (
         <ErrorNotice
           id={policyUnavailableId}
@@ -388,9 +392,14 @@ export default function TagManagerList({ mode, selectedIds = [], onToggleTag, cr
                 aria-describedby={tagStoreDegraded ? policyUnavailableId : undefined}
                 disabled={deleteDisabled}
                 aria-label={i18nT('components.tagManagerList.delete_tag_2', { name: t.name })}
-                onClick={() => {
+                onClick={async () => {
+                  if (process.env.NODE_ENV !== 'production') console.log('DBG tagDeleteClick', t.id, { deleteDisabled })
                   if (deleteDisabled) return
-                  if (confirm(`Delete tag "${t.name}"?`)) deleteTagMutation.mutate(t.id)
+                  if (await confirm({
+                    title: i18nT('components.tagManagerList.confirm_delete_tag', { name: t.name }),
+                    confirmLabel: i18nT('components.tagManagerList.delete_tag_2', { name: t.name }),
+                    danger: true,
+                  })) deleteTagMutation.mutate(t.id)
                 }}>
                 <X size={11} />
               </button>

@@ -21,7 +21,7 @@
  * which is the one key the Recent row's own onKeyDown lets fall through.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Provider } from 'react-redux'
 import { MemoryRouter } from 'react-router-dom'
@@ -220,6 +220,21 @@ function renderSidebar(opts: { slots?: TestSlot[]; folders?: ChatFolder[] } = {}
  * with no await in between — the item's onClick still runs, and what it sets in
  * motion (a mutation, the rename field, the folder modal) outlives the menu.
  */
+/** The themed ConfirmDialog answers a delete ask: press its confirm button
+ *  (`yes`) or Cancel (`!yes`), by the action's label. ChatSidebar's
+ *  row-animation renders keep replacing the dialog's subtree, so a node held
+ *  across ticks goes stale (detached) and a click on it reaches nothing.
+ *  Re-query and require a CONNECTED node inside waitFor, and let the retry
+ *  loop absorb a query that raced a render. */
+async function answerConfirm(confirmLabel: string, yes: boolean) {
+  await waitFor(() => {
+    const dialog = screen.getByRole('dialog')
+    const btn = within(dialog).getByRole('button', { name: yes ? confirmLabel : 'Cancel' })
+    expect(btn.isConnected).toBe(true)
+    fireEvent.click(btn)
+  }, { timeout: 3000 })
+}
+
 function openFolderMenu(folderId: string) {
   fireEvent.keyDown(screen.getByTestId(`folder-menu-${folderId}`), { key: 'Enter' })
   // The menu is up in this tick; confirm it so a silent no-open cannot
@@ -403,17 +418,17 @@ describe('ChatSidebar — list-view folder header', () => {
   })
 
   it('deletes the folder only once the confirm is accepted', async () => {
-    const confirmFn = vi.fn().mockReturnValue(false)
-    vi.stubGlobal('confirm', confirmFn)
     renderSidebar()
     openFolderMenu('f1')
     fireEvent.click(screen.getByTestId('folder-delete-f1'))
-    expect(confirmFn).toHaveBeenCalledWith('Delete “Alpha”? Sessions will be ungrouped.')
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('Delete “Alpha”? Sessions will be ungrouped.')).toBeTruthy()
+    await answerConfirm('Delete folder', false)
     expect(mocks.deleteChatFolder).not.toHaveBeenCalled()
 
-    confirmFn.mockReturnValue(true)
     openFolderMenu('f1')
     fireEvent.click(screen.getByTestId('folder-delete-f1'))
+    await answerConfirm('Delete folder', true)
     await waitFor(() => expect(mocks.deleteChatFolder).toHaveBeenCalledWith('f1'))
   })
 
@@ -433,12 +448,12 @@ describe('ChatSidebar — list-view folder header', () => {
   })
 
   it('right-click deletes only through the same confirm as the ⋯ menu', async () => {
-    const confirmFn = vi.fn().mockReturnValue(true)
-    vi.stubGlobal('confirm', confirmFn)
     renderSidebar()
     fireEvent.contextMenu(screen.getByRole('group', { name: 'Folder Alpha' }), { clientX: 40, clientY: 20 })
     fireEvent.click(screen.getByTestId('folder-delete-f1-ctx'))
-    expect(confirmFn).toHaveBeenCalledWith('Delete “Alpha”? Sessions will be ungrouped.')
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('Delete “Alpha”? Sessions will be ungrouped.')).toBeTruthy()
+    await answerConfirm('Delete folder', true)
     await waitFor(() => expect(mocks.deleteChatFolder).toHaveBeenCalledWith('f1'))
   })
 

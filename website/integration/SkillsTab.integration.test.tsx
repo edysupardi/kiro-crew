@@ -16,12 +16,17 @@ vi.mock('framer-motion', async () => {
   }
 })
 
-// Mock window.confirm for delete operations
-const mockConfirm = vi.fn()
-Object.defineProperty(window, 'confirm', {
-  writable: true,
-  value: mockConfirm,
-})
+/** Answers the themed ConfirmDialog (useConfirm) by clicking its button.
+ *  Re-queries the dialog on every attempt: the row list re-renders during
+ *  animations, so a node captured outside waitFor can go stale. */
+async function answerConfirm(confirmLabel: string, yes: boolean) {
+  await waitFor(() => {
+    const dialog = screen.getByRole('dialog')
+    const btn = within(dialog).getByRole('button', { name: yes ? confirmLabel : 'Cancel' })
+    expect(btn.isConnected).toBe(true)
+    fireEvent.click(btn)
+  }, { timeout: 3000 })
+}
 
 /** The skills list is a master-detail layout: a list of skill rows on the
  *  left, a directory browser + edit affordances on the right.  The first
@@ -29,7 +34,6 @@ Object.defineProperty(window, 'confirm', {
 describe('SkillsTab Integration Tests', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockConfirm.mockReturnValue(true)
   })
 
   // ── Loading & Display ──────────────────────────────────────────────
@@ -209,7 +213,10 @@ describe('SkillsTab Integration Tests', () => {
     const delBtn = await screen.findByRole('button', { name: /delete/i }, { timeout: 3000 })
     await user.click(delBtn)
 
-    expect(mockConfirm).toHaveBeenCalledWith(expect.stringContaining('code-search'))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/code-search/)).toBeInTheDocument()
+    await answerConfirm('Delete', true)
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 
   // ── Create Skill ───────────────────────────────────────────────────
