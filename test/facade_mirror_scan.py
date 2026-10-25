@@ -65,6 +65,18 @@ _BINDING_TYPES = frozenset(
 )
 #: The statements :func:`patch_events` reads a target from.
 _WRITE_STATEMENTS = frozenset({ast.Assign, ast.AugAssign, ast.Delete})
+_WORD = re.compile(r"\w+")
+_FROM_IMPORT = re.compile(r"\bfrom\s+([\w.]+)\s+import\s+")
+
+
+def _dot_prefixes(dotted: str) -> Iterator[str]:
+    """*dotted* and each of its leading dotted segments, longest first: the spellings a
+    name can start with, looked up one by one instead of testing every spelling."""
+    yield dotted
+    at = dotted.rfind(".")
+    while at != -1:
+        yield dotted[:at]
+        at = dotted.rfind(".", 0, at)
 
 
 class _Bindings:
@@ -146,7 +158,7 @@ class _Bindings:
                 self._untrack(target.value)
 
     def _names_facade(self, dotted: str) -> bool:
-        return any(dotted == f or dotted.startswith(f + ".") for f in self._facades)
+        return any(prefix in self._facades for prefix in _dot_prefixes(dotted))
 
     def _bind(self, name: str, dotted: str) -> None:
         current = self.modules.get(name)
@@ -163,10 +175,11 @@ class _Bindings:
             self.strings[name] = text
 
     def canonical(self, dotted: str) -> str:
-        """*dotted* with a spelling of a facade replaced by the facade's own name."""
-        for spelling in sorted(self._facades, key=len, reverse=True):
-            if dotted == spelling or dotted.startswith(spelling + "."):
-                return self._facades[spelling] + dotted[len(spelling) :]
+        """*dotted* with a spelling of a facade replaced by the facade's own name (the
+        longest spelling that is *dotted* or one of its leading dotted segments)."""
+        for prefix in _dot_prefixes(dotted):
+            if prefix in self._facades:
+                return self._facades[prefix] + dotted[len(prefix) :]
         return dotted
 
     def dotted_of(self, node: ast.expr) -> str | None:
@@ -567,12 +580,27 @@ def _spelling_patterns(dotted: str) -> tuple[re.Pattern[str], ...]:
 
 
 def _mentions(text: str, dotted_names: Iterable[str]) -> bool:
-    """Whether *text* spells any of *dotted_names* (see :func:`_spelling_patterns`).
+    """Whether *text* spells any of *dotted_names* (see :func:`_spelling_patterns`), or
+    reaches one through an alias of its parent module (:func:`_alias_chain`).
 
     A spelling of a module always contains its leaf, so a C-level substring check rejects
     almost every file before any pattern runs.
+
+    A plain module name (:func:`_is_plain`) is answered from readings of the text made once
+    per text and once per text and leaf (:func:`_mentions_plain`) instead: a facade imported
+    by hundreds of modules has hundreds of spellings sharing its leaf, and running the
+    patterns of each over the whole text is what a scan of the test tree would otherwise
+    cost. A table of many leaves first asks the text's word index (:class:`_TextWords`) whether
+    any word begins with the leaf, and skips the name when none does.
     """
-    for name in dotted_names:
+    names = tuple(dotted_names)
+    leaves, indexed = _plain_leaves(names)
+    words = _text_words(text) if indexed else None
+    for name, leaf in zip(names, leaves):
+        if leaf is not None:
+            if (words is None or words.starts(leaf)) and _mentions_plain(text, name, words):
+                return True
+            continue
         if name in text:
             return True
         head, _, leaf = name.rpartition(".")
@@ -581,11 +609,224 @@ def _mentions(text: str, dotted_names: Iterable[str]) -> bool:
         from_import, attribute, relative = _spelling_patterns(name)[1:]
         if head in text and from_import.search(text):
             return True
-        if f".{leaf}" in text and head.rpartition(".")[2] in text and attribute.search(text):
-            return True
+        if f".{leaf}" in text and head.rpartition(".")[2] in text:
+            if attribute.search(text) or _alias_chain(text, name):
+                return True
         if (f"'.{leaf}'" in text or f'".{leaf}"' in text) and relative.search(text):
             return True
     return False
+
+
+def _alias_chain(text: str, dotted: str, words: _TextWords | None = None) -> bool:
+    """Whether *text* writes ``<alias>.<leaf>`` outside an import line, where ``<alias>``
+    is a name *text* binds the parent module of *dotted* to (:func:`_text_aliases`).
+
+    ``from kiro_crew.mcp_tools import browser as mod`` then ``mod.mcp_core`` spells
+    ``kiro_crew.mcp_tools.browser.mcp_core`` without any of the literal spellings above.
+    """
+    head, _, leaf = dotted.rpartition(".")
+    head_leaf = head.rpartition(".")[2]
+    if not head_leaf:
+        return False
+    if words is None:
+        if f".{leaf}" not in text or head_leaf not in text:
+            return False
+        chained = _chain_words(text, leaf, head_leaf)
+    else:
+        chained = words.chain_words(leaf)
+    # ``<head leaf>.<leaf>`` is :func:`_spelling_patterns`' to read, not an alias chain.
+    candidates = chained - {head_leaf}
+    if not candidates or head_leaf not in text:
+        return False
+    return not candidates.isdisjoint(_text_aliases(text, head))
+
+
+def _chain_words(text: str, leaf: str, drop: str = "") -> frozenset[str]:
+    """The words *text* writes before ``.<leaf>`` outside an import line, for
+    :func:`_alias_chain`; they depend on the leaf alone, never on the parent module. A *drop*
+    word is left out before the ``as`` check runs, which then has one word fewer to test."""
+    needle = f".{leaf}"
+    if needle not in text:
+        return frozenset()
+    # The words written before ``.<leaf>``, read backwards from each occurrence with
+    # string scans only: this runs for every file and leaf the cheaper checks pass.
+    candidates = set()
+    for at in _occurrences(text, needle):
+        end = at + len(needle)
+        if end < len(text) and (text[end].isalnum() or text[end] == "_"):
+            continue
+        start = at
+        while start > 0 and text[start - 1] in " \t":
+            start -= 1
+        stop = start
+        while start > 0 and (text[start - 1].isalnum() or text[start - 1] == "_"):
+            start -= 1
+        if start == stop or not _starts_a_name(text, start, ".'\""):
+            continue
+        line = text[text.rfind("\n", 0, start) + 1 : start].lstrip()
+        if not line.startswith(("from ", "import ")):
+            candidates.add(text[start:stop])
+    candidates.discard(drop)
+    if "import_module" not in text:
+        candidates = {word for word in candidates if re.search(rf"\bas\s+{word}\b", text)}
+    return frozenset(candidates)
+
+
+#: The module names :func:`_mentions_plain` answers: dotted ASCII identifiers, no segment
+#: ``from`` or ``import``. Its readings split a text into words the way ``\w`` does, which is
+#: exactly what the patterns' ``\b`` boundaries see for such a name.
+_PLAIN_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
+
+
+#: The fewest distinct plain leaves a name table needs before :func:`_mentions` asks the word
+#: index. Building the index costs one ``findall``, ``set`` and sort of the text: about as much
+#: as 90 ``leaf in text`` scans of an average test file, which is all a small table costs. The
+#: per-facade guards pass tables of one to a few leaves, the corpus guards hundreds.
+_WORD_INDEX_MIN_LEAVES = 64
+
+
+@functools.lru_cache(maxsize=64)
+def _plain_leaves(names: tuple[str, ...]) -> tuple[tuple[str | None, ...], bool]:
+    """The leaf of each of *names* that :func:`_is_plain` admits (``None`` for the rest), and
+    whether the table is large enough for the word index (:data:`_WORD_INDEX_MIN_LEAVES`)."""
+    leaves = tuple(name.rpartition(".")[2] if _is_plain(name) else None for name in names)
+    distinct = {leaf for leaf in leaves if leaf is not None}
+    return leaves, len(distinct) >= _WORD_INDEX_MIN_LEAVES
+
+
+@functools.lru_cache(maxsize=None)
+def _is_plain(dotted: str) -> bool:
+    """Whether :func:`_mentions` may answer *dotted* from :func:`_mentions_plain`."""
+    return _PLAIN_NAME.fullmatch(dotted) is not None and not {"from", "import"} & set(
+        dotted.split(".")
+    )
+
+
+def _mentions_plain(text: str, dotted: str, words: _TextWords | None = None) -> bool:
+    """:func:`_mentions` for one plain name, from :func:`_from_imports` and
+    :func:`_leaf_parts` instead of :func:`_spelling_patterns`; *words*, when given, is the
+    text's word index, whose memo :func:`_alias_chain` reads."""
+    head, _, leaf = dotted.rpartition(".")
+    present, parents, relative = _leaf_parts(text, leaf)
+    if not present:
+        return False
+    if dotted in text or leaf in _from_imports(text).get(head, ()):
+        return True
+    return head.rpartition(".")[2] in parents or relative or _alias_chain(text, dotted, words)
+
+
+@functools.lru_cache(maxsize=64)
+def _from_imports(text: str) -> dict[str, frozenset[str]]:
+    """Each ``from <head> import`` head in *text* -> the words its import list holds: the
+    rest of that line, and the parenthesised list when one opens there."""
+    imports: dict[str, set[str]] = {}
+    for match in _FROM_IMPORT.finditer(text):
+        at = match.end()
+        line_end = text.find("\n", at)
+        words = set(_WORD.findall(text, at, len(text) if line_end == -1 else line_end))
+        if text.startswith("(", at):
+            close = text.find(")", at)
+            words.update(_WORD.findall(text, at, len(text) if close == -1 else close))
+        imports.setdefault(match.group(1), set()).update(words)
+    return {head: frozenset(words) for head, words in imports.items()}
+
+
+@functools.lru_cache(maxsize=1024)
+def _leaf_parts(text: str, leaf: str) -> tuple[bool, frozenset[str], bool]:
+    """``(present, parents, relative)`` for module leaf *leaf* in *text*: whether the leaf
+    occurs at all; every word ``<parent>`` the text writes as ``<parent> . <leaf>``, when
+    ``.<leaf>`` occurs somewhere in it; and whether it quotes ``'.<leaf>'`` or
+    ``".<leaf>"`` (a relative ``import_module``)."""
+    if leaf not in text:
+        return False, frozenset(), False
+    parents = set()
+    if f".{leaf}" in text:
+        for match in re.finditer(rf"\b{re.escape(leaf)}\b", text):
+            at = match.start() - 1
+            while at >= 0 and text[at].isspace():
+                at -= 1
+            if at < 0 or text[at] != ".":
+                continue
+            at -= 1
+            while at >= 0 and text[at].isspace():
+                at -= 1
+            end = at + 1
+            while at >= 0 and _is_word(text[at]):
+                at -= 1
+            if at + 1 < end:
+                parents.add(text[at + 1 : end])
+    relative = f"'.{leaf}'" in text or f'".{leaf}"' in text
+    return True, frozenset(parents), relative
+
+
+def _is_word(char: str) -> bool:
+    return char.isalnum() or char == "_"
+
+
+class _TextWords:
+    """One text's distinct ``\\w`` words, sorted, with the answers already given about it.
+
+    :func:`_mentions_plain` answers yes only where some word of the text begins with the
+    name's leaf: ``<head>.<leaf>`` written in the text has a dot before the leaf, so a word
+    starts there; a ``from <head> import`` list, a ``\\b<leaf>\\b`` match, a quoted
+    ``'.<leaf>'`` and :func:`_alias_chain`'s ``.<leaf>`` followed by a non-word character
+    each hold the leaf as a whole word. :meth:`starts` asks exactly that, with a binary
+    search, once per leaf; :meth:`chain_words` keeps :func:`_chain_words` per leaf, since
+    the hundreds of spellings sharing a facade's leaf differ only in the parent they name.
+    """
+
+    __slots__ = ("_text", "_words", "_starts", "_chains")
+
+    def __init__(self, text: str) -> None:
+        self._text: str = text
+        self._words: list[str] = sorted(set(_WORD.findall(text)))
+        self._starts: dict[str, bool] = {}
+        self._chains: dict[str, frozenset[str]] = {}
+
+    def starts(self, leaf: str) -> bool:
+        """Whether some word of the text begins with *leaf*."""
+        known = self._starts.get(leaf)
+        if known is None:
+            at = bisect.bisect_left(self._words, leaf)
+            known = at < len(self._words) and self._words[at].startswith(leaf)
+            self._starts[leaf] = known
+        return known
+
+    def chain_words(self, leaf: str) -> frozenset[str]:
+        """:func:`_chain_words` of the text for *leaf*, read once."""
+        chained = self._chains.get(leaf)
+        if chained is None:
+            chained = self._chains[leaf] = _chain_words(self._text, leaf)
+        return chained
+
+
+@functools.lru_cache(maxsize=64)
+def _text_words(text: str) -> _TextWords:
+    """The word index of *text*, built once per text for the large tables that ask it."""
+    return _TextWords(text)
+
+
+def _mentioned(text: str, spellings: Iterable[str]) -> list[str]:
+    """The *spellings* :func:`_mentions` answers yes for in *text*, in their order.
+
+    In a large table (:data:`_WORD_INDEX_MIN_LEAVES`) a plain spelling whose leaf no word of
+    *text* begins with is dropped from the word index alone, which spares the call for most
+    of the hundreds of spellings each text is asked about.
+    """
+    names = tuple(spellings)
+    leaves, indexed = _plain_leaves(names)
+    if not indexed:
+        return [name for name in names if _mentions(text, [name])]
+    words = _text_words(text)
+    return [
+        name
+        for name, leaf in zip(names, leaves)
+        if (
+            _mentions(text, [name])
+            if leaf is None
+            else words.starts(leaf) and _mentions_plain(text, name, words)
+        )
+    ]
 
 
 def _admitted(text: str, spellings: Mapping[str, str]) -> bool:
@@ -653,10 +894,8 @@ def text_patched_names(text: str, spellings: Mapping[str, str]) -> dict[str, set
     file costs a few substring searches.
     """
     found: dict[str, set[str]] = {}
-    for spelling, facade in spellings.items():
-        if not _mentions(text, [spelling]):
-            continue
-        names = found.setdefault(facade, set())
+    for spelling in _mentioned(text, spellings):
+        names = found.setdefault(spellings[spelling], set())
         dotted = re.escape(spelling)
         names.update(_at(text, spelling, rf"{dotted}\.(\w+)", before=_QUOTES))
         aliases = _text_aliases(text, spelling)
@@ -818,12 +1057,14 @@ def needs_syntax_tree(text: str, spellings: Mapping[str, str]) -> bool:
     that alias. A file is sent to :func:`patch_events` when it also holds anything those
     cannot follow: a patch spelling in :data:`_SYNTAX_ONLY`; a quoted spelling of a facade
     that is not one of those forms (a module constant, an f-string or concatenation part,
-    ``importorskip``, a ``.__dict__`` target); a bare ``import <dotted>`` or a
-    ``package.leaf`` attribute chain; or an alias assigned on to another name.
+    ``importorskip``, a ``.__dict__`` target); a bare ``import <dotted>``, a
+    ``package.leaf`` attribute chain or one through an alias of the parent module
+    (:func:`_alias_chain`); or an alias assigned on to another name.
     """
-    mentioned = [spelling for spelling in spellings if _mentions(text, [spelling])]
+    mentioned = _mentioned(text, spellings)
     if not mentioned:
         return False
+    words = _text_words(text) if _plain_leaves(tuple(spellings))[1] else None
     if _syntax_only(text):
         return True
     for spelling in mentioned:
@@ -859,6 +1100,8 @@ def needs_syntax_tree(text: str, spellings: Mapping[str, str]) -> bool:
                     continue
                 if end >= len(text) or not (text[end].isalnum() or text[end] == "_"):
                     return True
+        if _alias_chain(text, spelling, words):
+            return True  # ``<alias of the parent>.<leaf>``: patched as a dotted chain
         for alias in _text_aliases(text, spelling):
             if re.search(rf"=\s*{re.escape(alias)}\s*(?:#.*)?$", text, re.MULTILINE):
                 return True

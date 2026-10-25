@@ -8,12 +8,14 @@ they need a marker the model and the frontend can both recognise.
 **The user may not be present.** Process the envelope and act; do not answer it as
 though someone is waiting for a conversational reply.
 
-Most dashboard-owned prefixes are defined once in `src/kiro_crew/dashboard/state.py`;
+Most dashboard-owned prefixes are defined once in
+`src/kiro_crew/dashboard/state_parts/injected_turns.py` (re-exported by
+`src/kiro_crew/dashboard/state.py`, their import path);
 a few (the MCP app message envelope among them) live in
-`src/kiro_crew/dashboard/chat_utils.py`.
+`src/kiro_crew/dashboard/chat_utils_injected_rows.py`.
 The two core-safe sub-agent completion markers live in `src/kiro_crew/constants.py`
-so `subagent.py` can import them without importing the dashboard layer; `state.py`
-imports and aggregates them. Classification is by `str.startswith` on the resolved
+so `subagent.py` can import them without importing the dashboard layer;
+`injected_turns.py` imports and aggregates them. Classification is by `str.startswith` on the resolved
 prefix or prefix tuple, never by a loose regex.
 
 ## Cron notification
@@ -38,7 +40,16 @@ was reachable. `dashboard/handlers/messaging.py` wraps the text:
   wrapper. The text wrapper stays in `content` because that is what the model
   reads.
 - If the slot is mid-turn the message is queued as `queued` and drained later; a
-  queue at capacity evicts its oldest entry rather than growing without bound. An
+  queue at capacity evicts its oldest queued cron notification rather than growing
+  without bound, and broadcasts `queue_cancel` for it so an open dashboard retracts
+  that card. Only a cron notification no person edited gives way: when the full
+  queue holds none, a person's prompt, an app message, a peer send or an edited card
+  stays, and the new notification leaves the session instead (a script cron's result
+  as a dashboard notification, a cron's `send_message` through its usual fallback).
+  Its
+  waiting card names the entry in `meta.queueId`, the id the drain's `queue_pop`
+  frame carries, so the card comes down when the message starts its turn
+  (`cron_inject.queue_cron_notification`, which a script cron's result uses too). An
   idle slot instead gets an immediate guarded turn.
 - When the origin slot is not in memory it is rehydrated from history. A session
   that is genuinely gone (never persisted, deleted, or closed) resolves to nothing
@@ -63,7 +74,7 @@ Head: <revision>. Changed: <allowlisted canonical facts>.
 Next action: <bounded instructions>.
 ```
 
-`MONITOR_WAKE_PREFIX = '[Monitor wake]'` is defined in `dashboard/state.py`.
+`MONITOR_WAKE_PREFIX = '[Monitor wake]'` is defined in `dashboard/state_parts/injected_turns.py`.
 The complete envelope is redacted before its 4,096-character cap and contains
 only canonical provider facts, never raw responses, logs, comments, diffs,
 stdout, or stderr. Dashboard stores it as role `nudge` with compact monitor
@@ -73,7 +84,7 @@ that the resulting agent action finished.
 
 ## Sub-agent completion
 
-A background sub-agent finished. `slack/gateway.py` builds the envelope on the
+A background sub-agent finished. `slack/gateway_runtime/subagent_report.py` builds the envelope on the
 single completion path that serves every terminal outcome:
 
 ```
@@ -87,7 +98,7 @@ Usage: <credits> credits · <elapsed>
 ```
 
 - `SUBAGENT_COMPLETION_PREFIX = '[Subagent completion event]'` is defined in
-  `constants.py` and included in `state.py`'s `SUBAGENT_COMPLETION_PREFIXES`
+  `constants.py` and included in `injected_turns.py`'s `SUBAGENT_COMPLETION_PREFIXES`
   aggregate.
 - `<status> <emoji>` is one of `completed ✅`, `failed ❌`, or `stopped by user ⏹`.
   The agent-name parenthetical is present only when the sub-agent ran under a named
@@ -110,7 +121,7 @@ Usage: <credits> credits · <elapsed>
 - A user-stopped agent says so explicitly and instructs the parent not to treat the
   partial output as a finished result or retry it unprompted.
 - A wide wave is delivered in chunks under a sibling prefix,
-  `SUBAGENT_BATCH_COMPLETION_PREFIX`, which `state.py` bundles with the others into
+  `SUBAGENT_BATCH_COMPLETION_PREFIX`, which `injected_turns.py` bundles with the others into
   `SUBAGENT_COMPLETION_PREFIXES` for the same `str.startswith` classification. A
   chunk is NOT the wave: a mid-wave chunk carries progress facts (how many of the
   total are delivered, how many still running) and tells the parent to process
@@ -151,7 +162,8 @@ time-to-first-token distribution.
 ## Sub-agent delivery failure
 
 A sub-agent reached a terminal state but injecting its report into the parent
-session failed (most commonly a delivery timeout). `subagent.py` builds:
+session failed (most commonly a delivery timeout). `subagent_manager/terminal.py` builds,
+reached through `SubagentManager.notify_injection_failed`:
 
 ```
 [Subagent completion event]
@@ -241,7 +253,7 @@ surface drew before, so no history changes rendering underneath the user.
 
 The runner injects a synthetic continuation when a turn ended for a system reason
 rather than because the model was done. Each has its own prefix in
-`dashboard/state.py`, each renders as an `inject` message (not a user bubble), and
+`dashboard/state_parts/injected_turns.py`, each renders as an `inject` message (not a user bubble), and
 none is mirrored to a linked Slack or Telegram thread as though the user typed it:
 
 | Prefix | Fired when |
@@ -252,7 +264,7 @@ none is mirrored to a linked Slack or Telegram thread as though the user typed i
 | `[Interrupted turn — automatic recovery]` | A transient backend 5xx cut a turn short after tokens or tool calls had already streamed. |
 | `[Empty response — automatic recovery]` | The model returned no output twice. Continue the pending request; do not restart from scratch or re-run steps that already succeeded. |
 | `[Unfinished action — automatic recovery]` | The turn ended right after announcing an immediate action ("I'll do that now") without making the tool call, so nothing actually happened yet a billed turn was recorded. Instructs the model to carry out the announced action now — unless it was actually deferred pending the user's approval or an unmet condition, in which case it is told to hold and say what it is waiting for (a semantic consent backstop, since the terminal-promise detector's approval-gate deny-list cannot enumerate every conditional phrasing). Bounded to one attempt per turn; a second consecutive promise-only ending falls through and lands normally with a give-up notice. |
-| `[Connection lost — automatic recovery]` | A reset recovered an interrupted backend connection. The body lives in `chat_utils` so queue provenance and turn routing share one instruction. |
+| `[Connection lost — automatic recovery]` | A reset recovered an interrupted backend connection. The body lives in `chat_utils_injected_rows` so queue provenance and turn routing share one instruction. |
 | `[Session busy — automatic recovery]` | A reset recovered a turn the backend refused because the session was still busy. Distinct from the connection marker even though both requeue the same continuation shape: nothing was disconnected, and reporting a dropped connection to a user whose status card reads "Session busy" would contradict the card. |
 | `[Context compacted — automatic recovery]` | The backend compacted the conversation mid-turn and then ended the turn without finishing the work. The compaction succeeded, so the turn lands looking clean (a settled footer with elapsed time) and the chat would otherwise just stop. Bounded to one attempt. |
 | `[Continue — requested by the user]` | The user pressed Continue on an interrupted turn. It is in this family so `test_recovery_card_prefixes.py`'s cross-language drift guard covers it, but the value deliberately does not say "automatic recovery": a person pressed the button, and the card must not claim the system recovered by itself. |
@@ -352,8 +364,19 @@ steer still answers the wire: the reject is scheduled as a strongly referenced
 task whose outcome is read when it settles, and the cancellation re-raises at
 once — the cancellation is the caller's deadline, so nothing waits past it.
 
+**A user's typed reply rides the same channel.** `kirocrew chat`'s `o` answer
+refuses the call and steers the person's own words into the turn, tagged
+`[Kiro Crew: the user replied to your permission request]` — not the host-notice
+tag, because this refusal IS a user action. It goes through
+`deny_notice.steer_notice_into_refused_turn`, the probe-and-bounded-send half of
+`steer_refusal_notice`, so the capability gate (`supports_refusal_steer`) and
+the bound (`STEER_NOTICE_BOUND_SECS`) have one spelling. Audit first, then the
+steer, then the reject. When the steer is not delivered the CLI sends the reply
+as the next message instead (see `modules/cli.md`).
+
 **The messaging surfaces steer the same notice.** The native Slack handler
-(`slack/handler.py`) and the channel-neutral `messaging.TurnDriver` each carry
+(`slack/handler_runtime/permission_ladder.py`) and the channel-neutral
+`messaging.TurnDriver` each carry
 a thin `_steer_host_deny` that redacts the reason and forwards to
 `deny_notice.steer_refusal_notice`; the channel agent stream (`channel.py`)
 reuses `llm_helpers`' helper (passing the rendered tool name as `title`), since
@@ -528,7 +551,7 @@ recording steer/reject order; the webhook and reviewer denies are driven beside
 their own harnesses (`test_webhook_permission_requests.py`, the app's
 `test_review_pool.py`).
 
-The ACP transport's own refusals (`acp/client_permissions.py`, `acp/session_handle.py`)
+The ACP transport's own refusals (`acp/client_permissions.py`, `acp/session_handle_permissions.py`)
 sit below every surface and steer nothing: the security floor inside
 `approve_tool` backstops a surface that approved, the agent-spec restrictions a
 backend cannot express natively are enforced before any surface sees the
@@ -753,7 +776,7 @@ ordinary user message beginning `[UI] `, sent by a human, carrying an origin tag
 
 ## Other injected envelopes
 
-These carry no `state.py` prefix constant, so they are classified by their own
+These carry no `injected_turns.py` prefix constant, so they are classified by their own
 literal header rather than through `str.startswith` on a shared prefix. The
 system prompt names each one so the model reads it as data or as automation
 speech rather than as the user.
@@ -761,20 +784,22 @@ speech rather than as the user.
 | Envelope | Emitted by | What it means to the model |
 |---|---|---|
 | `[work ledger — …]` | `session_ledger.py` snapshot builder, composed into a nudge by `dashboard/handlers/autonudge.py` | Durable per-session state that outranks the model's recollection of earlier cycles. |
-| `[Hook context:]` … `[End of hook context]` | `context.py` hook-context assembly | Context supplied by a configured hook whose action is `HOOK_INJECT_CONTEXT`; webhook-restored workflow state is one producer, not the envelope's only meaning. The payload is untrusted third-party data. |
-| `[MCP app message from "server/tool"]` … `[End of MCP app message]` | `dashboard/chat_utils.py` (`APP_MESSAGE_PREFIX`, `APP_MESSAGE_END`; queue kind `mcp_app_message`) | A message an MCP app sent into the chat; the app's words, not the user's. See [mcp-apps.md](../modules/mcp-apps.md). |
+| `[Hook context:]` … `[End of hook context]` | `context_assembly/turn_message.py` hook-context assembly | Context supplied by a configured hook whose action is `HOOK_INJECT_CONTEXT`; webhook-restored workflow state is one producer, not the envelope's only meaning. The payload is untrusted third-party data. |
+| `[MCP app message from "server/tool"]` … `[End of MCP app message]` | `dashboard/chat_utils_injected_rows.py` (`APP_MESSAGE_PREFIX`, `APP_MESSAGE_END`; queue kind `mcp_app_message`) | A message an MCP app sent into the chat; the app's words, not the user's. See [mcp-apps.md](../modules/mcp-apps.md). |
+| `[Worker report]` | `dashboard/mate_thread_wakes.py` (`WORKER_REPORT_PREFIX`, `report_prompt`), a hidden gateway turn with no transcript row | A worker session the crewmate created ended a turn. Each worker's latest reply sits between `<<<worker reply` and `>>>end of worker reply`, scrubbed and capped; it is the worker's output, data to weigh, never the user. Give the worker its next step and end the turn, tell the user when the work is done or needs them, or end with `nothing_to_do`. See [crew-mode.md](../modules/crew-mode.md), "A worker reports back on its own". |
+| `[Worker upgrade]` | `mate_upgrade_notice.py` (`WORKER_UPGRADE_PREFIX`, `NOTICE_PROMPT`), delivered by `dashboard/mate_thread_wakes.py` as a hidden gateway turn | Sent once ever to a crewmate the upgrade moved onto its worker. Tell the user in a sentence or two that work now goes to the worker and where they see and change what it can do; no tools. See [crew-mode.md](../modules/crew-mode.md), "A moved crewmate tells its user once". |
 | `[Workflow completion event]` | `dashboard/workflow_inject.py` | A background workflow run finished; the next line names the workflow, run id and status. |
-| `[Content filter — continuing on the fallback model]` | `REFUSAL_FALLBACK_RECOVERY_PREFIX` in `dashboard/state.py`, built in `dashboard/chat_utils.py` | The primary model refused on a content filter and the turn continues on the fallback model. |
-| `[Task checklist — automatic recovery]` | `todo_recovery_prompt` in `dashboard/state.py` | The conversation restarted, so the todo tool holds an empty list; rebuild it from the dashboard checklist shown. |
+| `[Content filter — continuing on the fallback model]` | `REFUSAL_FALLBACK_RECOVERY_PREFIX` in `dashboard/state_parts/injected_turns.py`, built in `dashboard/chat_utils_turn_recovery.py` | The primary model refused on a content filter and the turn continues on the fallback model. |
+| `[Task checklist — automatic recovery]` | `todo_recovery_prompt` in `dashboard/state_parts/slot_todo.py` | The conversation restarted, so the todo tool holds an empty list; rebuild it from the dashboard checklist shown. |
 | `[Previous run result — do NOT repeat the same content]` | `cron_service/identity.py` (`build_cron_session_context`) | A recurring cron's own last output, so the turn reports only what changed. |
 | `[RESOURCES]` | `resource_status.py` advisory builder | Host memory crossed the tight/critical threshold, **or** the agent slice sits within `_SLICE_TASKS_TIGHT_RATIO` of its cgroup `pids.max`, **or** the macOS kernel reports memory pressure of WARN or worse (`ResourceStatus.memory_pressure_held`) while the figure reads ample or cannot be read; take the lighter path this turn. |
 | `[Relevant skills for this message]` | `skill_runtime/delivery.py` pointer renderer (`trigger_hint`) | Skill candidates named by path instead of by injected body. The body must be read before use unless that skill already appears earlier in the conversation, where native history still carries its instructions. |
 | `[Kiro Crew host notice] You have made the same tool call …` | `repeat_loop.py` (`build_repeat_loop_notice`), steered by `dashboard/chat_turn/deny_chokepoints.py` (`_steer_repeat_loop_notice`) | The same tool call with the same input returned the same result `REPEAT_LOOP_THRESHOLD` times in one turn. Advice only: nothing was refused or stopped, it is sent at most once per call per turn, and it never joins the refusal ledger, so it schedules no recovery turn. Sent only where `supports_refusal_steer` holds; a hint written after the turn's last tool result may go unread, which is harmless because the loop has ended. |
-| `[INCOGNITO SESSION]` / `[TEMPORARY SESSION]` | `dashboard/chat_utils.py` ephemeral-session prefixes | An instruction, not a tool-level gate: it forbids memory tools (writes in incognito, reads as well in temporary) and learns nothing from the chat — the transcript itself is kept in History for the user, but no lesson, memory or summary is derived from it. `learn_remove` and the cron tools stay permitted as active user actions, and a cron change persists outside the transcript. |
+| `[INCOGNITO SESSION]` / `[TEMPORARY SESSION]` | `dashboard/chat_utils_slots.py` ephemeral-session prefixes | An instruction, not a tool-level gate: it forbids memory tools (writes in incognito, reads as well in temporary) and learns nothing from the chat — the transcript itself is kept in History for the user, but no lesson, memory or summary is derived from it. `learn_remove` and the cron tools stay permitted as active user actions, and a cron change persists outside the transcript. |
 
 ## Adding a new envelope
 
-- Define the prefix in `dashboard/state.py` next to the others.
+- Define the prefix in `dashboard/state_parts/injected_turns.py` next to the others.
 - Classify with `startswith` on that constant, and if the entry must survive queue
   transformations, tag the queue entry's `kind` instead of matching content.
 - Decide the slot role (`inject`, `subagent`, `nudge`) so the frontend renders it

@@ -66,7 +66,7 @@ sequenceDiagram
     participant Owner as Slack Owner
     participant Handler as commands.py (_bang_dashboard)
     participant Allowlist as allowlist.py (send_dashboard_link)
-    participant TokenGen as token_auth.py
+    participant TokenGen as token_auth_tokens.py
     participant Browser as Browser
     participant MW as Token Auth Middleware
     participant App as Dashboard App
@@ -126,7 +126,7 @@ graph LR
 6. `_workflow_ready` (`_register_workflow_lifecycle`) answers 503 on `/api/workflows`
    until the workflow service is ready, and `_crewmate_prune_gate`
    (`_register_crewmate_prune_gate`, dashboard only) holds every mutating request,
-   and any request under `/api/members`, until the crewmate prune settles, 503
+   and any request under `/api/members`, until the mate prune settles, 503
    past its timeout.
    Both RETURN their refusal, inner to `sel_audit`.
 
@@ -151,6 +151,18 @@ gates (`_workflow_ready`, `_crewmate_prune_gate`, each a 503).
 ### 1. `token_auth.py` — Token Generator, Validator & Middleware
 
 Location: `src/kiro_crew/dashboard/token_auth.py`
+
+`token_auth.py` keeps the middleware and is the import path for every name below: a
+mirror facade (`kiro_crew._facade_mirror`) that serves what its owners bind and sends a
+patch of `token_auth.<name>` to every owner holding it. Owners never import it. New work
+goes to the owner of its responsibility:
+
+| Owner | Responsibility |
+|---|---|
+| `token_auth_paths.py` | Requests that skip token auth (static assets, self-authenticating webhooks, CSRF exemptions, the SPA shell and app-window paths), and the refusal and auth-log helpers |
+| `token_auth_tokens.py` | Minting, validating, pinning and revoking session tokens; app secrets; the per-process token state |
+| `token_auth_app_scope.py` | What an app token may reach: its namespace and its manifest `permissions.api` prefixes |
+| `token_auth_callers.py` | Unix-socket peer verification, and attributing a request to its app, cron job, sub-agent or member |
 
 #### Token Format
 
@@ -435,7 +447,7 @@ If `index()` cannot read the static bundle, its `FileNotFoundError` fallback
 body (`_DASHBOARD_HTML_NOT_FOUND` in `handlers/core.py`) is likewise static and
 secret-free, honoring the same unauthenticated cold-start contract.
 
-**One predicate, no drift:** `_is_spa_shell_request` in `token_auth.py` is the
+**One predicate, no drift:** `_is_spa_shell_request` in `token_auth_paths.py` is the
 single source of truth for "paths that are never the SPA shell". It combines
 three exclusions:
 
@@ -623,7 +635,8 @@ compressed body is never inflated synchronously on the event loop; without the
 middleware such a body would reach a handler as raw bytes.
 
 The two internal-path sets passed to `token_auth_middleware` are the module-level
-`_STRICT_INTERNAL_API_PATHS` and `_MIXED_INTERNAL_API_PATHS` in `server.py`, the
+`_STRICT_INTERNAL_API_PATHS` and `_MIXED_INTERNAL_API_PATHS` that `server.py` binds
+from `dashboard/server_internal_paths.py`, the
 second read through `_mixed_internal_api_paths()` so an edition's mixed paths join
 it — so the headless server (below) binds to the **same** sets and the two
 entrypoints cannot drift.

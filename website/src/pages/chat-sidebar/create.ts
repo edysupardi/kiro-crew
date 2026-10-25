@@ -5,7 +5,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { type ErrorReport, findReport } from '../../utils/errorReport'
 import { isStaleProjectDirError, resolveFolderAgent, resolveFolderProjectDir } from '../../utils/folderAgent'
-import { createSlot } from '../../store/chatSlice'
+import { unwrapResult } from '@reduxjs/toolkit'
+import { captureForkOrigin, createSlot, forkMayOpen, type ForkOrigin, requestSlotFolderOpen } from '../../store/chatSlice'
 import { focusComposer } from '../chat/composerFocus'
 import { i18nT } from '../../i18n/t'
 import type { Slot } from './types'
@@ -25,8 +26,51 @@ import { currentCrewWindow, openCrewWindow } from '../chat/crew-window/crewWindo
 import { useStore } from 'react-redux'
 import type { RootState } from '../../store'
 
+/**
+ * How a create opens into the tab strip. `foreground` (Cmd/Ctrl+Shift-click)
+ * adds a tab beside the current one and switches to it; `background`
+ * (Cmd/Ctrl-click or middle-click)
+ * adds the tab and leaves the user where they are. `false` is a plain create,
+ * which activates the slot in the current tab.
+ */
+export type NewTabMode = 'foreground' | 'background' | false
+
+/**
+ * The tab mode a gesture's create may still use once it has resolved. A
+ * foreground open switches the view, so it is only safe while the user has
+ * not moved since they clicked: if they moved while the create was in flight,
+ * even back to the same session, switching would undo what they just picked (the
+ * hijack createSlot's own origin check prevents for a plain create, which
+ * `activate: false` skips). Then the tab still opens, in the background.
+ */
+function settledTabMode(store: { getState: () => RootState }, inNewTab: NewTabMode, origin: ForkOrigin): NewTabMode {
+  if (inNewTab !== 'foreground') return inNewTab
+  return forkMayOpen(store.getState(), origin) ? 'foreground' : 'background'
+}
+
+/** The action a plain folder create's repeat guard is scoped to: the folder,
+ *  the board lane when the "+" sits on one, and the memory mode. Only a click
+ *  that would send the same request again is a repeat; New incognito or New
+ *  temporary chat on a folder whose plain "+" is pending is a different one. */
+function plainCreateKey(folderId: string, columnId?: string, memoryMode?: string): string {
+  return JSON.stringify([folderId, columnId ?? null, memoryMode ?? null])
+}
+
+/**
+ * Dispatch createSlot and return the new slot with where the user stood
+ * when the create started. createSlot already records that origin in its
+ * fulfilled meta, which `.unwrap()` would drop. A rejection throws exactly
+ * as `.unwrap()` does, so the callers' onError paths are unchanged.
+ */
+async function createSlotWithOrigin(dispatch: AppDispatch, args: Parameters<typeof createSlot>[0]): Promise<{ slot: Slot; origin: ForkOrigin }> {
+  const action = await dispatch(createSlot(args))
+  if (createSlot.fulfilled.match(action)) return { slot: action.payload, origin: { activeSlot: action.meta.originActiveSlot ?? null, moves: action.meta.originActiveSlotMoves, autoMoves: action.meta.originActiveSlotAutoMoves } }
+  unwrapResult(action)
+  throw new Error('createSlot settled without fulfilling or rejecting')
+}
+
 /** New chat inside a folder, with its inline failure line. */
-export function useFolderChatCreate({ folders, mode, dispatch, dropSlotMutation, onOpenSlotInNewTab, updateFolderMutation, clearBoardCollapse, connected, setFolderOfflineNotice }: {
+export function useFolderChatCreate({ folders, mode, dispatch, dropSlotMutation, onOpenSlotInNewTab, onSelectSlot, updateFolderMutation, clearBoardCollapse, connected, setFolderOfflineNotice }: {
   folders: ChatFolder[]
   connected: boolean
   setFolderOfflineNotice: Dispatch<SetStateAction<string>>
@@ -34,6 +78,13 @@ export function useFolderChatCreate({ folders, mode, dispatch, dropSlotMutation,
   dispatch: AppDispatch
   dropSlotMutation: BoardColumnMutations['dropSlotMutation']
   onOpenSlotInNewTab: ((key: string, opts?: { background?: boolean | undefined; } | undefined) => void) | undefined
+  // A plain create ACTIVATES the new session, so the host must leave Split View
+  // and show it — the same callback a row click fires (ChatSidebar's
+  // `onSelectSlot`). Without it the grid keeps drawing the old split over a
+  // session that is already active (#21935). The background-tab gesture
+  // (`inNewTab`) deliberately does NOT fire it: that create keeps the user
+  // where they are, so the split must stay.
+  onSelectSlot: ((key: string) => void) | undefined
   updateFolderMutation: FolderMutations['updateFolderMutation']
   clearBoardCollapse: (folderId: string, columnId?: string) => void
 }) {
@@ -54,11 +105,18 @@ export function useFolderChatCreate({ folders, mode, dispatch, dropSlotMutation,
   // cannot resurrect a stale notice (and a stale success cannot clear a newer
   // failure's notice).
   const folderCreateAttemptRef = useRef(0)
+  // A plain folder create is in flight (see `createChatInFolder`). Set before
+  // `mutate` so the second click of a double click sees it: `creatingSlot`
+  // only flips once the mutation has dispatched `createSlot`.
+  // Keyed by action (folder, board lane and memory mode, see
+  // `plainCreateKey`), so a different create is never dropped as a repeat.
+  const plainCreatePendingRef = useRef(new Set<string>())
+  const store = useStore<RootState>()
   // `inNewTab` is the folder-create twin of createChatMutation's flag (see the
-  // comment there): the Cmd/Ctrl-click and middle-click gesture creates the
-  // session WITHOUT activating it, then hands the key to `onOpenSlotInNewTab`
-  // in background mode so the user stays on the transcript they were reading.
-  type CreateChatInFolderVars = { folderId: string; columnId?: string; focus?: boolean; attempt: number; memoryMode?: 'incognito' | 'temporary'; inNewTab?: boolean }
+  // comment there): either tab gesture creates the session WITHOUT activating
+  // it, then hands the key to `onOpenSlotInNewTab`, which adds the tab and,
+  // for `foreground`, switches to it.
+  type CreateChatInFolderVars = { folderId: string; columnId?: string; focus?: boolean; attempt: number; memoryMode?: 'incognito' | 'temporary'; inNewTab?: NewTabMode }
   const createChatInFolderMutation = useMutation({
     mutationFn: ({ folderId, memoryMode, inNewTab }: CreateChatInFolderVars) => {
       // Only a folder's own pin names an agent. Agent-less otherwise: the
@@ -74,11 +132,13 @@ export function useFolderChatCreate({ folders, mode, dispatch, dropSlotMutation,
       // project — createSlot applies it before the slot activates, so the
       // first message can't race a late project switch.
       const project = resolveFolderProjectDir(folders, folderId)
-      // The tab gesture registers the slot without stealing focus -- same
-      // `activate: false` contract as the header New button's gesture.
-      return dispatch(createSlot({ agent, mode: mode || '', folder_id: folderId, project, activate: !inNewTab, ...(memoryMode ? { memory_mode: memoryMode } : {}) })).unwrap()
+      // The tab gestures register the slot without activating it, so the
+      // tab strip does not replace the current tab -- same `activate: false`
+      // contract as the header New button's gestures.
+      return createSlotWithOrigin(dispatch, { agent, mode: mode || '', folder_id: folderId, project, activate: !inNewTab, ...(memoryMode ? { memory_mode: memoryMode } : {}) })
     },
-    onSuccess: (slot: Slot, { folderId, columnId, focus, attempt, inNewTab }: CreateChatInFolderVars) => {
+    onSuccess: ({ slot, origin }: { slot: Slot; origin: ForkOrigin }, { folderId, columnId, focus, attempt, inNewTab: requested }: CreateChatInFolderVars) => {
+      const inNewTab = settledTabMode(store, requested ?? false, origin)
       // A create that went through supersedes an earlier failure notice for
       // the same folder (e.g. the user fixed the folder's project directory
       // and retried); notices for OTHER folders stay put, and a stale success
@@ -88,9 +148,20 @@ export function useFolderChatCreate({ folders, mode, dispatch, dropSlotMutation,
       }
       // Focus only after the create fulfils: the composer is bound to the
       // active slot, so focusing while createSlot is still in flight puts the
-      // caret on the OLD session and anything typed lands in its draft. The
-      // background-tab case never focuses: the user stays where they are.
+      // caret on the OLD session and anything typed lands in its draft. A tab
+      // gesture focuses below, after the switch, and only in the foreground.
       if (focus && !inNewTab) focusComposer()
+      // A plain create activated the new slot, so leave Split View and show it,
+      // the same answer a row click gets (#21935). The background-tab gesture
+      // skips this: it keeps the user on their current session, so the split
+      // must stay. Guard on the live activeSlot: `createSlot.fulfilled`
+      // declines to activate when the user moved to another session while the
+      // create was pending (switched-away guard, lifecycle.ts), leaving
+      // activeSlot on the OLD session. Firing the callback then would leave
+      // Split View and navigate the embedded Sessions frame onto a session the
+      // user never opened (#21959 review). Only fire it when the new slot is
+      // the one now active.
+      if (!inNewTab && slot?.key && store.getState().chat.activeSlot === slot.key) onSelectSlot?.(slot.key)
       if (slot?.key && columnId) {
         // Board view: also drop the new session into the column it was created
         // from, so a status-lane column shows it immediately instead of the
@@ -101,9 +172,19 @@ export function useFolderChatCreate({ folders, mode, dispatch, dropSlotMutation,
         dropSlotMutation.mutate({ slot: slot.key, columnId })
       }
       if (inNewTab && onOpenSlotInNewTab && slot?.key) {
-        // Background: adds a tab beside the active one without switching, same
-        // as the header New button's gesture (see createChatMutation).
-        onOpenSlotInNewTab(slot.key, { background: true })
+        // Adds a tab beside the active one; `foreground` also switches to it,
+        // same as the header New button's gestures (see createChatMutation).
+        onOpenSlotInNewTab(slot.key, { background: inNewTab === 'background' })
+        // A foreground tab switches the view onto the new session, so leave
+        // Split View too — the same guarded callback the header New fires
+        // after its own foreground switch (createChatMutation). The plain
+        // branch above handles `false`; `background` keeps the user where they
+        // are, so it keeps the split. Guard on the live activeSlot for the
+        // switched-away case (see the plain branch): a slow foreground switch
+        // the user raced leaves activeSlot off the new slot, and firing then
+        // would strand them on a session they did not open.
+        if (inNewTab === 'foreground' && store.getState().chat.activeSlot === slot.key) onSelectSlot?.(slot.key)
+        if (focus && inNewTab === 'foreground') focusComposer()
       }
     },
     onError: (err: unknown, { folderId, columnId, attempt }: CreateChatInFolderVars) => {
@@ -133,6 +214,9 @@ export function useFolderChatCreate({ folders, mode, dispatch, dropSlotMutation,
       const report = typeof raw === 'string' ? findReport(raw) : undefined
       setFolderCreateError({ folderId, columnId, message, title, report, offerSettings: isStaleProjectDir })
     },
+    onSettled: (_data, _err, { folderId, columnId, memoryMode, inNewTab }: CreateChatInFolderVars) => {
+      if (!inNewTab) plainCreatePendingRef.current.delete(plainCreateKey(folderId, columnId, memoryMode))
+    },
   })
   /** The offline create refusal, in one place: the folder-row `+` buttons reach
    *  it through `createChatInFolder`, and the header split button's primary
@@ -140,7 +224,7 @@ export function useFolderChatCreate({ folders, mode, dispatch, dropSlotMutation,
   const refuseCreateOffline = useCallback(() => {
     setFolderOfflineNotice(i18nT('utils.offline.gateway_offline_reconnect', { action: i18nT('utils.offline.create_sessions') }))
   }, [setFolderOfflineNotice])
-  const createChatInFolder = useCallback((folderId: string, opts?: { columnId?: string; focus?: boolean; memoryMode?: 'incognito' | 'temporary'; inNewTab?: boolean }) => {
+  const createChatInFolder = useCallback((folderId: string, opts?: { columnId?: string; focus?: boolean; memoryMode?: 'incognito' | 'temporary'; inNewTab?: NewTabMode }) => {
     // Refused at the SINK: the menu rows that reach here are gated one by one,
     // but the folder-row quick-create `+` buttons call it too. Gating here covers
     // every caller at once, including the ancestor-expanding PATCH loop below,
@@ -148,6 +232,23 @@ export function useFolderChatCreate({ folders, mode, dispatch, dropSlotMutation,
     if (!connected) {
       refuseCreateOffline()
       return
+    }
+    // A plain create that repeats one still in flight (same folder, board lane
+    // and memory mode) is dropped, so a double or triple click on a folder's
+    // "+" makes one session. The check sits at the sink so the tree "+", the
+    // board-lane "+" and the create menu's folder rows all follow it. Any
+    // other create, such as a "+" on another folder or lane, or New incognito
+    // chat on the same folder, is a separate request and goes through. It
+    // reads only this hook's pending marks, not the global
+    // `creatingSlot`: that flag is also set by header New and by background
+    // creates, and a folder "+" during one of those is a separate request the
+    // user expects to see. The tab gestures (Cmd/Ctrl-click, middle-click) are
+    // exempt: each one opens its own new tab, so a quick run of them is a
+    // batch of tabs on purpose.
+    if (!opts?.inNewTab) {
+      const key = plainCreateKey(folderId, opts?.columnId, opts?.memoryMode)
+      if (plainCreatePendingRef.current.has(key)) return
+      plainCreatePendingRef.current.add(key)
     }
     // A nested folder selected from the create menu may be hidden behind one
     // or more collapsed ancestors. Expand the complete path optimistically so
@@ -171,13 +272,19 @@ export function useFolderChatCreate({ folders, mode, dispatch, dropSlotMutation,
 }
 
 /** The New chat variants and the Crew Members door. */
-export function useSessionCreate({ setNewChatError, dispatch, mode, onOpenSlotInNewTab, setRemoteCrewError, setNewChatMenuOpen, onOpenPeerSession }: {
+export function useSessionCreate({ setNewChatError, dispatch, mode, onOpenSlotInNewTab, onSelectSlot, setRemoteCrewError, setNewChatMenuOpen, onOpenPeerSession }: {
   /** Where a crew window opens on a host with no chat pane (see ChatSidebar). */
   onOpenPeerSession?: (instanceId: string, key: string) => void
   setNewChatError: Dispatch<SetStateAction<string>>
   dispatch: AppDispatch
   mode: string | undefined
   onOpenSlotInNewTab: ((key: string, opts?: { background?: boolean | undefined; } | undefined) => void) | undefined
+  // Leave Split View on a plain create so the new, now-active session shows
+  // instead of the old split (#21935). Same callback a row click fires; the
+  // background-tab gesture does not fire it (the split is kept on purpose).
+  // A remote-crew create never fires it: nothing is created on this machine,
+  // so there is no local slot to show in place of the split.
+  onSelectSlot: ((key: string) => void) | undefined
   setRemoteCrewError: Dispatch<SetStateAction<string>>
   setNewChatMenuOpen: Dispatch<SetStateAction<boolean>>
 }) {
@@ -218,28 +325,42 @@ export function useSessionCreate({ setNewChatError, dispatch, mode, onOpenSlotIn
 
   // Create default chat session mutation.
   //
-  // `inNewTab` is the New button's modifier/middle-click gesture — the same
-  // "open as a BACKGROUND tab" the session rows honour, applied to a session
-  // that does not exist yet. A plain create activates the new slot, and the
-  // tab strip's invariant then REPLACES the tab the user was on with it (see
-  // useSessionTabs), which is exactly what the gesture asks not to happen. So
-  // the create runs with `activate: false` — the slot is registered but focus
-  // stays put — and on success the key is handed to `onOpenSlotInNewTab` in
-  // background mode, which adds a tab beside the active one without switching.
+  // `inNewTab` is the New button's tab gesture. A plain create activates the
+  // new slot, and the tab strip's invariant then REPLACES the tab the user was
+  // on with it (see useSessionTabs). Both tab gestures keep that tab: the
+  // create runs with `activate: false`, so nothing is replaced, and on success
+  // the key goes to `onOpenSlotInNewTab`, which adds a tab beside the active
+  // one. `foreground` (Cmd/Ctrl+Shift-click) then switches to the new tab;
+  // `background` (Cmd/Ctrl-click or middle-click) leaves the user where they
+  // are, as on a session row. Switching only after the
+  // tab exists is what keeps the old tab: activating first would replace it.
   // The click site only sets `inNewTab` when that callback exists (embedded
   // hosts have no tab strip), so a modifier click there stays a plain create.
   const createChatMutation = useMutation({
-    mutationFn: ({ inNewTab }: { inNewTab: boolean }) => {
+    mutationFn: ({ inNewTab }: { inNewTab: NewTabMode }) => {
       setNewChatError('')
-      return dispatch(createSlot({ mode: mode || '', activate: !inNewTab })).unwrap()
+      return createSlotWithOrigin(dispatch, { mode: mode || '', activate: !inNewTab, defaultFolder: true })
     },
-    onSuccess: (slot, { inNewTab }) => {
+    onSuccess: ({ slot, origin }, { inNewTab: requested }) => {
+      const inNewTab = settledTabMode(store, requested, origin)
       if (inNewTab && onOpenSlotInNewTab) {
+        onOpenSlotInNewTab(slot.key, { background: inNewTab === 'background' })
         // Background: the user stays on their transcript, so its composer keeps
         // whatever focus it had — no `focusComposer`, same as the row gesture.
-        onOpenSlotInNewTab(slot.key, { background: true })
-        return
+        if (inNewTab === 'background') return
+        // Foreground: the new chat is now in view, but its create ran with
+        // `activate: false`, so createSlot asked the sidebar for nothing. Open
+        // the default folder's path here, or its row stays hidden in a
+        // collapsed folder, as for a plain New.
+        dispatch(requestSlotFolderOpen({ key: slot.key, folder_id: slot.folder_id }))
       }
+      // Plain create activated the new slot: leave Split View so it shows,
+      // the same answer a row click gets (#21935). Guard on the live
+      // activeSlot — see useFolderChatCreate's onSuccess: a user who switched
+      // away during a slow create leaves activeSlot on the old session, and
+      // firing the callback then would strand them on a session they did not
+      // open (#21959 review).
+      if (slot?.key && store.getState().chat.activeSlot === slot.key) onSelectSlot?.(slot.key)
       focusComposer()
     },
     onError: onNewChatError,
@@ -261,7 +382,7 @@ export function useSessionCreate({ setNewChatError, dispatch, mode, onOpenSlotIn
   const createRemoteChatMutation = useMutation({
     mutationFn: async (instanceId: string) => {
       setRemoteCrewError('')
-      const originSlot = store.getState().chat?.activeSlot ?? null
+      const origin = captureForkOrigin(store.getState())
       const originWindow = currentCrewWindow()
       const caps = await api.instancesCapabilities(instanceId)
       if (!caps.version_match) {
@@ -274,7 +395,7 @@ export function useSessionCreate({ setNewChatError, dispatch, mode, onOpenSlotIn
       void queryClient.invalidateQueries({ queryKey: ['instance-slots', instanceId] })
       // Same rule as createSlot.fulfilled: a user who moved during the
       // round-trip is not yanked onto the new session.
-      const moved = (store.getState().chat?.activeSlot ?? null) !== originSlot || currentCrewWindow() !== originWindow
+      const moved = !forkMayOpen(store.getState(), origin) || currentCrewWindow() !== originWindow
       if (moved) return
       if (onOpenPeerSession) onOpenPeerSession(instanceId, created.key)
       else openCrewWindow({ instanceId, key: created.key })
@@ -294,9 +415,17 @@ export function useSessionCreate({ setNewChatError, dispatch, mode, onOpenSlotIn
   const createEphemeralChatMutation = useMutation({
     mutationFn: (memoryMode: 'incognito' | 'temporary') => {
       setNewChatError('')
-      return dispatch(createSlot({ mode: mode || '', memory_mode: memoryMode })).unwrap()
+      return dispatch(createSlot({ mode: mode || '', memory_mode: memoryMode, defaultFolder: true })).unwrap()
     },
-    onSuccess: focusComposer,
+    // Incognito/temporary always activate the new slot, so always leave Split
+    // View and show it, then focus the composer (#21935). Guard on the live
+    // activeSlot (see createChatMutation): a switched-away create leaves
+    // activeSlot on the old session, and firing the callback then would strand
+    // the user on a session they did not open (#21959 review).
+    onSuccess: (slot) => {
+      if (slot?.key && store.getState().chat.activeSlot === slot.key) onSelectSlot?.(slot.key)
+      focusComposer()
+    },
     onError: onNewChatError,
   })
   return {

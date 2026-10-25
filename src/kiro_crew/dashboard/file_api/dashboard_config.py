@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         _body_err_code,
         _sel,
         bytes_to_mb_figure,
+        default_session_folder_choosable,
         knowledge_ceiling_bytes,
         link_pattern_url_ok,
         logger,
@@ -91,10 +92,13 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             "link_patterns",
             "mcp_app_panel",
             "auto_open_git_panel",
+            "side_panel_always_open",
+            "side_panel_pin_summary",
             "folder_suggestions_enabled",
             "topic_tags_enabled",
             "session_card_source_links",
             "session_folder_root",
+            "default_session_folder",
             "model_picker_hidden_models_add",
             "model_picker_hidden_models_remove",
         }
@@ -109,7 +113,9 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             "gitlab_hosts",
             "jira_hosts",
             "github_hosts",
+            "bitbucket_server_hosts",
             "social_share_enabled",
+            "social_share_sites",
             "decisions_enabled",
             "model_picker_hidden_models",
             "model_picker_configured",
@@ -437,6 +443,34 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
                     status=400,
                 )
             updates["auto_open_git_panel"] = val
+        if "side_panel_always_open" in body:
+            val = body["side_panel_always_open"]
+            if not isinstance(val, bool):
+                _sel().log_tool_invocation(
+                    session_key="dashboard", tool_name="dashboard_config_write", outcome="failure"
+                )
+                return web.json_response(
+                    {
+                        "error": "side_panel_always_open must be a boolean",
+                        "code": "invalid_side_panel_always_open",
+                    },
+                    status=400,
+                )
+            updates["side_panel_always_open"] = val
+        if "side_panel_pin_summary" in body:
+            val = body["side_panel_pin_summary"]
+            if not isinstance(val, bool):
+                _sel().log_tool_invocation(
+                    session_key="dashboard", tool_name="dashboard_config_write", outcome="failure"
+                )
+                return web.json_response(
+                    {
+                        "error": "side_panel_pin_summary must be a boolean",
+                        "code": "invalid_side_panel_pin_summary",
+                    },
+                    status=400,
+                )
+            updates["side_panel_pin_summary"] = val
         if "session_card_source_links" in body:
             val = body["session_card_source_links"]
             if not isinstance(val, bool):
@@ -485,6 +519,39 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
                         status=400,
                     )
                 updates["session_folder_root"] = resolved
+        if "default_session_folder" in body:
+            val = body["default_session_folder"]
+            if not isinstance(val, str):
+                _sel().log_tool_invocation(
+                    session_key="dashboard", tool_name="dashboard_config_write", outcome="failure"
+                )
+                return web.json_response(
+                    {
+                        "error": "default_session_folder must be a folder ID or empty",
+                        "code": "invalid_default_session_folder",
+                    },
+                    status=400,
+                )
+            val = val.strip()
+            # Same round-trip rule as session_folder_root: an unchanged value is
+            # not a choice, so a folder deleted since it was chosen cannot make an
+            # unrelated toggle save fail. Creation ignores a missing folder anyway.
+            if val != cfg.dashboard.default_session_folder:
+                if val and not await default_session_folder_choosable(request.app["state"], val):
+                    _sel().log_tool_invocation(
+                        session_key="dashboard",
+                        tool_name="dashboard_config_write",
+                        outcome="failure",
+                        error="invalid_default_session_folder",
+                    )
+                    return web.json_response(
+                        {
+                            "error": "default_session_folder must name one of your folders",
+                            "code": "invalid_default_session_folder",
+                        },
+                        status=400,
+                    )
+                updates["default_session_folder"] = val
         if "model_picker_hidden_models_add" in body:
             hidden_model_add, error_response = _validated_hidden_model_list(
                 "model_picker_hidden_models_add"
@@ -633,6 +700,11 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
     from kiro_crew.decisions.capability import denied_sides
 
     social_share_denied = await asyncio.to_thread(social_share.is_share_denied)
+    # Which share sites the dialog may offer (the policy's ``sites`` list). Not
+    # read when the entry itself is withdrawn: no site could be offered then.
+    share_sites = (
+        [] if social_share_denied else await asyncio.to_thread(social_share.permitted_sites)
+    )
     # Same shape, same reason: the Decisions feature-preview card is drawn only when
     # the ceiling permits the seam, and this endpoint is the only place the dashboard
     # can learn that. Presentation, not the control -- the consent PUT and the gate's
@@ -656,8 +728,11 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             "session_grid": cfg.dashboard.session_grid,
             "mcp_app_panel": cfg.dashboard.mcp_app_panel,
             "auto_open_git_panel": cfg.dashboard.auto_open_git_panel,
+            "side_panel_always_open": cfg.dashboard.side_panel_always_open,
+            "side_panel_pin_summary": cfg.dashboard.side_panel_pin_summary,
             "session_card_source_links": cfg.dashboard.session_card_source_links,
             "session_folder_root": cfg.dashboard.session_folder_root,
+            "default_session_folder": cfg.dashboard.default_session_folder,
             "tail_fork_enabled": cfg.dashboard.tail_fork_enabled,
             "link_previews": cfg.dashboard.link_previews,
             "folder_suggestions_enabled": cfg.dashboard.folder_suggestions_enabled,
@@ -675,6 +750,8 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             # And for GitHub Enterprise: github.com is always recognized, any
             # other GitHub host only when the operator listed it.
             "github_hosts": list(cfg.dashboard.github_hosts),
+            # And for Bitbucket Server, which has no public default host at all.
+            "bitbucket_server_hosts": list(cfg.dashboard.bitbucket_server_hosts),
             # Read-only: the per-file upload ceiling (`dashboard.upload_max_mb`).
             # Both composers pre-check against it and name it in their refusal;
             # the upload handlers enforce it again server-side.
@@ -691,6 +768,10 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             # withdraws the "Share as image" menu entry; there is no toggle behind
             # it, so nothing here is writable.
             "social_share_enabled": not social_share_denied,
+            # Read-only: the share site ids (`x`, `linkedin`) the ceiling permits.
+            # The dialog draws only these buttons and re-reads this list before it
+            # opens a site.
+            "social_share_sites": share_sites,
             # Read-only: the `capabilities.decisions` governance answer. False hides
             # the Decisions (Jev) feature-preview card; the owner's own switch is
             # the keystone behind `/api/decisions/consent`, never a field here.

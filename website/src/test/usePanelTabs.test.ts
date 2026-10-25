@@ -1,12 +1,13 @@
 /**
  * Tests for usePanelTabs — the tabbed side panel state model. Pins the
  * tab-strip contracts: singleton view tabs, document dedupe/focus,
- * replace-in-place opens, patch-without-focus, neighbor refocus on close,
- * and reordering.
+ * replace-in-place opens, patch-without-focus, return-to-last-viewed refocus
+ * on close, and reordering.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
-import { usePanelTabs, openPanelView, __resetPanelTabs, useAnyLiveAppTab, useAllAppTabs, evictDocumentBodies, purgeDocumentBodiesForRedactionChange, documentBodyEpochNow } from '../hooks/usePanelTabs'
+import { usePanelTabs, openPanelView, __resetPanelTabs, useAnyLiveAppTab, useAllAppTabs, evictDocumentBodies, purgeDocumentBodiesForRedactionChange, documentBodyEpochNow, takePlainPanelShow, notePanelStoppedShowing, notePanelShown } from '../hooks/usePanelTabs'
+import * as panelTabsModule from '../hooks/usePanelTabs'
 import { shouldMountSidePanel, isSidePanelHidden } from '../pages/chat/sidePanelMount'
 
 // App-contributed tab descriptors are an ARGUMENT to `usePanelTabs`, not something
@@ -441,34 +442,81 @@ describe('usePanelTabs', () => {
     expect(result.current.tabs).toHaveLength(2)
   })
 
-  it('closeTab refocuses the left neighbor (then right, then null)', () => {
+  it('closeTab returns focus to the tab viewed before the closed one, not to its neighbour', () => {
     const { result } = renderHook(() => usePanelTabs(null, mock.descriptors))
     act(() => result.current.openView('files'))
     act(() => result.current.openView('logs'))
     act(() => result.current.openView('side'))
+    act(() => result.current.setActive('files'))
+    act(() => result.current.openView('git'))
+    // Strip: files, logs, side, git. Viewed last to first: git, files, side, logs.
+    expect(result.current.tabs.map(t => t.id)).toEqual(['files', 'logs', 'side', 'git'])
+
+    // Back to Files, which was viewed before Git; Side is only Git's neighbour.
+    act(() => result.current.closeTab('git'))
+    expect(result.current.activeId).toBe('files')
+    // Closing again keeps walking back: Side, not Files' neighbour Logs.
+    act(() => result.current.closeTab('files'))
     expect(result.current.activeId).toBe('side')
 
-    // Close active (rightmost) -> left neighbor takes focus.
-    act(() => result.current.closeTab('side'))
-    expect(result.current.activeId).toBe('logs')
-
     // Close a NON-active tab -> focus untouched.
-    act(() => result.current.closeTab('files'))
-    expect(result.current.activeId).toBe('logs')
+    act(() => result.current.closeTab('logs'))
+    expect(result.current.activeId).toBe('side')
 
     // Close the last tab -> nothing focused.
-    act(() => result.current.closeTab('logs'))
+    act(() => result.current.closeTab('side'))
     expect(result.current.tabs).toEqual([])
     expect(result.current.activeId).toBeNull()
   })
 
-  it('closeTab on the active leftmost tab focuses the (new) first tab', () => {
+  it('closeTab falls back to the left neighbour, then the right, when no other tab was viewed', () => {
     const { result } = renderHook(() => usePanelTabs(null, mock.descriptors))
-    act(() => result.current.openView('files'))
     act(() => result.current.openView('logs'))
-    act(() => result.current.setActive('files'))
-    act(() => result.current.closeTab('files'))
+    // `syncPinned` adds Changes and Files without focusing them: Logs alone was viewed.
+    act(() => result.current.syncPinned(['changes', 'files']))
+    const [changes, files, logs] = result.current.tabs
+    act(() => result.current.setOrder([changes, logs, files]))
     expect(result.current.activeId).toBe('logs')
+    act(() => result.current.closeTab('logs'))
+    expect(result.current.activeId).toBe('changes')
+    act(() => result.current.closeTab('changes'))
+    expect(result.current.activeId).toBe('files')
+  })
+
+  it('the focus history survives a reload, without the tabs storage drops', async () => {
+    const stored = (): { recent?: unknown[] } => JSON.parse(localStorage.getItem('mc-panel-tabs:chat-h')!)
+    vi.useFakeTimers()
+    try {
+      const { result } = renderHook(() => usePanelTabs('chat-h', mock.descriptors))
+      act(() => result.current.openView('files'))
+      act(() => result.current.openView('logs'))
+      act(() => result.current.openDiff('/a.ts', 'new', 'old'))
+      act(() => result.current.setActive('files'))
+      act(() => result.current.openView('git'))
+      act(() => { vi.advanceTimersByTime(500) })
+      // A diff tab is not persisted, so its id leaves the stored history too.
+      expect(stored().recent).toEqual(['logs', 'files', 'git'])
+    } finally {
+      vi.useRealTimers()
+    }
+    // A history written by another build is read as ids only.
+    localStorage.setItem('mc-panel-tabs:chat-h', JSON.stringify({ ...stored(), recent: ['logs', 7, 'files', 'git'] }))
+    vi.resetModules()
+    const fresh = await import('../hooks/usePanelTabs')
+    vi.useFakeTimers()
+    try {
+      const { result } = renderHook(() => fresh.usePanelTabs('chat-h', mock.descriptors))
+      expect(result.current.activeId).toBe('git')
+      act(() => result.current.closeTab('git'))
+      expect(result.current.activeId).toBe('files')
+      act(() => result.current.closeTab('files'))
+      expect(result.current.activeId).toBe('logs')
+      act(() => { vi.advanceTimersByTime(500) })
+      expect(stored().recent).toEqual(['logs'])
+    } finally {
+      vi.useRealTimers()
+      fresh.__resetPanelTabs()
+    }
   })
 
   it('closeAll clears tabs and focus; setOrder replaces the strip order wholesale', () => {
@@ -688,6 +736,132 @@ describe('usePanelTabs — per-slot isolation', () => {
     expect(result.current.tabs.map(t => t.id)).toEqual(['logs', 'side'])
   })
 
+  it('syncPinned pins leading views ahead of the block, and keeps one that leaves as an ordinary tab', () => {
+    const { result } = renderHook(() => usePanelTabs(null, mock.descriptors))
+    act(() => result.current.openView('logs'))
+    act(() => result.current.syncPinned(['changes', 'artifacts', 'files'], ['summary']))
+    expect(result.current.tabs.map(t => t.id)).toEqual(['summary', 'changes', 'artifacts', 'files', 'logs'])
+    act(() => result.current.syncPinned(['changes', 'artifacts', 'files']))
+    expect(result.current.tabs.map(t => t.id)).toEqual(['changes', 'artifacts', 'files', 'summary', 'logs'])
+  })
+
+  it('takes a plain show once, and a stop re-arms it', () => {
+    renderHook(() => usePanelTabs('plain-slot', mock.descriptors))
+    // Never shown in this page session: a plain open (a reload).
+    expect(takePlainPanelShow('plain-slot')).toBe(true)
+    // Once per show: a remount of the same show lands nothing.
+    expect(takePlainPanelShow('plain-slot')).toBe(false)
+    notePanelStoppedShowing('plain-slot')
+    expect(takePlainPanelShow('plain-slot')).toBe(true)
+  })
+
+  it('ends a show when the panel reports another chat\'s strip', () => {
+    notePanelShown('plain-slot')
+    expect(takePlainPanelShow('plain-slot')).toBe(true)
+    notePanelShown('other-slot')
+    expect(takePlainPanelShow('plain-slot')).toBe(true)
+  })
+
+  it('ends nothing when the panel reports the same strip again', () => {
+    notePanelShown('plain-slot')
+    expect(takePlainPanelShow('plain-slot')).toBe(true)
+    notePanelShown('plain-slot')
+    expect(takePlainPanelShow('plain-slot')).toBe(false)
+  })
+
+  it('ends a show when the panel reports no strip, as when it closes', () => {
+    notePanelShown('plain-slot')
+    expect(takePlainPanelShow('plain-slot')).toBe(true)
+    notePanelShown(null)
+    expect(takePlainPanelShow('plain-slot')).toBe(true)
+  })
+
+  it('ends a show when the first report after the chat page was away names another chat', () => {
+    // The page's last report before it unmounted.
+    notePanelShown('plain-slot')
+    expect(takePlainPanelShow('plain-slot')).toBe(true)
+    // The chat changed with no page mounted, so nothing reported in between:
+    // the page mounts again on the other chat and reports it first.
+    notePanelShown('other-slot')
+    expect(takePlainPanelShow('other-slot')).toBe(true)
+    // Back to the first chat on the page: a new show, so it lands.
+    notePanelShown('plain-slot')
+    expect(takePlainPanelShow('plain-slot')).toBe(true)
+  })
+
+  it('forgets the shown strip on reset', () => {
+    notePanelShown('plain-slot')
+    __resetPanelTabs()
+    expect(takePlainPanelShow('plain-slot')).toBe(true)
+    // Nothing is shown after the reset, so this report ends no show.
+    notePanelShown('other-slot')
+    expect(takePlainPanelShow('plain-slot')).toBe(false)
+  })
+
+  it('counts asked-for tabs, the one already shown included, but not store writes or automatic opens', () => {
+    const { result } = renderHook(() => usePanelTabs('plain-slot', mock.descriptors))
+    // syncPinned writes a fresh strip's focus on its own: that is no choice.
+    act(() => result.current.syncPinned(['changes', 'artifacts', 'files']))
+    expect(result.current.activeId).toBe('changes')
+    // A discovery tab (Git, Changes or Issues for a new link) is not a choice either.
+    act(() => result.current.openView('git', { automatic: true }))
+    act(() => result.current.openView('issues', { automatic: true }))
+    expect(takePlainPanelShow('plain-slot')).toBe(true)
+    // Asking again for the tab already shown still decides the tab.
+    notePanelStoppedShowing('plain-slot')
+    act(() => result.current.setActive('issues'))
+    expect(result.current.activeId).toBe('issues')
+    expect(takePlainPanelShow('plain-slot')).toBe(false)
+    notePanelStoppedShowing('plain-slot')
+    act(() => result.current.openView('logs'))
+    expect(takePlainPanelShow('plain-slot')).toBe(false)
+    // A view opened by slot (a session row's chip, a first pin) is a choice too.
+    notePanelStoppedShowing('plain-slot')
+    act(() => openPanelView('plain-slot', 'changes'))
+    expect(takePlainPanelShow('plain-slot')).toBe(false)
+  })
+
+  /** One call of each tab opener on 'choice-slot': the hook's `open*` callbacks
+   *  and the module's `open*` exports. Every one opens a tab someone asked for,
+   *  so it must count as a tab choice (see `takePlainPanelShow`). */
+  const OPENER_CALLS: Record<string, (tabs: ReturnType<typeof usePanelTabs>) => unknown> = {
+    openView: t => t.openView('logs'),
+    openPanelTab: t => t.openPanelTab(demoTab),
+    openTerminal: t => t.openTerminal(),
+    openFile: t => t.openFile('/repo/a.md', '# a'),
+    openWorkingTreeDiff: t => t.openWorkingTreeDiff('/repo/a.md', '# a'),
+    openDiff: t => t.openDiff('/repo/a.md', '# b', '# a'),
+    openArtifact: t => t.openArtifact({ slug: 'doc', kind: 'markdown' }, '# doc'),
+    openFolder: t => t.openFolder('/repo/src'),
+    openApp: t => t.openApp('tool-call-1', 'App'),
+    openPanelView: () => openPanelView('choice-slot', 'issues'),
+  }
+
+  it('counts every exported tab opener as a tab choice', () => {
+    const { result } = renderHook(() => usePanelTabs('choice-slot', mock.descriptors))
+    const names = [...Object.entries(result.current), ...Object.entries(panelTabsModule)]
+      .filter(([name, value]) => name.startsWith('open') && typeof value === 'function')
+      .map(([name]) => name)
+    expect(names.filter(name => !(name in OPENER_CALLS)),
+      'usePanelTabs exports tab openers this test does not classify. Add each one to OPENER_CALLS, '
+      + 'so this test checks that it counts as a tab choice. An opener that must not count needs its own case here.',
+    ).toEqual([])
+    expect(Object.keys(OPENER_CALLS).filter(name => !names.includes(name)),
+      'OPENER_CALLS lists openers that usePanelTabs no longer exports: remove them.',
+    ).toEqual([])
+    // An automatic open (a tab created for discovery) is not a choice, so a
+    // stopped show stays plain.
+    notePanelStoppedShowing('choice-slot')
+    act(() => result.current.openView('git', { automatic: true }))
+    expect(result.current.activeId).toBe('git')
+    expect(takePlainPanelShow('choice-slot')).toBe(true)
+    for (const name of names) {
+      notePanelStoppedShowing('choice-slot')
+      act(() => { OPENER_CALLS[name](result.current) })
+      expect.soft(takePlainPanelShow('choice-slot'), `${name} must count as a tab choice`).toBe(false)
+    }
+  })
+
   it('openView("git") creates a singleton tab titled "Git"', () => {
     const { result } = renderHook(() => usePanelTabs(null, mock.descriptors))
     act(() => result.current.openView('git'))
@@ -785,6 +959,31 @@ describe('openPanelView', () => {
       mock.descriptors = []
       rerender()
       expect(result.current.tabs.map(t => t.kind)).toEqual(['files'])
+      expect(result.current.activeId).toBe('files')
+    })
+
+    it('closeTab skips a tab whose app is gone and keeps it stored for when the app returns', () => {
+      mock.descriptors = [demoTab]
+      const { result, rerender } = renderHook(() => usePanelTabs('slot-skip', mock.descriptors))
+      act(() => result.current.openView('files'))
+      act(() => result.current.openView('logs'))
+      act(() => result.current.setActive('files'))
+      act(() => result.current.openPanelTab(demoTab))
+      act(() => result.current.openView('git'))
+      // Viewed last to first: Git, the app tab, Files, Logs. Then the app goes away.
+      mock.descriptors = []
+      rerender()
+      expect(result.current.tabs.map(t => t.id)).toEqual(['files', 'logs', 'git'])
+
+      // Back to Files, the last viewed tab the strip can show. Returning to the
+      // hidden app tab would show Logs, the last visible tab, instead.
+      act(() => result.current.closeTab('git'))
+      expect(result.current.activeId).toBe('files')
+
+      // The app comes back: its tab is still stored, and focus stays on Files.
+      mock.descriptors = [demoTab]
+      rerender()
+      expect(result.current.tabs.map(t => t.id)).toEqual(['files', 'logs', demoTab.kind])
       expect(result.current.activeId).toBe('files')
     })
 

@@ -54,14 +54,17 @@ from kiro_crew.acp.types import (  # noqa: F401
     ACP_BACKENDS_COMPACT,
     ACP_BACKENDS_CONTEXT_RECYCLE,
     ACP_BACKENDS_EFFORT_FROM_ADVERTISED_OPTION,
+    ACP_BACKENDS_EFFORT_OVERLAY,
 )
 from kiro_crew.acp.types import (
     ACP_BACKENDS_HARNESS_MANAGED_COMPACTION as ACP_BACKENDS_HARNESS_MANAGED,
 )
 from kiro_crew.acp.types import (  # noqa: F401
     ACP_BACKENDS_HARNESS_OWNED_SESSIONS,
+    ACP_BACKENDS_KIRO_FAMILY,
     ACP_BACKENDS_KIRO_SLASH_COMMANDS,
     ACP_BACKENDS_KNOWN,
+    ACP_BACKENDS_MATE_WORKER_KIT,
     ACP_BACKENDS_MEMBER_CAPABILITIES,
     ACP_BACKENDS_MEMBER_TOOL_LIMITS,
     ACP_BACKENDS_SESSION_SHARING,
@@ -196,6 +199,10 @@ class AcpProvider(LLMProvider):
             kwargs["agent"] = agent
         self.member_context = member_context
         self.memory_mode = memory_mode
+        # The name kiro-cli is asked for in place of ``agent`` (an app's launch
+        # copy, ``apps.agent_launch``), set by session allocation; ``agent``
+        # stays the session's identity. Read by the Kiro runtime start only.
+        self.app_launch_agent = ""
         # Kept on the provider, not only on the placeholder client: on the kiro
         # path ``_start_kiro_runtime_impl`` replaces that client with an
         # ``AcpRuntime`` it constructs itself, and a dedicated subagent's
@@ -226,6 +233,8 @@ class AcpProvider(LLMProvider):
         # consumers (dashboard chat) BEFORE startup; re-applied when
         # _start_kiro_runtime_impl swaps in the real AcpSessionProvider.
         self._child_fidelity_aware: bool = False
+        # Same shape for the MCP elicitation opt-in (see accepts_elicitation).
+        self._accepts_elicitation: bool = False
         # Canonical Kiro Crew identity (a cfg.agents key), resolved by the
         # factory at provider-creation time — ``agent`` above is the bound kiro
         # template, a different namespace. Threaded into the kiro-shared
@@ -274,19 +283,24 @@ class AcpProvider(LLMProvider):
             if tool_search_min_tokens is None
             else tool_search_min_tokens
         )
-        if self._client.backend in ACP_BACKENDS_KIRO_SLASH_COMMANDS:
-            # Recover overlay-persisted levels (server-restart resilience) and
-            # write the overlay BEFORE the first spawn so kiro-cli reads it on
-            # session/new. Caller-provided overrides win — only fill gaps.
+        if self._client.backend in ACP_BACKENDS_EFFORT_OVERLAY:
+            # Read back the levels the overlay already holds, so after a gateway
+            # restart the map names what kiro-cli will run. Caller-provided
+            # overrides win — only fill gaps.
             #
-            # The overlay set, not the transport set: the file belongs to the kiro
-            # family, and a harness that shares the runtime without reading it
-            # would seed its effort map out of another harness's file.
+            # The overlay's own readers only. The file is keyed by work dir, so
+            # every session in one project shares it; read back by a harness that
+            # never opens it (KAS), it would start a new chat at whatever level
+            # another chat in the same work dir picked last. Such a harness takes
+            # its level from the factory alone.
             try:
                 for m, lvl in _read_cli_overlay(self._client._work_dir).items():
                     self._effort_per_model.setdefault(m, lvl)
             except Exception:
                 logger.debug("ACP effort overlay recovery failed", exc_info=True)
+        if self._client.backend in ACP_BACKENDS_KIRO_FAMILY:
+            # Write the overlay BEFORE the first spawn so kiro-cli reads it on
+            # session/new. Each writer is scoped to the harnesses that read its keys.
             self._apply_effort_overlay()
             self._apply_tool_search_overlay()
 
@@ -330,6 +344,32 @@ class AcpProvider(LLMProvider):
                 pass
 
     @property
+    def accepts_elicitation(self) -> bool:
+        """See AcpSessionHandle.accepts_elicitation.
+
+        Stored here and forwarded to the live inner client for the same reason
+        ``child_fidelity_aware`` is: the kiro backend's placeholder client is
+        replaced at runtime startup, and the stored value is re-applied then.
+        """
+        return self._accepts_elicitation
+
+    @accepts_elicitation.setter
+    def accepts_elicitation(self, value: bool) -> None:
+        self._accepts_elicitation = bool(value)
+        inner = getattr(self, "_client", None)
+        if inner is not None and hasattr(inner, "accepts_elicitation"):
+            try:
+                inner.accepts_elicitation = bool(value)
+            except Exception:  # pragma: no cover - read-only shapes
+                pass
+
+    async def answer_elicitation(
+        self, request_id: str | int, action: str, content: dict[str, Any] | None = None
+    ) -> bool:
+        """Answer a pending MCP elicitation on the inner client."""
+        return await self._client.answer_elicitation(request_id, action, content)
+
+    @property
     def model_pin_refused(self) -> str:
         """The pinned model the adapter refused at startup, or ``""``.
 
@@ -347,6 +387,18 @@ class AcpProvider(LLMProvider):
         Set when the base model applied but its effort half did not.
         """
         value = self._client.model_pin_partial
+        return value if isinstance(value, str) else ""
+
+    def settings_withheld_cause(self) -> str:
+        """Forward the client's live answer (see ``AcpClient.settings_withheld_cause``).
+
+        Only the claude shape (a raw ``AcpClient``) seeds the settings file; any
+        other client shape, or a non-string answer, reads as ``""``.
+        """
+        read = getattr(self._client, "settings_withheld_cause", None)
+        if not callable(read):
+            return ""
+        value = read()
         return value if isinstance(value, str) else ""
 
     @property
@@ -401,6 +453,19 @@ class AcpProvider(LLMProvider):
         attribute, so one read covers them.
         """
         return str(getattr(self._client, "agent_version", "") or "")
+
+    @property
+    def steer_upgrade_notice(self) -> str:
+        """The upgrade notice when this session's adapter is too old to steer, else ``""``.
+
+        Read off :attr:`agent_version`, so ``""`` before the handshake and for an
+        adapter that reported no readable version.
+        """
+        from kiro_crew.acp.client_turn_control import steer_version_issue
+
+        return steer_version_issue(
+            str(getattr(self._client, "backend", "") or ""), self.agent_version
+        )
 
     @property
     def cwd(self) -> str:
@@ -525,9 +590,10 @@ class AcpProvider(LLMProvider):
 
         This answers ONE question, the transport, and it is worth saying what it
         does not answer. Membership does not imply the kiro-family spawn
-        conventions: the cli.json effort and Tool Search overlay is gated on
-        ``ACP_BACKENDS_KIRO_SLASH_COMMANDS`` at every site that reads, writes or
-        clears it, because codex runs here and reads no such file. Nor does it
+        conventions: the cli.json overlay is gated on its readers' own sets
+        (``ACP_BACKENDS_EFFORT_OVERLAY``, ``ACP_BACKENDS_TOOL_SEARCH_OVERLAY``) at
+        every site that reads, writes or clears it, because codex and KAS run here
+        and read no such file. Nor does it
         imply that a session can be disposed — that is
         ``ACP_BACKENDS_SESSION_EVICTION``, a separate claim earned by a measured
         teardown verb, and the reason the background path asks its own question
@@ -629,7 +695,7 @@ class AcpProvider(LLMProvider):
 
     @property
     def member_capabilities_supported(self) -> bool:
-        """Full saved member-spec loading is opt-in (harness-parity H6)."""
+        """Saved member-spec loading or projection is opt-in (harness-parity H6)."""
         return self._client.backend in ACP_BACKENDS_MEMBER_CAPABILITIES
 
     @property
@@ -638,10 +704,17 @@ class AcpProvider(LLMProvider):
         return self._client.backend in ACP_BACKENDS_MEMBER_TOOL_LIMITS
 
     @property
+    def mate_worker_kit_supported(self) -> bool:
+        """A crewmate worker's per-session kit is carried by opt-in (H6)."""
+        return self._client.backend in ACP_BACKENDS_MATE_WORKER_KIT
+
+    @property
     def loaded_capability_template(self) -> str:
-        if isinstance(self._client, AcpSessionProvider):
-            return self._client.loaded_capability_template
-        return ""
+        return self._client.loaded_capability_template
+
+    @property
+    def capability_projection_gaps(self) -> tuple[str, ...]:
+        return self._client.capability_projection_gaps
 
     @property
     def mcp_config_hot_reload(self) -> bool:
@@ -659,6 +732,25 @@ class AcpProvider(LLMProvider):
             self._client.backend, parse_kiro_cli_version(self.agent_version)
         )
 
+    @property
+    def mcp_config_wire_reinject(self) -> bool:
+        """True when this provider's LIVE session takes a re-sent MCP projection.
+
+        Answered by the inner session provider (``AcpSessionProvider``, from
+        ``ACP_BACKENDS_MCP_WIRE_REINJECT`` membership -- harness-parity H6/H14).
+        Before startup ``self._client`` is the placeholder ``AcpClient``, which
+        has no session to re-load and no such attribute, so this reads False
+        and a session still starting is reset like one that cannot apply the
+        change. Only a literal ``True`` passes, so a mock never reads as a skip.
+        """
+        return getattr(self._client, "mcp_config_wire_reinject", False) is True
+
+    def mark_mcp_config_changed(self) -> None:
+        """Hand the mark to the inner session provider; nothing to mark before startup."""
+        mark = getattr(self._client, "mark_mcp_config_changed", None)
+        if callable(mark):
+            mark()
+
     def available_models(self) -> list[dict[str, str]]:
         """Models the backend advertised at session init (may be empty).
 
@@ -675,6 +767,10 @@ class AcpProvider(LLMProvider):
         session's. The shared runtime answers the same call from its handle.
         """
         return self._client.mcp_session_report()
+
+    async def wait_for_declared_mcp(self, timeout: float) -> tuple[str, ...]:
+        """Hold the first prompt until the spec's servers report (see the client)."""
+        return await self._client.wait_for_declared_mcp(timeout)
 
     def get_valid_effort_levels(self) -> list[str]:
         """Effort levels the backend reported for the CURRENT model, in ACP order.
@@ -817,6 +913,17 @@ class AcpProvider(LLMProvider):
     def supports_refusal_steer(self) -> bool:
         """True when the inner client can steer a deny notice into a refused turn."""
         return bool(getattr(self._client, "supports_refusal_steer", False))
+
+    async def discard_unanswered_prompt(self) -> bool:
+        """The inner client's rewind of an unanswered prompt; False when it has none.
+
+        Only the session provider (KAS through the shared runtime) carries one: a
+        dedicated ``AcpClient`` keeps the failed copy.
+        """
+        discard = getattr(self._client, "discard_unanswered_prompt", None)
+        if discard is None:
+            return False
+        return await discard() is True
 
     async def new_conversation(self) -> None:
         """Clean-slate reset on the SAME warm process (no cold start).
@@ -972,6 +1079,7 @@ class AcpProvider(LLMProvider):
     cleanup_session = _acp_lifecycle.cleanup_session
     # The session's turns on its inner client: ``kiro_crew.providers.acp_turns``.
     _to_llm_event = staticmethod(_acp_turns._to_llm_event)
+    _ready_confirmed_session = _acp_turns._ready_confirmed_session
     stream = _acp_turns.stream
     stream_command = _acp_turns.stream_command
     compact = _acp_turns.compact

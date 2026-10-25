@@ -9,7 +9,8 @@ import InfoTip from '../../components/InfoTip'
 import SimpleSelect from '../../components/SimpleSelect'
 import { esc } from '../../api/helpers'
 import { findReport, parseErrorCode, parseErrorField } from '../../utils/errorReport'
-import VectorMemoryCard from './VectorMemoryCard'
+import { sessionDisplayTitle } from '../../utils/sessionDisplayTitle'
+import VectorMemoryCard, { SEMANTIC_CARD_ID } from './VectorMemoryCard'
 import EmbeddingModelCard from './EmbeddingModelCard'
 import MemoryStoreCard, {
   MEMORY_QUERY_PREFIXES,
@@ -100,7 +101,12 @@ function sourceCell(lesson: Lesson) {
   }
 }
 
-export default function MemoryTab({ refreshTrigger, selectedStore, onStoreNavigate }: { refreshTrigger: number; selectedStore?: string; onStoreNavigate?: (store: string) => void }) {
+/** `?focus=` value that lands the global Memory view on its lessons. */
+export const MEMORY_FOCUS_LESSONS = 'lessons'
+/** The Lessons card, the landing spot for that focus when vector memory is off. */
+export const LESSONS_CARD_ID = 'memory-lessons-card'
+
+export default function MemoryTab({ refreshTrigger, selectedStore, onStoreNavigate, focus }: { refreshTrigger: number; selectedStore?: string; onStoreNavigate?: (store: string) => void; focus?: string | null }) {
   const stores = useMemoryStores()
   const navigate = useNavigate()
   const leave = useGuardedLeave()
@@ -170,7 +176,7 @@ export default function MemoryTab({ refreshTrigger, selectedStore, onStoreNaviga
           }}>{i18nT('pages.kiroCrewAgentsPage.open_crew_manager')}</Btn>
         </div>
       </>}
-    </Card> : <GlobalMemoryTab refreshTrigger={refreshTrigger} onDirtyChange={setDirty} />}
+    </Card> : <GlobalMemoryTab refreshTrigger={refreshTrigger} onDirtyChange={setDirty} focusLessons={focus === MEMORY_FOCUS_LESSONS} />}
     {pendingStore !== null && <Modal open title={i18nT('memoryV2.discard_title')} onClose={() => setPendingStore(null)}><div className="flex flex-col gap-3">
       <p className="text-[13px]">{i18nT('memoryV2.discard_explanation')}</p>
       <div className="flex flex-wrap gap-2">
@@ -181,7 +187,7 @@ export default function MemoryTab({ refreshTrigger, selectedStore, onStoreNaviga
   </>
 }
 
-function GlobalMemoryTab({ refreshTrigger, onDirtyChange }: { refreshTrigger: number; onDirtyChange?: (dirty: boolean) => void }) {
+function GlobalMemoryTab({ refreshTrigger, onDirtyChange, focusLessons = false }: { refreshTrigger: number; onDirtyChange?: (dirty: boolean) => void; focusLessons?: boolean }) {
   const queryClient = useQueryClient()
   // The failed-session link leaves this tab; through the same guard as the
   // outer tab's exits, since the drafts held here are what the guard protects.
@@ -220,6 +226,19 @@ function GlobalMemoryTab({ refreshTrigger, onDirtyChange }: { refreshTrigger: nu
   const [idleHours, setIdleHours] = useState(3); const [maxDays, setMaxDays] = useState(90); const [settingsSaved, setSettingsSaved] = useState(false)
   const [migrated, setMigrated] = useState(false)
   const [vectorActive, setVectorActive] = useState(false)
+  // `vectorActive` reads false until the vector card's status answers, so the
+  // lessons landing spot is chosen only once it has: before that the Lessons
+  // card can render and then vanish under a store that keeps lessons as
+  // `lesson.*` rows in the Semantic browser instead.
+  const [vectorSettled, setVectorSettled] = useState(false)
+  const lessonsFocused = useRef(false)
+  useEffect(() => {
+    if (!focusLessons || !vectorSettled || lessonsFocused.current) return
+    const target = document.getElementById(vectorActive ? SEMANTIC_CARD_ID : LESSONS_CARD_ID)
+    if (!target) return
+    lessonsFocused.current = true
+    target.scrollIntoView({ block: 'start' })
+  }, [focusLessons, vectorSettled, vectorActive])
   const [consolidating, setConsolidating] = useState(false)
   const [consolidateMsg, setConsolidateMsg] = useState<ReactNode>('')
   const [consolidateOk, setConsolidateOk] = useState(false)
@@ -515,14 +534,14 @@ function GlobalMemoryTab({ refreshTrigger, onDirtyChange }: { refreshTrigger: nu
             report={findReport(consolidateFailure.raw)}
             footer={<>
               {consolidateFailure.session !== undefined && (
-                /* The session by its TITLE, as the sidebar names it (the key only when
-                   it has none), and a way to act on it: the same guarded navigation as
+                /* The session by its TITLE, as the sidebar names it ("Untitled session"
+                   when it has none), and a way to act on it: the same guarded navigation as
                    the tab's other exits, since a click leaves the drafts this tab holds. */
                 <span className="block text-[12px]" data-testid="consolidate-failed-session">
                   <Trans
                     i18nKey="pages.overview.memoryTab.consolidate_failed_session"
                     count={consolidateFailure.count}
-                    values={{ session: consolidateFailure.session.title || consolidateFailure.session.key }}
+                    values={{ session: sessionDisplayTitle(consolidateFailure.session) }}
                     // eslint-disable-next-line jsx-a11y/control-has-associated-label -- the control's label is the session title `Trans` renders inside it
                     components={{ session: <button
                       type="button"
@@ -563,7 +582,12 @@ function GlobalMemoryTab({ refreshTrigger, onDirtyChange }: { refreshTrigger: nu
         {migrated && <span className="text-[12px] text-muted ml-2">{i18nT('pages.overview.memoryTab.semantic_memory_active_text_files_are_read_only')}</span>}
       </div>
     </Card>
-    <VectorMemoryCard onActiveChange={setVectorActive} onMigratedChange={setMigrated} />
+    <VectorMemoryCard
+      onActiveChange={setVectorActive}
+      onMigratedChange={setMigrated}
+      onSettledChange={setVectorSettled}
+      initialSemanticFilter={focusLessons ? 'lesson.' : undefined}
+    />
     <EmbeddingModelCard />
     <details onToggle={event => setRecordsOpen(event.currentTarget.open)}>
       <summary className="min-h-11 cursor-pointer rounded-lg border border-border p-3 text-[13px] text-muted">
@@ -634,7 +658,7 @@ function GlobalMemoryTab({ refreshTrigger, onDirtyChange }: { refreshTrigger: nu
     {storeReadable && <MemoryRetiredCard key={`retired-${store}`} store={store} />}
     <MemoryBackupsCard key={`backups-${store}`} store={store} />
     {!vectorActive && (
-      <Card><CardTitle>{i18nT('pages.overview.memoryTab.lessons')} <InfoTip text={i18nT('pages.overview.memoryTab.persistent_lessons_injected_into_every_session_a')} /></CardTitle>
+      <Card id={LESSONS_CARD_ID}><CardTitle>{i18nT('pages.overview.memoryTab.lessons')} <InfoTip text={i18nT('pages.overview.memoryTab.persistent_lessons_injected_into_every_session_a')} /></CardTitle>
       <div className="flex gap-2 items-center flex-wrap mb-3">
         <Input placeholder={i18nT('pages.overview.memoryTab.rule_e_g_always_use_tabs_not_spaces')} style={{ flex: 2 }} value={rule} onChange={e => setRule(e.target.value)} />
         <SimpleSelect

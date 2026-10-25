@@ -108,7 +108,7 @@ The nine hand-edited seams reduce to **one required edit** (register the descrip
 |---|---|
 | `slack/gateway.py` members tuple + start call | registry iterates descriptors |
 | `dashboard/handlers_system.py` members | derived from registry |
-| `dashboard/state.py` per-channel fields | generic `channel_state[type] = {connected, error}` map |
+| `dashboard/state_parts/dashboard_state.py` per-channel fields | generic `channel_state[type] = {connected, error}` map |
 | `sandbox_tiers.py` denylist entries | derived from descriptor cred fields |
 | `dashboard/server.py` per-channel config routes | generic `/api/channels/{name}/config` |
 | governance contract test | stays, as the tripwire pinning membership |
@@ -218,7 +218,7 @@ makes channel sessions unmanageable today.
    Segments are colon-free, enforced at build time. The `session_map.py`
    double-prefix repair moves into this parser and dies in one place.
 5. **The dispatch pipeline stays address-agnostic** — it passes keys through
-   verbatim and never parses them. Pinned in `messaging/dispatch.py`
+   verbatim and never parses them. Pinned in `messaging/dispatch_contract.py`
    docstrings by PR ①, contract-tested when the parser lands in PR ③.
 
 ### Accepted debts

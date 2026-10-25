@@ -41,11 +41,11 @@ Three decisions:
 
 - **Session tools.** `session_create`, `session_send`, `session_read_message`,
   `session_stop` and `session_close` (`_session_tools` in
-  `src/kiro_crew/mcp_dashboard.py`) call `/api/session-control/*` on this
-  gateway. Those routes are MCP-only and strict (`server.py`, the
+  `src/kiro_crew/mcp_dashboard_session_tools.py`) call `/api/session-control/*` on this
+  gateway. Those routes are MCP-only and strict (`dashboard/server_internal_paths.py`, the
   *Session control* block of the internal-secret path set). No argument names
   another machine.
-- **The proxy.** `api_instances_proxy` (`src/kiro_crew/dashboard/handlers_instances.py`)
+- **The proxy.** `api_instances_proxy` (`src/kiro_crew/dashboard/handlers_instances_peer.py`)
   forwards only paths under `_PROXY_ALLOWED_PREFIXES` = `api/chat`, `api/stream`,
   owner-only, and redacts every reply since
   [#16757](https://github.com/kirodotdev/KiroCrew/pull/16757)

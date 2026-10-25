@@ -366,15 +366,39 @@ class TestFileRead:
             assert "X-File-Binary" not in resp.headers
 
     @pytest.mark.asyncio
-    async def test_read_jsonl_sets_x_ndjson_content_type(self, tmp_path, mock_sel, home_patch):
-        # JSONL is NOT a single JSON document — must use application/x-ndjson
-        # so clients don't try to parse the whole body as one JSON value.
-        f = tmp_path / "lines.jsonl"
-        f.write_text('{"a":1}\n{"b":2}\n', encoding="utf-8")
+    @pytest.mark.parametrize(
+        "name, body, content_type",
+        [
+            # JSONL is NOT a single JSON document -- must use application/x-ndjson
+            # so clients don't try to parse the whole body as one JSON value.
+            pytest.param(
+                "lines.jsonl",
+                '{"a":1}\n{"b":2}\n',
+                "application/x-ndjson",
+                id="read_jsonl_sets_x_ndjson_content_type",
+            ),
+            pytest.param(
+                "note.md", "# title", "text/markdown", id="read_md_sets_text_markdown_content_type"
+            ),
+            # Default content_type for files without a known extension stays
+            # text/plain so existing behaviour is preserved.
+            pytest.param(
+                "notes.log",
+                "line 1\nline 2\n",
+                "text/plain",
+                id="read_unknown_extension_falls_back_to_text_plain",
+            ),
+        ],
+    )
+    async def test_read_sets_content_type(
+        self, tmp_path, mock_sel, home_patch, name, body, content_type
+    ):
+        f = tmp_path / name
+        f.write_text(body, encoding="utf-8")
         async with TestClient(TestServer(_make_app())) as client:
             resp = await client.get(f"/api/file-read?path={f}")
             assert resp.status == 200
-            assert resp.headers["Content-Type"].startswith("application/x-ndjson")
+            assert resp.headers["Content-Type"].startswith(content_type)
 
     @pytest.mark.asyncio
     async def test_read_html_served_as_text_plain_to_block_xss(
@@ -393,28 +417,6 @@ class TestFileRead:
             assert resp.headers["Content-Type"].startswith(
                 "text/plain"
             ), f"HTML files MUST be served as text/plain (got {resp.headers['Content-Type']})"
-
-    @pytest.mark.asyncio
-    async def test_read_md_sets_text_markdown_content_type(self, tmp_path, mock_sel, home_patch):
-        f = tmp_path / "note.md"
-        f.write_text("# title", encoding="utf-8")
-        async with TestClient(TestServer(_make_app())) as client:
-            resp = await client.get(f"/api/file-read?path={f}")
-            assert resp.status == 200
-            assert resp.headers["Content-Type"].startswith("text/markdown")
-
-    @pytest.mark.asyncio
-    async def test_read_unknown_extension_falls_back_to_text_plain(
-        self, tmp_path, mock_sel, home_patch
-    ):
-        # Default content_type for files without a known extension stays
-        # text/plain so existing behaviour is preserved.
-        f = tmp_path / "notes.log"
-        f.write_text("line 1\nline 2\n", encoding="utf-8")
-        async with TestClient(TestServer(_make_app())) as client:
-            resp = await client.get(f"/api/file-read?path={f}")
-            assert resp.status == 200
-            assert resp.headers["Content-Type"].startswith("text/plain")
 
     @pytest.mark.asyncio
     async def test_read_utf8_multibyte_round_trip(self, tmp_path, mock_sel, home_patch):
@@ -585,7 +587,7 @@ class TestFileReadReservedCharacterPaths:
         Only NUL is exercised here. The other unrepresentable shape -- a lone
         surrogate -- cannot be delivered through this transport, because URL
         decoding never yields one; it is covered against the seam itself in
-        test_hooks_coverage.py.
+        test_hooks_coverage_file_branches.py.
         """
         async with TestClient(TestServer(_make_app())) as client:
             resp = await client.get("/api/file-read?path=" + encoded)
@@ -833,7 +835,7 @@ class TestSendMessage:
             data = await resp.json()
             assert data == {"ok": True, "slack": False, "session": False, "delivered_to": "notification"}
             state.notify.assert_called_once_with(
-                "agent", "Agent Message", "hello", member=None, publisher_session=None
+                "agent", "Agent Message", "hello", meta=None, member=None, publisher_session=None
             )
 
     @pytest.mark.asyncio
@@ -851,7 +853,7 @@ class TestSendMessage:
             data = await resp.json()
             assert data == {"ok": True, "slack": True, "session": False, "delivered_to": "slack", "ts": "1712793600.000001"}
             state.notify.assert_called_once_with(
-                "agent", "Test", "hello", member=None, publisher_session=None
+                "agent", "Test", "hello", meta=None, member=None, publisher_session=None
             )
             slack.open_dm.assert_called_once_with("U123")
             slack.post_message.assert_called_once_with(

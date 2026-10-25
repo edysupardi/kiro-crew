@@ -404,13 +404,13 @@ describe('Settings > Developer > Feature Previews', () => {
     // label names the page the flag holds so it stops sharing a bare "Crew"
     // with that neighbour, which a newcomer could not tell apart.
     renderTab()
-    expect(screen.getByRole('switch', { name: /^crewmates$/i }).getAttribute('aria-checked')).toBe('false')
+    expect(screen.getByRole('switch', { name: /^mates$/i }).getAttribute('aria-checked')).toBe('false')
   })
 
   it('persists the crew opt-in under its own key, leaving webhooks alone', async () => {
     renderTab()
     await act(async () => {
-      screen.getByRole('switch', { name: /^crewmates$/i }).click()
+      screen.getByRole('switch', { name: /^mates$/i }).click()
     })
     expect(localStorage.getItem(PREVIEW_CREW)).toBe('1')
     // Two flags, two keys: a shared write would release both features at once.
@@ -479,10 +479,22 @@ describe('Settings > Developer > Feature Previews', () => {
       )
         .map(nameOf)
         .sort()
-    // Outside that card, unfiltered and unchanged: this is the ingress property.
+    /**
+     * The built-in KAS engine card is WALKED the same way. This tab stubs no API, so
+     * its status read fails and it draws the read-failure notice's Retry and the
+     * hand-off; neither navigates. Its Install button exists only once a status
+     * says nothing is installed, which `KasBundleCard.test.tsx` pins.
+     */
+    const kasFrame = () =>
+      container.querySelector('[data-testid="kas-bundle-card"]')?.closest('.animate-rise') ?? null
+    const kasButtons = () =>
+      Array.from(kasFrame()?.querySelectorAll('button') ?? [])
+        .map(nameOf)
+        .sort()
+    // Outside those cards, unfiltered and unchanged: this is the ingress property.
     const ingressButtons = () =>
       realButtons()
-        .filter(el => !decisionsFrame()?.contains(el))
+        .filter(el => !decisionsFrame()?.contains(el) && !kasFrame()?.contains(el))
         .map(nameOf)
         .sort()
     // Every button outside the Decisions card is observed and partitioned:
@@ -499,7 +511,7 @@ describe('Settings > Developer > Feature Previews', () => {
     }
     expect(partition()).toEqual({ tips: INFO_TIP_COUNT, ingress: [] })
     await act(async () => {
-      screen.getByRole('switch', { name: /^crewmates$/i }).click()
+      screen.getByRole('switch', { name: /^mates$/i }).click()
     })
     expect(partition()).toEqual({ tips: INFO_TIP_COUNT, ingress: [] })
     // The Decisions subtree, exactly. A new button here -- or a duplicate of one of
@@ -510,6 +522,9 @@ describe('Settings > Developer > Feature Previews', () => {
     // moment it hit. A button this set does not name never converges, so it fails here.
     await waitFor(() => {
       expect(decisionsButtons()).toEqual(['Ask the agent', 'Show'])
+    })
+    await waitFor(() => {
+      expect(kasButtons()).toEqual(['Ask the agent', 'Retry'])
     })
     // The webhooks card still HAS its link, so this is an asymmetry on purpose
     // rather than the ingress mechanism having been broken for both.

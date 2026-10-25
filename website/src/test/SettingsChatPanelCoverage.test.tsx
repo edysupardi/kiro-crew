@@ -18,7 +18,7 @@
 vi.mock('@radix-ui/react-select', async () => await import('./__mocks__/@radix-ui/react-select'))
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import React from 'react'
 import { SETTINGS_CARD_STAGGER_MS } from '../components/settings'
@@ -102,6 +102,8 @@ vi.mock('../api/client', () => ({
 }))
 
 import { ChatPanel } from '../pages/settings/ChatPanel'
+import { ApiError } from '../api/apiError'
+import { markModelsAuthRequired, markModelsDegraded } from '../providers/modelListHealth'
 import { resolveDefaultMemoryMode } from '../api/queryClient'
 import { MAX_MESSAGE_FONT_SIZE } from '../pages/chat/ChatSettings'
 
@@ -117,7 +119,7 @@ const LS_KEY = 'mc-chat-config'
 
 function wrap(sub = 'transcript') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
+  const view = render(
     <MemoryRouter initialEntries={[`/settings?tab=chat&sub=${sub}`]}>
     <Provider store={createTestStore()}>
     <QueryClientProvider client={qc}>
@@ -126,6 +128,7 @@ function wrap(sub = 'transcript') {
     </Provider>
     </MemoryRouter>
   )
+  return Object.assign(view, { qc })
 }
 
 /** The localStorage-backed chat config as the panel last wrote it. */
@@ -190,6 +193,19 @@ beforeEach(() => {
   patchConfigMock.mockReset()
   tipsStatusMock.mockReset()
   tipsFeedbackMock.mockReset()
+  // The model list health store and the models mock are module-global; a test
+  // that drives a degraded / auth-required fetch must not leak that state into
+  // the next. Reset both to the healthy default before each test.
+  modelsMock.mockReset()
+  modelsMock.mockImplementation(() =>
+    Promise.resolve([
+      { model_name: 'auto', description: 'Default' },
+      { model_name: 'claude-opus-4.8', description: 'Opus' },
+      { model_name: 'claude-haiku-4.5', description: 'Haiku' },
+    ]) as never
+  )
+  markModelsAuthRequired('acp', false)
+  markModelsDegraded('acp', false)
   dashboardConfigMock.mockImplementation(() => Promise.resolve({ ...BASE_DASH }) as never)
   updateDashboardConfigMock.mockImplementation(() => Promise.resolve({}) as never)
   patchConfigMock.mockImplementation(() => Promise.resolve({}) as never)
@@ -234,6 +250,35 @@ describe('ChatPanel — load failures', () => {
     await screen.findByText('Failed to load dashboard config.')
     await screen.findByText('Failed to load config.')
     expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(2)
+  })
+
+  it('says to run kiro-cli login when the model list is degraded by expired auth', async () => {
+    // /api/models answers 503 with the sign-in code (expired kiro-cli login).
+    // The acp adapter reads that code where the fetch error forms and flags the
+    // provider auth-required; the banner must then show the one actionable
+    // sign-in message, NOT the generic "Failed to load config."
+    const authErr = new ApiError(
+      503,
+      'model list unavailable',
+      JSON.stringify({ error: 'kiro-cli login', code: 'kiro_prerequisite_required' }),
+    )
+    modelsMock.mockImplementation(() => Promise.reject(authErr) as never)
+    wrap()
+    expect(
+      await screen.findByText(/Run 'kiro-cli login' in your terminal, then click Retry\./i),
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Failed to load config.')).not.toBeInTheDocument()
+  })
+
+  it('keeps the generic config banner when /api/models is degraded for a non-auth reason', async () => {
+    // A generic degraded 503 (code model_list_unavailable) is a transient blip,
+    // not an auth wall: the banner stays the generic "Failed to load config." and
+    // never claims a sign-in is needed (fail-safe).
+    const blip = new ApiError(503, 'model list unavailable', JSON.stringify({ error: 'model list timed out', code: 'model_list_unavailable' }))
+    modelsMock.mockImplementation(() => Promise.reject(blip) as never)
+    wrap()
+    expect(await screen.findByText('Failed to load config.')).toBeInTheDocument()
+    expect(screen.queryByText(/kiro-cli login/i)).not.toBeInTheDocument()
   })
 })
 
@@ -421,6 +466,48 @@ describe('ChatPanel — Messages', () => {
     )
   })
 
+  it.each([
+    ['Keep Side Panel Open', 'side_panel_always_open'],
+    ['Pin Summary in Side Panel', 'side_panel_pin_summary'],
+  ])('shows %s off by default and persists turning it on', async (label, key) => {
+    wrap('sidepanel')
+    const sw = await settledSwitch(label)
+    expect(sw).toHaveAttribute('aria-checked', 'false')
+    fireEvent.click(sw)
+    await waitFor(() =>
+      expect(updateDashboardConfigMock).toHaveBeenCalledWith({ [key]: true })
+    )
+  })
+
+  it('names Session summaries on the Pin Summary row while they are off, and drops it once they are on', async () => {
+    const { qc } = wrap('sidepanel')
+    const row = () => document.querySelector('[data-setting-key="dashboard.side_panel_pin_summary"]') as HTMLElement
+    const needs = 'Session summaries are off. Turn them on in Settings → Chat → Sessions to pin Summary.'
+    // BASE_MC carries no session_summary section: summaries are off.
+    await waitFor(() => expect(within(row()).getByText(needs)).toBeInTheDocument())
+    // The toggle stays usable while they are off.
+    fireEvent.click(await settledSwitch('Pin Summary in Side Panel'))
+    await waitFor(() =>
+      expect(updateDashboardConfigMock).toHaveBeenCalledWith({ side_panel_pin_summary: true })
+    )
+    act(() => { qc.setQueryData(['kirocrewConfig'], { ...BASE_MC, session_summary: { enabled: true } }) })
+    await waitFor(() => expect(within(row()).queryByText(needs)).toBeNull())
+  })
+
+  it('refreshes every chat\'s cached summary state when Session summaries saves', async () => {
+    const { qc } = wrap('sessions')
+    // The side panel's + menu row and Pin Summary read this per-chat query,
+    // which never goes stale on its own.
+    qc.setQueryData(['session-summary', 'chat-1'], { enabled: false })
+    fireEvent.click(await settledSwitch('Session summaries'))
+    await waitFor(() =>
+      expect(patchConfigMock).toHaveBeenCalledWith('session_summary.enabled', true)
+    )
+    await waitFor(() =>
+      expect(qc.getQueryState(['session-summary', 'chat-1'])?.isInvalidated).toBe(true)
+    )
+  })
+
   it('persists the folder-suggestions toggle', async () => {
     wrap('sessions')
     fireEvent.click(await settledSwitch('Folder suggestions'))
@@ -550,6 +637,7 @@ describe('ChatPanel — Sessions', () => {
   it.each([
     ['History Expanded', 'historyExpanded', false],
     ['Confirm Before Closing Session', 'confirmCloseSession', true],
+    ['Open Sidebar Sessions in a Session Tab', 'sidebarClickOpensTab', true],
   ])('stores %s locally when flipped', async (label, key, expected) => {
     wrap('sessions')
     fireEvent.click(await screen.findByRole('switch', { name: label }))

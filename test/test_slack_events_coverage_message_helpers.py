@@ -272,7 +272,7 @@ class TestTranscribeFiles:
             }
         ]
         # This test deliberately makes unlink fail, so the downloaded file survives
-        # the run. events.py allocates it with tempfile.mkstemp(), which would put it
+        # the run. events_voice.py allocates it with tempfile.mkstemp(), which would put it
         # in the SYSTEM temp dir -- a real artifact left on the host, which the
         # blocking no-test-side-effects rule forbids. Pin the allocation into
         # tmp_path so the surviving file is inside pytest's own scratch dir.
@@ -304,16 +304,24 @@ class TestHandleMessageDeleted:
     @pytest.mark.asyncio
     async def test_unauthorized_deleter_ignored(self, _mock_sel):
         orch = _make_orch()
+        orch._pending_queue = {"1.0": [("1.0", "text", {})]}
         event = {"deleted_ts": "1.0", "channel": "C1", "previous_message": {"user": "U_BAD"}}
-        with patch("kiro_crew.slack.events.is_allowed_user", return_value=False):
+        with patch("kiro_crew.slack.events.is_allowed_user", return_value=False) as allowed:
             await ev._handle_message_deleted(orch, event)
+        allowed.assert_called_once_with("U_BAD")
+        orch.sessions.cancel_queued.assert_not_called()
+        assert orch._pending_queue == {"1.0": [("1.0", "text", {})]}
         _mock_sel.log_api_access.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_missing_deleted_ts_ignored(self, _mock_sel):
         orch = _make_orch()
+        orch._pending_queue = {"1.0": [("1.0", "text", {})]}
+        event = {"channel": "C1", "previous_message": {"user": "U_OWNER", "thread_ts": "1.0"}}
         with patch("kiro_crew.slack.events.is_allowed_user", return_value=True):
-            await ev._handle_message_deleted(orch, {"channel": "C1"})
+            await ev._handle_message_deleted(orch, event)
+        orch.sessions.cancel_queued.assert_not_called()
+        assert orch._pending_queue == {"1.0": [("1.0", "text", {})]}
         _mock_sel.log_api_access.assert_not_called()
 
     @pytest.mark.asyncio

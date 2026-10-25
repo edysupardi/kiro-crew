@@ -8,7 +8,10 @@ working directory.
 from __future__ import annotations
 
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -23,7 +26,7 @@ _SECRET_RE = re.compile(
     # hmac_sig)`), so the three-segment alternative above never matched it and a
     # bare token in prose printed verbatim. It needs its OWN alternative.
     #
-    # Byte-identical to the one in `security/redaction.py`, which carries the full
+    # Byte-identical to the one in `security/redaction_patterns.py`, which carries the full
     # derivation of both bounds and is the single source for it; this script is
     # documented as stdlib-only and portable, so it cannot import it, and
     # `test/test_redaction_mirror_parity.py` fails if this copy drifts. Locally the
@@ -31,7 +34,8 @@ _SECRET_RE = re.compile(
     # HMAC-SHA256 digest), the payload bound is a generator-derived floor rather
     # than a guess (a guessed floor is beatable by a verbose identifier), and the
     # left boundary (incl. `.`, so attribute access is excluded) keeps ordinary
-    # dotted code intact.
+    # dotted code intact unless what follows the `.` carries a `-` or a payload
+    # shaped as base64url of ASCII JSON, which no identifier chain does.
     #
     # Placing it after the three-segment alternative is defensive, not
     # load-bearing for real tokens: a conventional JWS header is only 33 chars
@@ -40,7 +44,13 @@ _SECRET_RE = re.compile(
     # clears that floor AND whose payload is exactly 43 chars, since the right
     # boundary is satisfied by a `.` and would leave `.signature` in the printed
     # log. That shape is covered by a test.
-    r"|(?<![A-Za-z0-9_.-])eyJ[A-Za-z0-9_-]{96,}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"
+    #
+    # The `(?-i:…)` wrapper keeps the copy case-sensitive, as the backend is:
+    # this regex runs under `(?i)`, which would let `[A-Za-f]` accept every
+    # letter and start a match after a `.` on ordinary dotted code.
+    r"|(?-i:"
+    r"(?<![A-Za-z0-9_-])(?!(?<=\.)(?!eyJ[A-Za-z0-9_]*-)(?!eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_]*-)(?!eyJ[A-Za-z0-9_-](?:[A-Za-f][A-Za-z0-9_-]{3})*(?:[A-Za-f][A-Za-z0-9_-]{1,2})?\.))eyJ[A-Za-z0-9_-]{96,}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"
+    r")"
     r"|-----BEGIN[A-Z ]*PRIVATE KEY-----)"
 )
 _KV_RE = re.compile(
@@ -177,6 +187,16 @@ OVERRIDE_MARKER_RE = re.compile(
     r"\A<!-- ai-review-human-override target=([a-z0-9-]+) head=([0-9a-fA-F]{7,40})"
     r" actor=(\S+) source=([0-9]+) -->"
 )
+# The class record: line 2 of the same bot comment, written by the same handler
+# (`.github/scripts/release_record.py render_record`). Line 1 alone is the
+# authority a lane clears on; line 2 only says WHICH release this was, for
+# `pr_status.py`, the ledger and the weekly audit. A record from before classes
+# has no line 2 and reads as `unclassified`, never as an error.
+OVERRIDE_CLASS_RE = re.compile(
+    r"\A[^\n]*\n<!-- ai-review-override-record class=([a-z-]+) issue=([0-9]+|none)"
+    r" author_is_actor=(true|false) -->"
+)
+OVERRIDE_CLASS_UNCLASSIFIED = "unclassified"
 OVERRIDE_TARGET_ALL = "all"
 # The command's target spellings, mapped to each lane's WORKFLOW-AUTHORED
 # comment key rather than straight to a reviewer name. Reviewer identity then
@@ -198,7 +218,7 @@ DEFAULT_OVERRIDE_TARGET_KEYS = (
     ("first-principles", "first-principles-review"),
 )
 FINDING_RE = re.compile(
-    r"^\s*(?:\*\*)?(BLOCKING|FINDING)(?:\*\*)?\s*(?:--|\u2014)\s*"
+    r"^\s*(?:\*\*)?(BLOCKING)(?:\*\*)?\s*(?:--|\u2014)\s*"
     r"(?:\*\*)?(\S+?):(\d+)(?:\*\*)?\s*(?:(?:--|\u2014)\s*)?(.*)$",
     re.MULTILINE,
 )
@@ -251,6 +271,31 @@ def parse_override_record(comment, authors=DEFAULT_MARKER_AUTHORS):
         return None
     target, head, actor, _source = match.groups()
     return target.lower(), head.lower(), actor
+
+
+def parse_override_class(comment, authors=DEFAULT_MARKER_AUTHORS):
+    """Return ``{class, issue, author_is_actor}`` for a trusted record, else None.
+
+    Trust is ``parse_override_record``'s: a comment that is not a bot-authored
+    override record has no class. A trusted record without the class line (made
+    before classes existed) is ``unclassified`` with ``author_is_actor`` None,
+    which a counter can tell apart from a record that says ``false``.
+    """
+    if parse_override_record(comment, authors) is None:
+        return None
+    match = OVERRIDE_CLASS_RE.match(comment.get("body") or "")
+    if not match:
+        return {
+            "class": OVERRIDE_CLASS_UNCLASSIFIED,
+            "issue": "",
+            "author_is_actor": None,
+        }
+    klass, issue, author_is_actor = match.groups()
+    return {
+        "class": klass,
+        "issue": "" if issue == "none" else issue,
+        "author_is_actor": author_is_actor == "true",
+    }
 
 
 def override_reviewer_names(target, bindings, keys=DEFAULT_OVERRIDE_TARGET_KEYS):
@@ -306,6 +351,24 @@ def human_override_actors(comments, head_sha, bindings, authors=DEFAULT_MARKER_A
             continue
         for name in override_reviewer_names(target, bindings):
             named[name] = actor
+    return named, blanket
+
+
+def human_override_classes(comments, head_sha, bindings, authors=DEFAULT_MARKER_AUTHORS):
+    """Return ``(named, blanket)`` -- the class record of each accepted override.
+
+    The same records, in the same shape, as ``human_override_actors``, with the
+    ``parse_override_class`` dict in place of the actor.
+    """
+    named: dict = {}
+    blanket: dict = {}
+    for target, _actor, comment in _accepted_overrides(comments, head_sha, authors):
+        info = parse_override_class(comment, authors)
+        if target == OVERRIDE_TARGET_ALL:
+            blanket = info or {}
+            continue
+        for name in override_reviewer_names(target, bindings):
+            named[name] = info or {}
     return named, blanket
 
 
@@ -924,21 +987,17 @@ def extract_findings(
 # them above the line-level lanes in triage, which is only possible if their
 # items reach the loop with span ids of their own.
 WHOLE_DESIGN_LANES = ("DESIGN", "UX", "FIRST-PRINCIPLES")
-# `Design-Verdict: CONCERNS`, `UX-Verdict: PASS`, `First-Principles-Verdict: BLOCK`
-VERDICT_LINE_RE = re.compile(
-    r"^[A-Za-z-]+-Verdict:\s*(PASS|CONCERNS|BLOCK)\b", re.MULTILINE | re.IGNORECASE
-)
-# The item-bearing sections of those lanes' output templates. Deliberately an
-# allowlist rather than "every `###` heading": First Principles also emits a
-# `### What this change ships` INVENTORY and UX a `### Evidence gaps` note, and
-# neither is an item an author disposes of one by one.
-DESIGN_ITEM_SECTIONS = (
-    "Blockers",
-    "Watch",
-    "Subtractions",
-    "Suggestions",
-    "Not justified as shipped",
-)
+# `Design-Verdict: PASS`, `UX-Verdict: BLOCK`, `First-Principles-Verdict: BLOCK`.
+# A lane has exactly two verdicts; any other word (including the retired
+# CONCERNS) is not a verdict and reads as "no verdict for this head".
+VERDICT_LINE_RE = re.compile(r"^[A-Za-z-]+-Verdict:\s*(PASS|BLOCK)\b", re.MULTILINE | re.IGNORECASE)
+# The item-bearing section of those lanes' output templates: a BLOCK lists its
+# items under `### Blockers`, each with a `Trigger:` and an `Outcome:` line.
+# Deliberately an allowlist rather than "every `###` heading": First Principles
+# also emits a `### What this change ships` INVENTORY, UX a `### Evidence gaps`
+# note, and every lane may add `### Notes` -- none of them an item an author
+# disposes of one by one, and `Notes` never gates.
+DESIGN_ITEM_SECTIONS = ("Blockers",)
 # A per-item trailing line naming what would retire the item. Optional: it is
 # absent from every lane's older output, so parsing must not depend on it.
 CLEARS_WHEN_RE = re.compile(r"clears\s+when\s*:\s*(.+?)\s*$", re.IGNORECASE)
@@ -975,7 +1034,7 @@ def design_section_items(body):
     continuation lines (the consequence chain and the fix the templates ask
     for). A section whose lane wrote PROSE instead of a list still yields its
     paragraphs: the templates say "one or two lines each" without mandating a
-    bullet, and silently yielding nothing there would hide exactly the CONCERNS
+    bullet, and silently yielding nothing there would hide exactly the Blockers
     items this extractor exists to surface.
     """
     wanted = {name.lower(): name for name in DESIGN_ITEM_SECTIONS}
@@ -1065,11 +1124,10 @@ def design_lane_verdicts(comments, head_sha, bindings, lanes=WHOLE_DESIGN_LANES)
     }
 
 
-# The bold sentence a whole-design lane writes right under its verdict line. The
-# lane prompts make it the core problem on CONCERNS or BLOCK and, on a PASS, the
-# one thing a human should still verify before merge, or exactly
-# NOTHING_TO_CHECK. It sits outside every item section, so design_section_items
-# never yields it, and on a PASS it is usually the lane's only ask.
+# The bold sentence a whole-design lane writes right under its verdict line: the
+# lane's REASON, one to three sentences. On a BLOCK it is the core problem; on a
+# PASS it says in a few words why nothing blocks (or exactly NOTHING_TO_CHECK).
+# It sits outside every item section, so design_section_items never yields it.
 NOTHING_TO_CHECK = "Nothing to check."
 _ENCLOSING_BOLD_RE = re.compile(r"\A\*\*(.+)\*\*\Z")
 
@@ -1077,8 +1135,7 @@ _ENCLOSING_BOLD_RE = re.compile(r"\A\*\*(.+)\*\*\Z")
 def lane_punchline(body):
     """The punchline under a whole-design body's verdict line, without its bold.
 
-    Read the way the lane workflows' own CONCERNS digest reads it, as the first
-    text after the verdict line. The whole paragraph is taken, so a punchline
+    Read as the first text after the verdict line. The whole paragraph is taken, so a punchline
     wrapped over two lines survives. A heading or one of the body's own trailers
     in that place means the lane wrote no punchline.
     """
@@ -1125,7 +1182,7 @@ def extract_design_items(comments, head_sha, bindings, lanes=WHOLE_DESIGN_LANES)
     would silently reclassify a today-valid spanless ``target=design``
     disposition as a violation and fail the required status on PRs nobody
     touched, so the design items feed only local reporting (pr_findings.py) and
-    the local unanswered-CONCERNS check (pr_status.py). A disposition may still
+    the local loop's block summary (pr_status.py). A disposition may still
     CLAIM one of these spans: an unknown span for a lane with no
     extract_findings identities is not a violation.
     """
@@ -1143,43 +1200,6 @@ def extract_design_items(comments, head_sha, bindings, lanes=WHOLE_DESIGN_LANES)
                 "block_merge": verdict == "BLOCK",
                 "span": span_hash(name, normalize_design_item_text(text)),
             }
-
-
-def unanswered_concern_lanes(verdicts, records, head_sha):
-    """Whole-design lanes at CONCERNS for this head with no disposition yet.
-
-    LOCAL ONLY -- the kirocrew-prepare-pr loop's own stop condition. SKILL.md says a
-    green rollup with an unanswered CONCERNS is not converged, and nothing
-    enforced it: the loop armed auto-merge straight past a fresh CONCERNS. The
-    server-side required status is deliberately NOT changed, because CONCERNS
-    is advisory by contract for every writer who never runs this loop.
-
-    Answered means a repository writer's disposition record targets that lane
-    and names this head (a short ``head=`` prefix counts, as everywhere else).
-    """
-    out = []
-    for name, verdict in sorted((verdicts or {}).items()):
-        if verdict != "CONCERNS" or name.upper() not in WHOLE_DESIGN_LANES:
-            continue
-        target = name.lower()
-        answered = any(
-            not record.get("malformed")
-            and (record.get("target") or "").lower() == target
-            and sha_matches(record.get("head") or "", head_sha)
-            for record in records or []
-        )
-        if not answered:
-            out.append(name)
-    return out
-
-
-def unanswered_concerns_reason(lane, head_sha):
-    """The one blocking reason text for an unanswered whole-design CONCERNS."""
-    return (
-        "unanswered CONCERNS from {} on current head - answer each Watch item "
-        "with an <!-- ai-review-disposition target={} head={} --> comment "
-        "(fix, rebut, or accept-and-defer)".format(lane, lane.lower(), head_sha)
-    )
 
 
 def parse_disposition_record(comment):
@@ -1497,3 +1517,285 @@ def disposition_violations(
                     "judged".format(span, where, target)
                 )
     return sorted(out)
+
+
+# --- Markdown fences: the one reader for every kirocrew-prepare-pr script -------
+#
+# A fenced block opens with three or more backticks or tildes (up to three spaces
+# of indent; a backtick fence's info string cannot hold a backtick, that is inline
+# code) and closes only with the same character, at least as many, up to three
+# spaces of indent and nothing but blanks after. A ``` line inside a ~~~ block is
+# content. Those two rules live in pr_status_issue_links.py, which pr_status.py
+# already loads; this module loads that file the same way and builds the line
+# readers below on them, so pr_findings.py, diff_signals.py and sweep_check.py read
+# fences through the one pair of functions.
+class _NoBytecodeSourceLoader(importlib.machinery.SourceFileLoader):
+    """Load shipped source normally while suppressing cache writes."""
+
+    def get_code(self, fullname):
+        path = self.get_filename(fullname)
+        return self.source_to_code(self.get_data(path), path)
+
+    def set_data(self, path, data, *, _mode=0o666):
+        return None
+
+
+def _load_fence_owner():
+    """pr_status_issue_links.py, loaded by path beside this file with no cache written."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pr_status_issue_links.py")
+    name = "_prepare_pr_fence_owner"
+    loader = _NoBytecodeSourceLoader(name, path)
+    spec = importlib.util.spec_from_loader(name, loader)
+    if spec is None:  # pragma: no cover - defensive
+        raise RuntimeError("cannot import kirocrew-prepare-pr sibling script: " + path)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+_fence_owner = _load_fence_owner()
+fence_opening = _fence_owner._fence_opening
+is_closing_fence = _fence_owner._is_closing_fence
+_LINE_END_RE = re.compile(r"\r\n|\n|\r")
+_QUOTE_PREFIX_RE = re.compile(r"^(?:\s*>)+")
+
+
+def split_lines(text):
+    """Lines of `text`, ended by CR, LF or CRLF only (not the other separators str.splitlines knows)."""
+    return _LINE_END_RE.split(text)
+
+
+def unfenced_lines(text, quoted=False):
+    """The lines of `text` outside fenced blocks (fence lines excluded).
+
+    With `quoted`, fence markers are read through leading `>` markers, so a fence
+    inside a blockquote fences its content too. A block that never closes hides the
+    rest of the text, as Markdown does.
+    """
+    fence = None
+    for raw in split_lines(text):
+        line = _QUOTE_PREFIX_RE.sub("", raw) if quoted else raw
+        if fence is None:
+            fence = fence_opening(line)
+            if fence is None:
+                yield raw
+        elif is_closing_fence(line, fence[0], fence[1]):
+            fence = None
+
+
+def drop_fenced_blocks(text):
+    """`text` without its fenced blocks, fence lines included.
+
+    A block that never closes is kept as prose, so an open fence cannot hide the
+    rest of a section from a word limit.
+    """
+    kept: list = []
+    held: list = []
+    fence = None
+    for line in split_lines(text):
+        if fence is None:
+            fence = fence_opening(line)
+            if fence is None:
+                kept.append(line)
+            else:
+                held = [line]
+            continue
+        held.append(line)
+        if is_closing_fence(line, fence[0], fence[1]):
+            fence = None
+            held = []
+    return "\n".join(kept + held)
+
+
+# --- Disposition outcomes and rounds: the one reader for --rounds and the push check -----
+#
+# The outcome is read from exactly two places, never from prose:
+#   (a) the FIRST quoted line of the disposition (its rationale lead):
+#       `> fixed in <sha>`  `> Fixed: ...`  `> removed in <sha>`  `> **fixed** in <sha>`
+#       `> Rebutted: ...`  `> deferred #N`  `> accepted: ...`  `> Agreed, no change.`
+#       `> Outcome: fixed in <sha>`  `> Outcome: checked, no change needed`
+#   (b) an explicit label line: `Outcome: <word>`, `Disposition: <word>` /
+#       `**Disposition: <word>**`, or, when it starts the record, a bold token that is
+#       exactly an outcome word: `- **fixed** span=<id>`, `**rebutted** -- span=<id>`.
+# A finding's title, a bold title with other words, and the plain metadata lines
+# (`class:`, `mechanism:`, `self-added:`, `resolution:`, `[operator: ...]`) never declare
+# an outcome. A record that declares none is `undeclared` in the view, never counted as
+# a fix and never silently nothing (sample and counts: code-quality/impl/D5-FORMAT-SURVEY.md).
+FIX_OUTCOMES = frozenset({"fixed", "removed", "reverted"})
+OTHER_OUTCOMES = frozenset(
+    {
+        "rebutted",
+        "deferred",
+        "acknowledged",
+        "accepted",
+        "agreed",
+        "intended",
+        "checked",
+        "kept",
+        "declined",
+    }
+)
+OUTCOME_WORDS = FIX_OUTCOMES | OTHER_OUTCOMES
+
+_METADATA_RE = re.compile(r"^(?:self-added|mechanism|class|resolution)\s*:", re.IGNORECASE)
+_OPERATOR_RE = re.compile(r"^\[operator:[^\]]*\]\s*$", re.IGNORECASE)
+_OUTCOME_LABEL_RE = re.compile(r"^\**Outcome\**\s*:\**\s*([A-Za-z]+)", re.IGNORECASE)
+_DISPOSITION_LINE_RE = re.compile(r"^\**Disposition\**\s*:\**\s*\**([A-Za-z]+)", re.IGNORECASE)
+_BOLD_TOKEN_RE = re.compile(r"^(?:[-*]\s+)?\*\*([A-Za-z]+)\*\*(?=\s|[.:,;!]|$)")
+_QUOTED_OUTCOME_RE = re.compile(r"^>\s*\*{0,2}Outcome\*{0,2}:\*{0,2}\s*([A-Za-z]+)", re.IGNORECASE)
+_QUOTED_LEAD_RE = re.compile(r"^>\s*(\*{0,2})([A-Za-z]+)(\*{0,2})(.*)$")
+_IN_SHA_RE = re.compile(r"^\s+in\s+[0-9a-f]{7,40}\b", re.IGNORECASE)
+_RESOLUTION_LINE_RE = re.compile(r"^resolution:\s*(removed|narrowed|deferred)\b", re.IGNORECASE)
+
+
+def _quoted_lead_word(line):
+    """The outcome word that leads a quoted rationale line, or "".
+
+    `> **fixed** in <sha>` (bold) and `> fixed: ...` / `> fixed.` accept any
+    follow-on. A bare fix word needs `in <sha>` ("> Fixed point iteration" and
+    "> removed sessions still listed" are not outcomes); the other words accept a
+    following blank ("> Agreed, no change."). `> Outcome: <word>` names its word.
+    """
+    m = _QUOTED_OUTCOME_RE.match(line)
+    if m:
+        return m.group(1).lower()
+    m = _QUOTED_LEAD_RE.match(line)
+    if not m:
+        return ""
+    open_bold, word, close_bold, rest = m.groups()
+    word = word.lower()
+    if word not in OUTCOME_WORDS:
+        return ""
+    if open_bold and close_bold:
+        return word
+    if not rest or rest[0] in ":.,;!":
+        return word
+    if word in FIX_OUTCOMES:
+        return word if _IN_SHA_RE.match(rest) else ""
+    return word if rest[0].isspace() else ""
+
+
+def declared_outcome(body):
+    """The lower-case outcome word a disposition declares, or "" when it declares none.
+
+    Only the two places named above are read, outside fenced code, and the first
+    declaration in document order wins. Nothing else counts: not a finding title,
+    not a bold title with other words ("**Fixed point iteration is slow**"), not a
+    `class:` / `mechanism:` / `self-added:` / `resolution:` line, not any unquoted
+    sentence, and not a later quoted line (a rebuttal quoting "- **fixed** ..." stays
+    a rebuttal).
+    """
+    first_quote = True
+    started = False
+    for raw in unfenced_lines(body, quoted=True):
+        line = raw.strip()
+        if not line or line.startswith("<!--"):
+            continue
+        if line.startswith(">"):
+            if first_quote:
+                first_quote = False
+                word = _quoted_lead_word(line)
+                if word:
+                    return word
+            continue
+        if _METADATA_RE.match(line) or _OPERATOR_RE.match(line):
+            continue
+        for pattern in (_OUTCOME_LABEL_RE, _DISPOSITION_LINE_RE):
+            m = pattern.match(line)
+            if m and m.group(1).lower() in OUTCOME_WORDS:
+                return m.group(1).lower()
+        if not started:
+            m = _BOLD_TOKEN_RE.match(line)
+            if m and m.group(1).lower() in OUTCOME_WORDS:
+                return m.group(1).lower()
+        started = True
+    return ""
+
+
+def declared_resolution(body):
+    """`removed`, `narrowed` or `deferred` from a plain `resolution:` line, else "".
+
+    The line sits outside the quoted block, like `self-added:`; the sweep file
+    holds the same line for the push check.
+    """
+    for raw in unfenced_lines(body, quoted=True):
+        line = raw.strip()
+        if line.startswith(">"):
+            continue
+        m = _RESOLUTION_LINE_RE.match(line)
+        if m:
+            return m.group(1).lower()
+    return ""
+
+
+def same_head(a, b):
+    """True when two hex spellings (7 to 40 characters) can name one commit."""
+    a, b = a.lower(), b.lower()
+    return a.startswith(b) or b.startswith(a)
+
+
+def disposition_rounds(records, bodies):
+    """(order, rounds) from writer disposition records: one round per judged head.
+
+    `order` lists the round keys in first-disposed order; `rounds[key]` holds the
+    full `head`, the `fixed` span set, the `resolved` {span: word} map, an
+    `outcomes` count by word (`undeclared` for a record that declares none) and the
+    `undeclared` [(comment id, spans)] list. A 7-character and a 40-character
+    spelling of one head are one round.
+    """
+    order: list = []
+    rounds: dict = {}
+    for rec in records:
+        head = rec.get("head") or ""
+        if rec.get("malformed") or not head:
+            continue
+        key = next((k for k in order if same_head(rounds[k]["head"], head)), None)
+        if key is None:
+            key = head[:12]
+            rounds[key] = {
+                "head": head,
+                "fixed": set(),
+                "resolved": {},
+                "outcomes": {},
+                "undeclared": [],
+            }
+            order.append(key)
+        r = rounds[key]
+        if len(head) > len(r["head"]):
+            r["head"] = head
+        body = bodies.get(rec.get("comment_id"), "")
+        spans = list(rec.get("spans") or [])
+        word = declared_outcome(body)
+        name = word or "undeclared"
+        r["outcomes"][name] = r["outcomes"].get(name, 0) + 1
+        if not word:
+            r["undeclared"].append((rec.get("comment_id"), spans))
+        if word in FIX_OUTCOMES:
+            r["fixed"].update(spans)
+        resolution = declared_resolution(body)
+        if resolution:
+            for span in spans:
+                r["resolved"][span] = resolution
+    return order, rounds
+
+
+def fix_rounds(order, rounds):
+    """{span: [round index, ...]}: the distinct judged heads that fixed each span.
+
+    Fixes at or before the round that recorded a `resolution:` for the span do not
+    count, so a span with a recorded narrow, removal or deferral starts again.
+    """
+    fixed: dict = {}
+    resolved_at: dict = {}
+    for idx, key in enumerate(order):
+        r = rounds[key]
+        for span in r["resolved"]:
+            resolved_at[span] = idx
+        for span in sorted(r["fixed"]):
+            fixed.setdefault(span, []).append(idx)
+    out = {}
+    for span, rs in fixed.items():
+        after = [i for i in rs if i > resolved_at.get(span, -1)]
+        if after:
+            out[span] = after
+    return out

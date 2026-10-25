@@ -949,6 +949,45 @@ async def test_a_running_worker_is_never_stale(monkeypatch):
     assert row["orphaned"] is False
 
 
+@pytest.mark.asyncio
+async def test_a_pending_run_is_recorded_with_its_stamp_and_read_back_overdue(monkeypatch):
+    """The verdict route stamps the run into the store AND its crew-log entry, so a
+    rebuild keeps it; the fit probe covers the stamp; both reads carry the flag. The
+    run starts at a fixed moment long past, so the read's own clock is beyond it."""
+    entries: list[dict[str, Any]] = []
+    probes: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        routes.crew_log_emit, "on_work_recorded", lambda unit, data: entries.append(data) or True
+    )
+    monkeypatch.setattr(
+        routes.crew_log_emit, "work_entry_fits", lambda entry: probes.append(entry) or True
+    )
+    pr_bar = {"kind": "pr_checks", "pr": 7, "repo": "owner/name"}
+    item_id = await _dispatch(CONDUCTOR_A, WORKER_A, "item A", pr_bar)
+    started = "2001-01-01T00:00:00+00:00"
+    monkeypatch.setattr(wl, "_now_iso", lambda: started)
+    status, body = await _record(
+        CONDUCTOR_A, {"action": "verdict", "item_id": item_id, "verdict": "pending"}
+    )
+    assert status == 200, body
+    assert entries[-1]["pending_since"] == started
+    assert "pending_since" in probes[-1]
+    _, body = await _read(CONDUCTOR_A)
+    row = next(r for r in body["items"] if r["item_id"] == item_id)
+    assert (row["pending_since"], row["pending_overdue"]) == (started, True)
+    _, body = await _read_with(CONDUCTOR_A, "compact=true")
+    assert next(r for r in body["items"] if r["item_id"] == item_id)["pending_overdue"] is True
+
+    status, body = await _record(
+        CONDUCTOR_A, {"action": "verdict", "item_id": item_id, "verdict": "fail", "fails": 1}
+    )
+    assert status == 200, body
+    assert "pending_since" not in entries[-1]
+    _, body = await _read(CONDUCTOR_A)
+    row = next(r for r in body["items"] if r["item_id"] == item_id)
+    assert (row["pending_since"], row["pending_overdue"]) == (None, False)
+
+
 def test_the_schema_caps_restate_the_stores_own():
     """``validation`` cannot import the store on the gateway's request path, so the
     two spell the same numbers — and drifting apart would let a value through the
@@ -1737,6 +1776,72 @@ async def test_a_compact_read_shows_a_stale_worker(monkeypatch):
     _, full = await _read(CONDUCTOR_A)
     full_row = next(r for r in full["items"] if r["item_id"] == ids["item_a"])
     assert (row["stale"], row["orphaned"]) == (full_row["stale"], full_row["orphaned"])
+
+
+@pytest.mark.asyncio
+async def test_a_report_the_harness_never_delivered_shows_on_both_reads():
+    """A worker whose ``work_report`` failed undelivered is not a silent stall: the
+    full and the compact read both carry ``report_undelivered`` for its item, the
+    other conductor's item carries none, and a report that then lands clears it."""
+
+    ids = await two_by_two()
+    assert wl.note_undelivered(WORKER_A, "work_report") is not None
+    _, full = await _read(CONDUCTOR_A)
+    row = next(r for r in full["items"] if r["item_id"] == ids["item_a"])
+    assert row["report_undelivered"]["tool"] == "work_report"
+    _, compact = await _read_with(CONDUCTOR_A, "compact=true")
+    assert compact["items"][0]["report_undelivered"] == row["report_undelivered"]
+    _, other = await _read(CONDUCTOR_B)
+    assert other["items"][0]["report_undelivered"] is None
+
+    status, _ = await _report(WORKER_A, {"status": "progress", "summary": "got through"})
+    assert status == 200
+    _, after = await _read(CONDUCTOR_A)
+    assert after["items"][0]["report_undelivered"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_close_deletes_the_items_undelivered_record():
+    """A closed item reads no flag, so its record must not stay behind forever."""
+
+    ids = await two_by_two()
+    wl.note_undelivered(WORKER_A, "work_report")
+    status, _ = await _record(
+        CONDUCTOR_A, {"action": "close", "item_id": ids["item_a"], "state": "abandoned"}
+    )
+    assert status == 200
+    assert not wl.undelivered_path(WORKER_A).exists()
+
+
+@pytest.mark.asyncio
+async def test_an_unrecorded_close_keeps_the_items_undelivered_flag(monkeypatch):
+    """The close is undone when the crew log does not confirm it, and the item it
+    leaves open still says its worker's report never arrived."""
+
+    ids = await two_by_two()
+    wl.note_undelivered(WORKER_A, "work_report")
+    monkeypatch.setattr(routes.crew_log_emit, "on_work_recorded", lambda unit, data: False)
+    status, _ = await _record(
+        CONDUCTOR_A, {"action": "close", "item_id": ids["item_a"], "state": "abandoned"}
+    )
+    assert status == 503
+    item = wl.read_work_item(CONDUCTOR_A, ids["item_a"])
+    assert not item.is_terminal
+    assert wl.read_undelivered(CONDUCTOR_A, item)["tool"] == "work_report"
+
+
+@pytest.mark.asyncio
+async def test_a_brief_that_gets_through_clears_a_failed_brief():
+    """The block tells a worker to retry with the qualified name at once, so a
+    retried ``work_brief`` clears the flag without waiting for a report."""
+
+    ids = await two_by_two()
+    wl.note_undelivered(WORKER_A, "work_brief")
+    status, _ = await _brief(WORKER_A)
+    assert status == 200
+    _, after = await _read(CONDUCTOR_A)
+    row = next(r for r in after["items"] if r["item_id"] == ids["item_a"])
+    assert row["report_undelivered"] is None
 
 
 @pytest.mark.asyncio

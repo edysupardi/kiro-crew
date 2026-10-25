@@ -60,6 +60,24 @@ function renderList(props: React.ComponentProps<typeof TagManagerList>) {
   )
 }
 
+/** The themed ConfirmDialog answers a delete ask: press its confirm button
+ *  (`yes`) or Cancel (`!yes`), by the action's label. */
+async function answerConfirm(confirmLabel: string, yes: boolean) {
+  // Role queries can miss a dialog mid exit-animation, and the subtree is
+  // re-rendered under us, so query the raw nodes and require a CONNECTED
+  // button whose text matches before clicking. waitFor retries the query.
+  await waitFor(() => {
+    const btn = [...document.querySelectorAll('[role="dialog"] button')]
+      .find(b => (yes ? b.textContent?.trim() === confirmLabel : b.textContent?.trim() === 'Cancel') && b.isConnected)
+    if (!btn) {
+      const all = [...document.querySelectorAll('button')].map(b => `[${b.getAttribute('role') ?? ''}|${(b.textContent ?? '').slice(0, 30)}|conn=${b.isConnected}]`)
+      throw new Error(`DBG no match: dialogs=${document.querySelectorAll('[role="dialog"]').length} allButtons=${JSON.stringify(all).slice(0, 600)}`)
+    }
+    expect(btn.isConnected).toBe(true)
+    fireEvent.click(btn!)
+  }, { timeout: 3000 })
+}
+
 function renderCoMountedLists() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   return render(
@@ -126,29 +144,35 @@ describe('TagManagerList — shared CRUD (both modes)', () => {
     expect(input.value).toBe('Renamed')
   })
 
-  it('deletes a tag only after confirm', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm')
+  // Two separate tests, one ask each: in happy-dom the exit animation of an
+  // answered dialog never finishes, so a second ask of the same dialog in the
+  // same test cannot be answered reliably. A real browser finishes the exit,
+  // and both flows are covered by the split below.
+  it('does not delete when the confirm is declined', async () => {
     renderList({ mode: 'manage' })
-    const del = await screen.findByTestId('tag-delete-t1')
+    await screen.findByTestId('tag-delete-t1')
 
-    confirmSpy.mockReturnValueOnce(false)
-    fireEvent.click(del)
+    fireEvent.click(screen.getByTestId('tag-delete-t1'))
+    await answerConfirm('Delete tag Alpha', false)
     expect(api.deleteChatTag).not.toHaveBeenCalled()
+  })
 
-    confirmSpy.mockReturnValueOnce(true)
-    fireEvent.click(del)
+  it('deletes a tag once the confirm is accepted', async () => {
+    renderList({ mode: 'manage' })
+    await screen.findByTestId('tag-delete-t1')
+
+    fireEvent.click(screen.getByTestId('tag-delete-t1'))
+    await answerConfirm('Delete tag Alpha', true)
     await waitFor(() => expect(api.deleteChatTag).toHaveBeenCalledWith('t1'))
-    confirmSpy.mockRestore()
   })
 
   it('surfaces delete failures through ErrorNotice', async () => {
     vi.mocked(api.deleteChatTag).mockRejectedValueOnce(new Error('Tag could not be deleted.'))
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     renderList({ mode: 'manage' })
     fireEvent.click(await screen.findByTestId('tag-delete-t1'))
+    await answerConfirm('Delete tag Alpha', true)
     expect(await screen.findByText('Tag could not be deleted.')).toBeInTheDocument()
     expect(screen.getByTestId('tag-crud-mutation-error')).toBeInTheDocument()
-    confirmSpy.mockRestore()
   })
 
   it('creates a tag on Enter and clears the exact submitted draft after success', async () => {

@@ -82,7 +82,7 @@ function renderInLayout() {
 }
 
 /** The app shell's nav row, reduced to the one thing under test: it asks the
- *  shell channel before it navigates, exactly as App.tsx's NavItem does. It sits
+ *  shell channel before it navigates, exactly as navRow.tsx's NavItem does. It sits
  *  OUTSIDE the layout, so only a guard registered with the SHELL answers for it —
  *  which is where a dialog registered on two channels gets asked twice. */
 function SidebarRow() {
@@ -200,7 +200,7 @@ describe('NewCrewmateDialog inside a SidePanelLayout', () => {
     // context and registers with the app shell itself. The dialog must still
     // render, with the typed name held.
     renderStandalone()
-    typeName('typed on the crewmates page')
-    expect(nameInput().value).toBe('typed on the crewmates page')
+    typeName('typed on the mates page')
+    expect(nameInput().value).toBe('typed on the mates page')
   })
 })

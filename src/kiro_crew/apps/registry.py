@@ -69,11 +69,10 @@ if "_PART_MODULES" in globals():
 from kiro_crew.apps.manager import InstalledTreeRefused  # noqa: E402
 from kiro_crew.apps.manifest import AppManifest  # noqa: E402
 from kiro_crew.apps.registry_pipeline.checkout import _kill_process_group  # noqa: E402
-from kiro_crew.apps.registry_pipeline.install import (  # noqa: E402
+from kiro_crew.apps.registry_pipeline.install_clone import _InstallVerb, _refusal_line  # noqa: E402
+from kiro_crew.apps.registry_pipeline.install_desktop_gate import (  # noqa: E402
     DESKTOP_BUILD_STEP_UNSUPPORTED,
     _desktop_gate_probe,
-    _InstallVerb,
-    _refusal_line,
 )
 from kiro_crew.apps.registry_pipeline.store_art import _is_safe_registry_subdir  # noqa: E402
 from kiro_crew.apps.registry_pipeline.subprocess_env import minimal_env  # noqa: E402
@@ -243,7 +242,7 @@ async def _run_app_build(
         # install INTO this interpreter (`pip install .`). A root requirements.txt
         # the RUNTIME provisions out of process is a different dependency:
         # `backend_runtime/provisioning.py::provision_app_deps` (at the spawn of a
-        # `backend.entryPoint`) and `bridges.py::_maybe_provision_backendless_deps` (at the
+        # `backend.entryPoint`) and `bridges_mcp.py::_maybe_provision_backendless_deps` (at the
         # registration of a stdio `mcpServers` entry) both install that same file
         # with `pip install --target` into the app's own deps dir, which works on
         # the bundled interpreter and never touches the bundle. Refusing it here
@@ -491,6 +490,9 @@ _PART_MODULES: tuple[str, ...] = tuple(
         "indexes",
         "manifests",
         "catalog",
+        "install_desktop_gate",
+        "install_rollback",
+        "install_clone",
         "install",
     )
 )
@@ -702,60 +704,68 @@ if _typing.TYPE_CHECKING:
         re,
     )
     from kiro_crew.apps.registry_pipeline.indexes import (  # noqa: F401
+        _SIGN_IN_REFUSED,
         _apply_configured_branch,
         _fetch_and_cache_external_registry,
         _fetch_external_registry_index,
         _load_external_registries,
         _owner_tier_confirmed,
+        _registry_sign_in_refused,
     )
     from kiro_crew.apps.registry_pipeline.install import (  # noqa: F401
-        _DESKTOP_BUILD_REFUSAL,
-        _DESKTOP_LAYOUT_FILES,
-        _REFUSAL_LINES,
         _SCRIPT_TIMEOUT,
         RESERVED_APP_NAME_CODE,
-        Iterator,
-        Literal,
         StreamingLogLines,
-        _absent,
-        _clone_build_app,
-        _clone_build_app_locked,
-        _desktop_build_refusal,
-        _desktop_layout_present,
-        _installed_tree_preview,
-        _layout_cleanup_escaped,
         _official_entry,
-        _provisioning_declared,
-        _refuse_identity_mismatch,
         _remote_controlled_url,
-        _remove_new_layout_files,
-        _report_retained_stale_checkouts,
-        _requirements_owned_by_the_runtime,
         _retained_startup_refusal,
-        _roll_back_post_script_refusal,
-        _set_aside_new_layout_files,
         _trust_grant_would_stay_local,
-        _unpoison_rejected_checkout,
-        app_admission_denied,
         app_name_error,
-        contextmanager,
-        copy_app_tree_as_installed,
         install_app,
         install_from_registry,
         install_receipt,
-        is_module_style_entry_point,
         is_reserved_app_name,
-        preserved_data_awaits,
         registry_source_repository,
         repository_bound_grant_denied,
-        requirements_in_tree,
-        runtime_provisions_requirements,
-        sel,
         set_app_provenance,
-        spawn_launches_entry_point_as_python,
         trusted_app_repository,
         update_app,
         verified_signer,
+    )
+    from kiro_crew.apps.registry_pipeline.install_clone import (  # noqa: F401
+        _REFUSAL_LINES,
+        Literal,
+        _clone_build_app,
+        _clone_build_app_locked,
+        _refuse_identity_mismatch,
+        _report_retained_stale_checkouts,
+        app_admission_denied,
+        sel,
+    )
+    from kiro_crew.apps.registry_pipeline.install_desktop_gate import (  # noqa: F401
+        _DESKTOP_BUILD_REFUSAL,
+        Iterator,
+        _absent,
+        _desktop_build_refusal,
+        _installed_tree_preview,
+        _provisioning_declared,
+        _requirements_owned_by_the_runtime,
+        contextmanager,
+        copy_app_tree_as_installed,
+        is_module_style_entry_point,
+        preserved_data_awaits,
+        requirements_in_tree,
+        runtime_provisions_requirements,
+        spawn_launches_entry_point_as_python,
+    )
+    from kiro_crew.apps.registry_pipeline.install_rollback import (  # noqa: F401
+        _DESKTOP_LAYOUT_FILES,
+        _desktop_layout_present,
+        _layout_cleanup_escaped,
+        _remove_new_layout_files,
+        _roll_back_post_script_refusal,
+        _set_aside_new_layout_files,
+        _unpoison_rejected_checkout,
     )
     from kiro_crew.apps.registry_pipeline.manifests import (  # noqa: F401
         _REGISTRY_ROW_KEYS,
@@ -860,6 +870,7 @@ if _typing.TYPE_CHECKING:
         _read_clone_failure,
         _read_pinned_sidecar,
         _read_unobtainable_art,
+        _retrieve_batch_cancellation,
         _servable_art_path,
         _slim_prewarm_row,
         _store_art_cache_path,

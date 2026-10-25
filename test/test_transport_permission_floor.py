@@ -786,7 +786,7 @@ async def test_resolve_permission_counts_transport_rejection_as_refused(monkeypa
         ToolApprovalPolicy.AUTO_APPROVE,
         hooks=None,
         session_key="test-session",
-        on_decision=lambda outcome, mech: decisions.append((outcome, mech)),
+        on_decision=lambda outcome, mech, _why: decisions.append((outcome, mech)),
     )
 
     assert approved is False
@@ -803,13 +803,14 @@ _IDENTITY_GATED_APPROVAL_CALLERS = Counter(
         ("apps/builtins/code_review_sage/sage_lib/review_pool.py", "send"): 1,
         ("channel.py", "_stream_task"): 4,
         ("cli_chat.py", "_answer_permission"): 1,
-        ("dashboard/chat_runner.py", "_run_chat"): 7,
+        ("dashboard/chat_turn/permission_prompt.py", "_on_permission_prompt"): 1,
+        ("dashboard/chat_turn/tool_approval.py", "_on_permission_request"): 6,
         ("dashboard/handlers/hooks.py", "_run_hook_inner"): 1,
         ("eval/runner.py", "_run_turn"): 2,
-        ("llm_helpers.py", "_resolve_permission"): 2,
+        ("llm_helpers_parts/tool_approval.py", "_resolve_permission"): 2,
         ("messaging/driver.py", "run"): 3,
-        ("slack/handler.py", "handle_interaction"): 1,
-        ("slack/handler.py", "handle_message"): 4,
+        ("slack/handler_runtime/permission_ladder.py", "_answer_permission_request"): 4,
+        ("slack/handler_runtime/permission_ladder.py", "handle_interaction"): 1,
         ("task_planner.py", "decompose"): 1,
         ("tool_permission.py", "allow"): 1,
     }

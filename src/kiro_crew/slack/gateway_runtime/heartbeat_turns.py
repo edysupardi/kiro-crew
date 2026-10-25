@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     import time
 
     from kiro_crew.slack.gateway import (
-        _HEARTBEAT_KEEP_INJECTION,
         HEARTBEAT_KEY,
         HEARTBEAT_TASK_TIMEOUT_SECS,
         AgentTurnUsage,
@@ -348,3 +347,14 @@ async def _init_heartbeat(self: GatewayOrchestrator) -> None:
         on_cycle_end=_on_cycle_end,
     )
     await self.heartbeat_svc.start()
+
+
+# Prepended to every heartbeat task_text before ``ctx_builder.build_message``.
+# Inline injection survives context compaction and webhook-restored sessions
+# where skill / system-prompt copies of the same instruction can drift out of
+# effective context.
+_HEARTBEAT_KEEP_INJECTION = (
+    "[HEARTBEAT TASK — you MUST include the keyword HEARTBEAT_KEEP "
+    "in your response if this task is NOT complete. Omit the "
+    "keyword only when the task is fully complete.]\n\n"
+)

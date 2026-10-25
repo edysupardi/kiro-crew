@@ -170,11 +170,14 @@ class TestResolverIsLoadedBeforeTheApply:
         )
 
     def test_restart_helper_does_not_import_the_resolver(self):
-        fn = self._method("_restart_after_update")
-        assert self._resolver_import_lines(fn) == [], (
-            "_restart_after_update must take the resolver from its caller, which "
-            "imported it before the apply"
-        )
+        # The decorated method in the facade runs its body, composed from
+        # gateway_runtime/update_schedule.py; neither half may import it.
+        for name in ("_restart_after_update", "_restart_after_update_body"):
+            fn = self._method(name)
+            assert self._resolver_import_lines(fn) == [], (
+                f"{name} must take the resolver from its caller, which "
+                "imported it before the apply"
+            )
 
     def test_every_reexec_in_the_gateway_passes_an_explicit_executable(self):
         """Discovered, not enumerated — this is what polices a FOURTH site.
@@ -215,7 +218,12 @@ class TestDashboardResolverIsLoadedBeforeTheApply:
         ],
     )
     def test_import_precedes_every_apply(self, method, apply_names):
-        tree = ast.parse(inspect.getsource(dashboard_updates))
+        tree = ast.parse(
+            "\n".join(
+                inspect.getsource(sys.modules[name])
+                for name in (dashboard_updates.__name__, *dashboard_updates._OWNERS)
+            )
+        )
         fn = next(
             node
             for node in ast.walk(tree)

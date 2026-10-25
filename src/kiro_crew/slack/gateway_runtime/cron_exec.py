@@ -2,10 +2,11 @@
 
 Both arms hold the overlap guard for their run and release it in one ``finally``,
 after abandoning the claim hand-off; both pass the fire-time governance gate and the
-claim-time re-vet, and record the run's verdict on the job.
+claim-time re-vet, and record the run's verdict on the job. A script's
+``notify()`` authenticates with the live dashboard's internal secret.
 
-Orchestrator fields read: ``_running_script_ids``, ``cron_svc``, ``dashboard_state``,
-``sessions``.
+Orchestrator fields read: ``_dashboard_runner``, ``_running_script_ids``, ``cron_svc``,
+``dashboard_state``, ``sessions``.
 Orchestrator fields written: none.
 
 Composed by :mod:`kiro_crew.slack.gateway`, whose globals its functions run on;
@@ -18,10 +19,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import asyncio
-    import json
 
     from kiro_crew.slack.gateway import (
-        CRON_NOTIFICATION_KIND,
         CronClaimTimeDenied,
         CronJob,
         CronQueueTimeout,
@@ -33,7 +32,6 @@ if TYPE_CHECKING:
         _claim_backstop,
         _ClaimHandoff,
         _defer_cron_before_dispatch,
-        _run_chat,
         _vet_at_claim_then,
         delivery_fingerprint,
         load_window_off_loop,
@@ -45,7 +43,6 @@ if TYPE_CHECKING:
         run_script_sandboxed,
         runtime_death,
         sel,
-        spawn_guarded_turn,
     )
 
 
@@ -309,8 +306,8 @@ async def _cron_run_command(self: GatewayOrchestrator, job: CronJob) -> str | No
         # job defect, and counting it auto-pauses at
         # _AUTO_PAUSE_THRESHOLD -- a paused job never fires again, so
         # repeated wedged wakes would permanently disable a healthy
-        # job and leave its work unscheduled. ``cron.py``'s
-        # _execute_with_timeout guard already refuses to count a
+        # job and leave its work unscheduled.
+        # ``CronService._execute_with_timeout``'s guard already refuses to count a
         # never-started run, but this arm calls record_failure()
         # DIRECTLY and so never reaches it. A genuine overrun (the
         # payload started, then ran long) still counts, which is what
@@ -456,39 +453,30 @@ async def _deliver_script_result(
             label = redact(job.name)
             if slot:
                 wrapped = f'[Cron notification: "{label}"]\n{message}\n[/Cron notification]'
-                inject_cls = json.dumps({"cronLabel": label})
-                if slot.running:
-                    qid = slot.queue_append(wrapped, kind=CRON_NOTIFICATION_KIND)
-                    _cls = json.loads(inject_cls)
-                    _cls["queue_id"] = qid
-                    slot.append("queued", wrapped, json.dumps(_cls))
-                else:
-                    # `cls` is not persisted for role `inject`, so the label
-                    # must also ride in `meta`, which is — otherwise the row
-                    # loses its identity on the next rehydrate.
-                    slot.append(
-                        "inject",
-                        wrapped,
-                        inject_cls,
-                        meta={"injectKind": "cron", "cronLabel": label},
-                    )
-                    task = spawn_guarded_turn(
-                        self.dashboard_state,
-                        slot,
-                        _run_chat(
-                            self.dashboard_state,
-                            slot,
-                            wrapped,
-                            _directive_user_origin=False,
-                            # Structural provenance for the session
-                            # crew log: the queued twin above carries
-                            # CRON_NOTIFICATION_KIND, and this branch is
-                            # the same injector dispatching directly.
-                            _turn_actor="cron",
-                        ),
-                    )
-                    slot.task = task
+                # Imported here: this function runs on the facade's globals,
+                # which a module-level import in this owner never reaches.
+                from kiro_crew.dashboard import session_deliver
+
+                # The session decides idle (a cron row and a turn) vs running
+                # (a queued card); the cron names only itself. On a full live
+                # queue the oldest entry gives way, as for a cron's
+                # send_message: a script that fires faster than its
+                # notification turns run would otherwise grow the queue
+                # without bound.
+                delivery = await session_deliver.deliver(
+                    self.dashboard_state,
+                    slot,
+                    wrapped,
+                    session_deliver.cron(label),
+                    evict_oldest=True,
+                )
                 self.dashboard_state.push_slots_update()
+                if delivery == session_deliver.QUEUE_FULL:
+                    # Nothing in the full queue could give way: the result goes
+                    # out as a notification, as it does when the session is gone.
+                    self.dashboard_state.notify(
+                        "cron", f"⚡ {label}", message, meta={"job_id": job.id}
+                    )
             else:
                 self.dashboard_state.notify("cron", f"⚡ {label}", message, meta={"job_id": job.id})
         elif message and not job.silent and self.dashboard_state:
@@ -907,3 +895,28 @@ async def _cron_run_script(self: GatewayOrchestrator, job: CronJob) -> str | Non
         # nothing observed here.
         handoff.abandon()
         self._running_script_ids.discard(job.id)
+
+
+def _live_internal_secret(self: GatewayOrchestrator) -> str:
+    """This gateway's LIVE internal-API secret, for script-cron ``notify()``.
+
+    The dashboard mints the secret at startup and the auth middleware
+    compares against that same in-memory value (``app["local_secret"]``).
+    A script cron's child authenticates ``/api/send-message`` with the
+    secret it is handed at spawn, so the in-process scheduler hands it THIS
+    value rather than one re-derived from the environment or a per-port
+    file — a stale ``KIROCREW_INTERNAL_SECRET`` or ``.secret`` file
+    otherwise wins the derivation and 403s every ``notify()``.
+
+    Returns ``""`` when no dashboard has started (``--no-dashboard`` /
+    API-only), so ``run_script_sandboxed`` falls back to env/file
+    derivation. Read-only and in-process only: the value is never logged or
+    returned over HTTP.
+    """
+    runner = self._dashboard_runner
+    if runner is None:
+        return ""
+    try:
+        return runner.app.get("local_secret", "") or ""
+    except Exception:
+        return ""

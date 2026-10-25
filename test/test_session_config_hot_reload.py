@@ -29,6 +29,7 @@ from kiro_crew.config.live import ConfigWatch
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.session import SessionManager, _watchdog_handle_of
 from kiro_crew.session_cleanup import SessionCleanup
+from kiro_crew.testing.wait import finished
 
 
 def _make_cfg(
@@ -111,6 +112,7 @@ class TestSubscription:
             "workspaces",
             "default_workspace",
             "aws",
+            "apps",
         )
         assert mgr._config_sub is subs[0]
 
@@ -453,7 +455,7 @@ class TestCleanupLoopRereadsPolicy:
             patch.object(SessionCleanup, "_adopt_idle_policy", side_effect=adopt),
             patch.multiple(SessionCleanup, **quiet),
         ):
-            await asyncio.wait_for(cleanup._run_cleanup_ticks(0.01), timeout=5)
+            await finished(cleanup._run_cleanup_ticks(0.01), "the tick loop stopping on shutdown")
         assert calls >= 3
 
     @pytest.mark.asyncio
@@ -509,7 +511,9 @@ class TestCleanupLoopRereadsPolicy:
                 patch.object(SessionCleanup, "_adopt_idle_policy", side_effect=adopt),
                 patch.multiple(SessionCleanup, **quiet),
             ):
-                await asyncio.wait_for(cleanup._run_cleanup_ticks(0.01), timeout=5)
+                await finished(
+                    cleanup._run_cleanup_ticks(0.01), "the tick loop stopping on shutdown"
+                )
         finally:
             pool.shutdown(wait=True)
 

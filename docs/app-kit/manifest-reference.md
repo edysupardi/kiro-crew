@@ -39,7 +39,8 @@ permissions or setting `minKiroCrewVersion`.
 The signature covers `name`, `version`, `signer` and `permissions`, plus each of
 these groups when it is non-empty: `notifications`, `crons`, `contributes`,
 `setup`, `mcpServers`, `backend`, `ui`, `agents`, `skills`, `sops`,
-`dependencies` and `platform`. An empty group is left out of the signed bytes.
+`dependencies`, `platform` and `config_keys`. An empty group is left out of the signed
+bytes.
 
 A gateway computes the signed bytes from the groups it knows. A signed manifest
 that declares a group an older gateway does not sign fails verification there.
@@ -54,6 +55,7 @@ It fails closed: the install is refused, not downgraded. Set
 | `skills` | string[] | Paths to skill directories |
 | `sops` | string[] | Paths to SOP (Standard Operating Procedure) files |
 | `mcpServers` | object | MCP server definitions (same format as `mcp.json`) |
+| `config_keys` | string[] | Top-level `config.json` object keys owned by this app. At most 200 keys may be declared, and each key may contain at most 200 characters. Declarations apply only while the app is installed |
 
 ### How a stdio `command` is resolved at registration
 
@@ -86,6 +88,16 @@ installed against:
 - **A command carrying a path** (absolute or relative) is never rewritten. If it
   does not point at a runnable file at registration time, a warning naming the
   app, server, and command is logged — the entry is still written.
+- **An app's own `.py` launcher** (a stdio server whose `command` is a bare
+  `python`, `python3` or `py`, and whose launch target is a relative path ending in
+  `.py`, given in `args` and relative to the app root) is resolved to its absolute
+  path under the app root, so a staged app whose package is not pip-installed can
+  start. A `command` carrying a path, such as `.venv/bin/python`, is not covered:
+  its launcher operand is left as written. Only that one operand is touched; `-m`, `-c`, and every
+  argument after the script are left as written. The rewrite applies only when the
+  operand resolves (links followed) to an existing file inside the app root; an
+  absolute path, or a relative one that is not such a file, is left as written. A
+  relative path in `command` itself is still never rewritten.
 - The host CLI name `kirocrew` is pinned to the running gateway before any of
   the above applies.
 
@@ -143,6 +155,7 @@ receive a vault secret is undecided
 | `skip_dates` | string[] | Calendar dates the job must not fire on, evaluated in `timezone`. Must be zero-padded `YYYY-MM-DD` — `2026-1-1` parses but never matches the padded fire-time rendering, so it is rejected at manifest validation rather than silently skipping nothing |
 | `timeout` | number | Seconds a `command` or `script` subprocess may run. `0` or omitted uses the scheduler default: 30s for a script, 300s for a command |
 | `timeout_secs` | number | Seconds one run may take in total, within 1..86400. `0` or omitted uses the scheduler default. On a `command` or `script` cron it must cover `timeout` (or that default) plus 5s of cleanup, so a script that runs 40s needs both, e.g. `"timeout": 60, "timeout_secs": 65`. A value the cron SDK would refuse is rejected at manifest validation |
+| `strict_schedule` | boolean | Default `false`. When `true` the job fires exactly on its schedule instead of after the scheduler's random start delay, which spreads jobs out and on a daily job can reach 59 minutes. Use it for a time the user chose on purpose, such as a report wanted ready at 06:50. Must be a JSON boolean; any other type is rejected at manifest validation |
 | `enabled` | boolean | Default `true`. Must be a JSON boolean — any other type is rejected at manifest validation. When `false` the cron is registered **paused** (visible in the Schedule view, resumable) instead of firing on install/enable — for jobs that need user configuration first |
 
 A manifest that declares any `crons` must also declare `"cron": true` under
@@ -887,6 +900,7 @@ packages at all.
     "sessionApproval": false,
     "spawn": false,
     "jobs": false,
+    "proposeCrewmate": false,
     "exposeToApps": []
   }
 }
@@ -904,6 +918,7 @@ packages at all.
 | `permissions.sessionApproval` | boolean | Controls existing local user sessions: send messages (including generated response-option choices, but not a change to the session's agent binding, persona settings, or a harness slash command), approve or deny pending tool requests, and change approval modes within the limits below |
 | `permissions.spawn` | boolean | May start a background agent through the host's subagent manager (`ctx.spawn`) |
 | `permissions.jobs` | boolean | May run durable background work through `ctx.job` and the app-owned `_jobs/*` routes |
+| `permissions.proposeCrewmate` | boolean | **Preview, switched off**: `ctx.crewmate` stays `None` until the owner view that lists the cards lands (#21718). May propose one crewmate from a `.crewmate` bundle through `ctx.crewmate`. Gates a real capability like `spawn`: `ctx.crewmate` is absent unless the value is literally `true`. Each proposal is an owner change card; only the owner's press creates the crewmate ([api-reference](api-reference.md#crewmate-proposals-ctxcrewmate)) |
 | `permissions.exposeToApps` | string[] | App names (or `"*"`) allowed to request cross-app visibility into this app's slots/subagents |
 
 #### `permissions.spawn` — Background Agents
@@ -926,9 +941,12 @@ API: `apps/spawn_sdk.py` — `SpawnSDK`, `build_spawn_impl`, `build_done_probe`,
 > **Not an in-process sandbox.** Most fields remain advisory for app code loaded
 > inside the gateway. The validator functions in `apps/permissions.py`
 > (`validate_permissions`, `format_permissions_summary`) are still **not wired
-> into the install or runtime path** -- they are only exercised by unit tests, so
-> they carry no `sessionApproval` text. `permissions.sessionApproval` is shown on the app detail
-> page and in the install or enable consent dialog. It is enforced for app-token
+> into the install or runtime path**; `format_permissions_summary` only feeds the
+> `kirocrew app enable` refusal below. `permissions.sessionApproval` is shown on the app detail
+> page and in the install or enable consent dialog, and only the dashboard grants it.
+> `kirocrew app enable` has no consent flag or prompt: for an app whose consent is
+> pending it prints what the app asks for and the app's dashboard link, exits 1 and
+> leaves the app off. It is enforced for app-token
 > user-session calls, in addition to `permissions.api`. The app must be enabled.
 > The grant reaches existing local user-owned sessions only; cron, system, remote,
 > member-mode, and other apps' sessions are denied. Apps retain their pre-existing
@@ -1126,7 +1144,7 @@ Control how Kiro Crew manages the app:
 For a **server-mode** app (every builtin), `platform.os` is a user-facing CLAIM,
 not an access control. It is rendered on the App Store detail page
 (`website/src/pages/AppDetailPage.tsx`), and that is its only non-test consumer.
-`apps/routes.py` reads it once, via `_client_install_manifest()`, which returns
+`apps/routes_enable.py` reads it once, via `_client_install_manifest()`, which returns
 `None` unless `platform.installMode == "client"`; `handle_enable_app`'s docstring
 states the rest outright — "nothing else on the enable path consults that field".
 So omitting the block does **not** stop the app being enabled anywhere.
@@ -1216,11 +1234,60 @@ For apps that run outside the dashboard (e.g. Electron apps), the top-level
 cloud/remote environment with no display, the endpoint returns the command for
 the user to run locally instead of executing it on the server.
 
-The launched process does not inherit the gateway's environment. It gets the
-scrubbed minimal allowlist, which carries no SSH agent, AWS secrets or model
-credentials. On top of that it gets these desktop-session variables when the
-gateway has them: `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`,
-`DBUS_SESSION_BUS_ADDRESS`, `XDG_SESSION_TYPE` and `XDG_CURRENT_DESKTOP`.
+#### `openCommand` — Environment
+
+The command runs as `/bin/sh -c "<openCommand>"` under the standard sandbox
+tier and the cgroup resource ceiling, with an **allowlisted environment** — not
+the gateway's. An installed app is untrusted content, so the launcher gets the
+same allowlist the manifest's install and build commands get, plus the location
+hints a desktop launch needs:
+
+- **The allowlist** (`_SAFE_ENV_KEYS` / `minimal_env` in
+  `src/kiro_crew/apps/registry_pipeline/subprocess_env.py` — that source file
+  is the list): shell and locale basics such as `HOME` and `PATH`, the XDG
+  directories (including `XDG_RUNTIME_DIR`), toolchain roots (Java, Node,
+  Python, Conda, Gradle/Maven), the git SSH overrides, and the Windows
+  equivalents of the basics.
+- **Removed again before the spawn** (`sandbox.scrub_env`): of the allowlisted
+  names, the SSH agent socket `SSH_AUTH_SOCK`. The install and build commands
+  run git against the owner's own repositories and need it; a launcher does
+  not, and an app-authored shell holding it authenticates as the operator. The
+  scrub's other targets (`AWS_SECRET*` / `AWS_SESSION*`, `GNUPGHOME`,
+  `GIT_ASKPASS`, the gateway's channel credentials) are not in the allowlist to
+  begin with.
+- **Desktop hints copied on top**, each only when the gateway itself has it:
+  `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`,
+  `XDG_SESSION_TYPE`, `XDG_CURRENT_DESKTOP`.
+
+The two user-bus locators, `XDG_RUNTIME_DIR` (from the allowlist) and
+`DBUS_SESSION_BUS_ADDRESS` (from the desktop hints), **reach the child** on this
+path. The sandbox's restore-then-drop of those two variables applies to spawns
+that go through `sandbox.sandboxed_spawn_argv`; `openCommand` does not. Whether
+a standard-mode launcher should hold a live user-bus address at all is under
+review in [#16520](https://github.com/kirodotdev/KiroCrew/issues/16520) — do
+not build a launcher that depends on `DBUS_SESSION_BUS_ADDRESS` being set.
+`XDG_RUNTIME_DIR` is not in question: it is where the Wayland socket lives.
+
+Anything not listed above — the gateway's own model credentials, API keys you
+exported in the gateway's shell, `EDITOR`, `BROWSER`, custom `MYAPP_*`
+variables — is **absent**. Set what your launcher needs inside the command
+string itself (`"openCommand": "MYAPP_MODE=tray myapp"`), or have the launcher
+read its own config file.
+
+**Failures are silent.** The endpoint spawns the shell and answers
+`{"ok": true, "pid": …}` immediately; it does not wait, and the child's stdout
+and stderr go to `/dev/null`. A launcher that exits because a variable it
+expected is missing still shows as a successful launch in the dashboard, and
+the audit log records only `app_open … launched` — neither reflects the exit.
+If your launcher can fail, have it write its own log, and create the log
+directory first — a `>>` into a directory that does not exist makes `sh` exit
+before it runs your command, which is the same silent failure:
+
+```json
+{
+  "openCommand": "mkdir -p \"$HOME/.cache/myapp\" && myapp >>\"$HOME/.cache/myapp/open.log\" 2>&1"
+}
+```
 
 ## Validation Rules
 
@@ -1248,9 +1315,13 @@ gateway has them: `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`,
   and `..` traversal are rejected (canonical resolve + containment when the app dir
   is known). `backend.hooks.*` are format-checked (`module.path:callable`, which
   cannot express traversal) and containment-checked again at load time.
-  `mcpServers` entries use `command`/`args`/`url`/`env` (not app-relative file paths)
-  and are not path-checked.
+  `mcpServers` entries use `command`/`args`/`url`/`env`. They are not path-checked at
+  manifest load; at registration, when `command` is a bare `python`, `python3` or
+  `py`, a relative `.py` launch target is resolved against the app root when it is
+  a file inside it (see "An app's own `.py` launcher" above).
 - All required fields must be non-empty strings
+- `config_keys` must be an array of at most 200 non-empty strings, each at most
+  200 characters long
 - Each cron entry must specify either `every` or `cron_expr`
 - A non-empty `crons` requires `"cron": true` under `permissions`. Install,
   update and self-registration refuse the manifest otherwise; an app already

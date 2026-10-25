@@ -6,7 +6,7 @@ import string
 
 import pytest
 
-from kiro_crew import security
+from kiro_crew import edition, security
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.platform import (
     BASELINE_DENY,
@@ -201,6 +201,62 @@ class TestProfileResolution:
         monkeypatch.setattr("kiro_crew.platform.profile.Path.home", lambda: _FakeHome(False))
         assert resolve_profile(cfg, entry_points=[]) == PROFILE_STANDALONE
 
+    def test_precedence_tests_run_on_the_oss_edition(self) -> None:
+        # Every test above relies on the checked-in edition; pin it.
+        assert edition.EDITION == "oss"
+
+
+class TestEnterpriseEditionProfile:
+    """An enterprise build resolves enterprise before every other signal."""
+
+    @pytest.mark.parametrize("value", ["standalone", "bogus", "", "enterprise"])
+    def test_env_profile_cannot_change_it(
+        self, cfg: KiroCrewConfig, monkeypatch, value: str
+    ) -> None:
+        monkeypatch.setattr("kiro_crew.edition.EDITION", "enterprise")
+        monkeypatch.setenv("KIROCREW_PROFILE", value)
+        assert resolve_profile(cfg, entry_points=[]) == PROFILE_ENTERPRISE
+
+    def test_no_companion_and_no_marker_is_still_enterprise(
+        self, cfg: KiroCrewConfig, monkeypatch
+    ) -> None:
+        # No entry point, no probe, no marker: still enterprise, so discovery
+        # fails closed instead of booting open-source defaults.
+        monkeypatch.setattr("kiro_crew.edition.EDITION", "enterprise")
+        monkeypatch.delenv("KIROCREW_PROFILE", raising=False)
+        monkeypatch.delenv("KIROCREW_SSO_PROFILE_PROBE", raising=False)
+        monkeypatch.delenv("KIROCREW_MIDWAY_PROFILE_PROBE", raising=False)
+        monkeypatch.setattr("kiro_crew.platform.profile.Path.home", lambda: _FakeHome(False))
+        assert resolve_profile(cfg, entry_points=[]) == PROFILE_ENTERPRISE
+
+    def test_enterprise_build_without_companion_fails_closed_at_discovery(
+        self, monkeypatch
+    ) -> None:
+        from kiro_crew.platform.discovery import (
+            PlatformCompositionError,
+            discover_companion_context,
+        )
+
+        monkeypatch.setattr("kiro_crew.edition.EDITION", "enterprise")
+        monkeypatch.setenv("KIROCREW_PROFILE", "standalone")
+        cfg = KiroCrewConfig()
+        profile = resolve_profile(cfg, entry_points=[])
+        with pytest.raises(PlatformCompositionError, match="fail-closed") as raised:
+            discover_companion_context(profile, cfg, entry_points=[])
+        # The advice must not point at an override this build ignores.
+        message = str(raised.value)
+        assert "KIROCREW_PROFILE=standalone" not in message
+        assert "enterprise-edition build" in message
+
+    def test_oss_build_keeps_the_standalone_advice(self, monkeypatch) -> None:
+        from kiro_crew.platform.discovery import (
+            PlatformCompositionError,
+            discover_companion_context,
+        )
+
+        with pytest.raises(PlatformCompositionError, match="KIROCREW_PROFILE=standalone"):
+            discover_companion_context(PROFILE_ENTERPRISE, KiroCrewConfig(), entry_points=[])
+
 
 class _FakeHome:
     """A fake home dir whose ``/ <marker>`` existence is controllable."""
@@ -238,6 +294,34 @@ class TestBootstrapAndDiscovery:
         with pytest.raises(PlatformCompositionError):
             bootstrap_context(cfg)
 
+    def test_bootstrap_reuses_its_entry_point_snapshot(
+        self, cfg: KiroCrewConfig, monkeypatch
+    ) -> None:
+        from kiro_crew.platform import bootstrap as bootstrap_mod
+
+        entry_point = object()
+        scans: list[int] = []
+        received: list[object] = []
+        companion = build_default_context(cfg, profile=PROFILE_ENTERPRISE)
+
+        def _entry_points():
+            scans.append(1)
+            return [entry_point]
+
+        def _discover(profile, discovered_cfg, *, entry_points, **_kwargs):
+            assert profile == PROFILE_ENTERPRISE
+            assert discovered_cfg is cfg
+            received.extend(entry_points)
+            return companion
+
+        monkeypatch.setenv("KIROCREW_PROFILE", "enterprise")
+        monkeypatch.setattr(bootstrap_mod, "plugin_entry_points", _entry_points)
+        monkeypatch.setattr(bootstrap_mod, "discover_companion_context", _discover)
+
+        assert bootstrap_mod.bootstrap_context(cfg) is companion
+        assert scans == [1]
+        assert received == [entry_point]
+
     def test_contract_version_mismatch_rejected(self, cfg: KiroCrewConfig, monkeypatch) -> None:
         import dataclasses
 
@@ -249,7 +333,9 @@ class TestBootstrapAndDiscovery:
         )
         monkeypatch.setenv("KIROCREW_PROFILE", "enterprise")
         monkeypatch.setattr(bootstrap_mod, "plugin_entry_points", lambda: [object()])
-        monkeypatch.setattr(bootstrap_mod, "discover_companion_context", lambda profile, cfg: bad)
+        monkeypatch.setattr(
+            bootstrap_mod, "discover_companion_context", lambda profile, cfg, **_kwargs: bad
+        )
         with pytest.raises(PlatformCompositionError):
             bootstrap_context(cfg)
 
@@ -263,7 +349,9 @@ class TestBootstrapAndDiscovery:
 
         monkeypatch.setenv("KIROCREW_PROFILE", "enterprise")
         monkeypatch.setattr(bootstrap_mod, "plugin_entry_points", lambda: [object()])
-        monkeypatch.setattr(bootstrap_mod, "discover_companion_context", lambda profile, cfg: None)
+        monkeypatch.setattr(
+            bootstrap_mod, "discover_companion_context", lambda profile, cfg, **_kwargs: None
+        )
         with pytest.raises(PlatformCompositionError):
             bootstrap_context(cfg)
 
@@ -440,6 +528,11 @@ class TestRedactLogViaContext:
         "task_planner.py",
         "name_grant.py",
     )
+    #: A converged site split into owner modules is judged with them: the facade keeps
+    #: the call, and no owner may reach the baseline components either.
+    CONVERGED_SITE_OWNERS = {
+        "name_grant.py": ("name_grant_refusals.py", "name_grant_tables.py", "name_grant_lookup.py"),
+    }
 
     def test_converged_log_sites_do_not_drift_back_to_the_baseline(self) -> None:
         """Each converged site must CALL the helper and not the raw components.
@@ -461,7 +554,10 @@ class TestRedactLogViaContext:
 
         root = pathlib.Path(kiro_crew.__file__).parent
         for rel in self.CONVERGED_LOG_SITES:
-            lines = (root / rel).read_text(encoding="utf-8").splitlines()
+            files = (rel, *self.CONVERGED_SITE_OWNERS.get(rel, ()))
+            lines = [
+                ln for f in files for ln in (root / f).read_text(encoding="utf-8").splitlines()
+            ]
             body = [ln for ln in lines if not ln.lstrip().startswith(("import ", "from "))]
             calls = sum(1 for ln in body if "redact_log_via_context(" in ln)
             assert calls >= 1, (

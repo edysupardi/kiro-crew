@@ -5,11 +5,12 @@
  * answer into the store; a refusal is surfaced in the sidebar's error cluster.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { Provider } from 'react-redux'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createTestStore } from './helpers'
+import { sseSlotTitle } from '../store/dashboardSlice'
 import { ThemeProvider } from '../hooks/useTheme'
 import { useAppSelector, type RootState } from '../store'
 import { initI18n } from '../i18n/all'
@@ -31,11 +32,13 @@ import ChatSidebar from '../pages/ChatSidebar'
 
 const OLD_TITLE = 'What the session started as'
 const SLOT_KEY = 's-row-auto-title'
+const MEMBER_KEY = 'member-team-lead'
 
 function rows(): ChatSlot[] {
   return [
     { key: 'active', title: 'The active session', messages: 1, running: false, last_ts: '2026-01-02T00:00:00Z' },
     { key: SLOT_KEY, title: OLD_TITLE, messages: 12, running: false, last_ts: '2026-01-01T00:00:00Z' },
+    { key: MEMBER_KEY, title: 'A stored generated topic', messages: 30, running: false, last_ts: '2026-01-01T00:00:00Z', mode: 'member', surface: 'chat', agent: 'team-lead' },
   ] as ChatSlot[]
 }
 
@@ -105,6 +108,19 @@ describe('session row menu: Regenerate title', () => {
     expect(titleInStore(store)).toBe(OLD_TITLE)
   })
 
+  it('names an untitled session "Untitled session", never its key, when regeneration is refused (#23059)', async () => {
+    generateTitleMock.mockRejectedValue(new Error('model unavailable'))
+    const { store } = renderSidebar()
+    // The slot has no title of its own: its title is its key.
+    act(() => { store.dispatch(sseSlotTitle({ key: SLOT_KEY, title: SLOT_KEY })) })
+
+    await pickRegenerate()
+
+    const notice = await screen.findByTestId('auto-title-error')
+    expect(notice.textContent).toContain('Untitled session: model unavailable')
+    expect(notice.textContent).not.toContain(SLOT_KEY)
+  })
+
   it('does not start a second generation while one is in flight', async () => {
     let resolve: (v: { title: string }) => void = () => {}
     generateTitleMock.mockReturnValue(new Promise(r => { resolve = r }))
@@ -119,5 +135,26 @@ describe('session row menu: Regenerate title', () => {
     resolve({ title: 'Settled' })
     await waitFor(() => expect(titleInStore(store)).toBe('Settled'))
     expect(screen.queryByTestId('row-title-generating')).toBeNull()
+  })
+})
+
+describe('session row: a mate\'s own thread', () => {
+  beforeEach(async () => {
+    generateTitleMock.mockReset()
+    localStorage.setItem('mc-session-stale-collapse-ms', '0')
+    await initI18n(); await i18next.changeLanguage('en')
+  })
+
+  it('is named after the mate, and the row offers no menu to rename or regenerate it', () => {
+    renderSidebar()
+    const row = document.querySelector(`[data-session-row="${MEMBER_KEY}"]`) as HTMLElement
+    expect(row.querySelector('[data-session-title]')?.textContent).toBe('team-lead')
+    expect(within(row).queryByText('A stored generated topic')).toBeNull()
+    // The title keeps the topic stored before the thread was named, on hover only.
+    expect(row.querySelector('[data-session-title]')?.getAttribute('title')).toBe('team-lead: A stored generated topic')
+    // The chip does not print the name a second time.
+    expect(within(row).getAllByText('team-lead')).toHaveLength(1)
+    expect(within(row).queryByRole('button', { name: 'More options' })).toBeNull()
+    expect(generateTitleMock).not.toHaveBeenCalled()
   })
 })

@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from git_maintenance_helpers import git_maintenance_off_entries
 
 import kiro_crew.dashboard.handlers.files as files_mod
 from kiro_crew import platform_compat
@@ -82,6 +83,21 @@ def mock_sel():
         yield m.return_value
 
 
+def _fixture_git_env() -> dict[str, str]:
+    """The suite's env with a fixed identity, no host config and auto maintenance off."""
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "T",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "T",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+    }
+    env.update(git_maintenance_off_entries(env))
+    return env
+
+
 def _git(cwd, *args, check: bool = True) -> subprocess.CompletedProcess:
     """Every git this module runs: from *cwd*, with the host's config held away.
 
@@ -99,15 +115,7 @@ def _git(cwd, *args, check: bool = True) -> subprocess.CompletedProcess:
         # which is FUNCTION-scoped and so does not cover the session-scoped template
         # builder below. os.devnull rather than a literal /dev/null: this file is
         # collected on Windows, where that path does not exist.
-        env={
-            **os.environ,
-            "GIT_AUTHOR_NAME": "T",
-            "GIT_AUTHOR_EMAIL": "t@example.com",
-            "GIT_COMMITTER_NAME": "T",
-            "GIT_COMMITTER_EMAIL": "t@example.com",
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_CONFIG_SYSTEM": os.devnull,
-        },
+        env=_fixture_git_env(),
     )
 
 
@@ -157,6 +165,59 @@ class TestProjectGitEndpoint:
         assert resp.status == 200
         assert data["branch"] == "trunk"
         assert data["repoRoot"] == os.path.realpath(str(repo))
+
+    @pytest.mark.asyncio
+    async def test_repo_root_project_is_reported_as_the_root(self, repo, mock_sel):
+        async with TestClient(TestServer(_make_app(str(repo)))) as client:
+            resp = await client.get("/api/project/git", params={"path": str(repo)})
+            data = await resp.json()
+        assert data["isRepoRoot"] is True
+
+    @pytest.mark.asyncio
+    async def test_plain_folder_inside_a_repo_is_not_the_root(self, repo, mock_sel):
+        """A folder with no ``.git`` of its own, under a repo rooted higher up.
+
+        It is "in git" (``repo`` is true, so the branch chip and Git panel still
+        work), but it is not a worktree source: ``isRepoRoot`` is what tells the
+        worktree surfaces apart from those.
+        """
+        plain = repo / "notes"
+        plain.mkdir()
+        async with TestClient(TestServer(_make_app(str(plain)))) as client:
+            resp = await client.get("/api/project/git", params={"path": str(plain)})
+            data = await resp.json()
+        assert data["repo"] is True
+        assert data["repoRoot"] == os.path.realpath(str(repo))
+        assert data["isRepoRoot"] is False
+
+    @pytest.mark.asyncio
+    async def test_plain_non_git_folder_is_never_a_repo_root(self, tmp_path, mock_sel):
+        """A plain folder is never reported as a worktree source.
+
+        tmp_path can sit under an unrelated repo on some hosts, so either answer
+        shape is accepted: no repository at all, or a repository rooted above.
+        """
+        plain = tmp_path / "plain-project"
+        plain.mkdir()
+        async with TestClient(TestServer(_make_app(str(plain)))) as client:
+            resp = await client.get("/api/project/git", params={"path": str(plain)})
+            data = await resp.json()
+        assert resp.status == 200
+        assert data.get("isRepoRoot") is not True
+        if data["repo"] is False:
+            assert "isRepoRoot" not in data
+
+    @pytest.mark.asyncio
+    async def test_is_repo_root_compares_real_paths_not_redacted_ones(
+        self, repo, mock_sel, as_not_darwin
+    ):
+        """The echoed paths may be masked; the root test must not depend on them."""
+        with patch("kiro_crew.dashboard.handlers.files.redact", return_value="masked"):
+            async with TestClient(TestServer(_make_app(str(repo)))) as client:
+                resp = await client.get("/api/project/git", params={"path": str(repo)})
+                data = await resp.json()
+        assert data["repoRoot"] == "masked"
+        assert data["isRepoRoot"] is True
 
     @pytest.mark.asyncio
     async def test_non_repo_reports_repo_false(self, tmp_path, mock_sel):

@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
-import { Check, ChevronDown, PanelLeft, Plus, Search } from 'lucide-react'
+import { Check, ChevronDown, FileUp, PanelLeft, Plus, Search } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { MemberRosterRow } from '../../api/client'
 import { crewDisplayName } from '../../components/AgentSelector'
@@ -11,6 +11,7 @@ import { fmtList } from '../../i18n/format'
 import { cn } from '../../lib/utils'
 import { rosterPopulation, rosterShows, type MemberSignals } from './rosterFilter'
 import { uiLocation } from '../../uiLocations/uiLocation'
+import CrewmateImportDialog from './CrewmateImportDialog'
 
 /** How many faces the closed chip stacks. Three is enough to read as "a crew"
  *  without the chip growing with the roster; the open list says how many there
@@ -84,6 +85,7 @@ export default function CrewmateSwitcher({
   onShowRoster,
   signals = rowOnlySignals,
   openRequest = 0,
+  faceOnStageFor = '',
   className,
 }: {
   /** The FULL roster, in the page's display order. The hide rule below decides
@@ -107,10 +109,15 @@ export default function CrewmateSwitcher({
   /** Bumped by the page to open the list from outside (the unread column's
    *  "+N" pill). A counter, not a boolean, so two requests in a row both open. */
   openRequest?: number
+  /** The crewmate whose face is centre stage in the first Mate's entrance
+   *  (#23207): its face in the stack holds its place unpainted until the face
+   *  lands, as the header pill's slot and the roster row do. `''` for none. */
+  faceOnStageFor?: string
   className?: string
 }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
+  const [importing, setImporting] = useState(false)
   const [query, setQuery] = useState('')
   // An outside request opens the list; the first render's 0 is not a request.
   const seenRequest = useRef(openRequest)
@@ -201,7 +208,9 @@ export default function CrewmateSwitcher({
               <span
                 key={m.name}
                 className={cn('rounded-full ring-2 ring-bg group-hover:ring-bg-hover group-data-[state=open]:ring-bg-hover transition-colors', i > 0 && '-ml-2')}
-                style={{ zIndex: STACK_FACES - i }}
+                style={{ zIndex: STACK_FACES - i, ...(faceOnStageFor === m.name ? { visibility: 'hidden' as const } : {}) }}
+                data-testid="crewmate-switcher-face"
+                data-entrance-empty={faceOnStageFor === m.name ? '' : undefined}
               >
                 <CrewStateAvatar seed={m.name} avatar={m.avatar} slotKey={m.slot_key} running={signals(m).running} size={22} working="subtle" />
               </span>
@@ -358,6 +367,26 @@ export default function CrewmateSwitcher({
                 {t('pages.membersPage.add_member')}
               </button>
             )}
+            {/* Import from file sits under New crewmate and is held with it:
+                both end in a new crewmate, and only the owner's press on the
+                import card creates one (rfc-crewmate-share.md §5.4). */}
+            {onCreate && (
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false)
+                  setImporting(true)
+                }}
+                className="flex items-center gap-2.5 w-full px-2.5 py-2 rounded-xl text-left text-[13px] font-semibold text-text hover:bg-bg-hover cursor-pointer"
+                data-testid="crewmate-switcher-import"
+                {...uiLocation('members.switcher.import')}
+              >
+                <span className="w-8 h-8 rounded-full bg-bg-hover grid place-items-center text-muted" aria-hidden="true">
+                  <FileUp size={15} />
+                </span>
+                {t('pages.membersPage.import_from_file')}
+              </button>
+            )}
             {onShowRoster && (
               <button
                 type="button"
@@ -379,6 +408,8 @@ export default function CrewmateSwitcher({
           </div>
         )}
       </PopoverContent>
+      {/* Mounted only while open: it reads the import slot's cards. */}
+      {onCreate && importing && <CrewmateImportDialog open onOpenChange={setImporting} />}
     </Popover>
   )
 }

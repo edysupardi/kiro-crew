@@ -78,6 +78,50 @@ def test_mcp_server_module_skips_gateway_stack(module: str, tmp_path: Path) -> N
     assert not loaded & set(HEAVY), sorted(loaded & set(HEAVY))
 
 
+#: Application subsystems a started-but-uncalled ``mcp-dashboard`` must not load.
+#: A Codex thread launches the server from the operator's own config and may
+#: never call it, so whatever the start imports is paid by every such helper.
+DASHBOARD_START_UNUSED = (
+    "kiro_crew.mcp_core",
+    "kiro_crew.history",
+    "kiro_crew.knowledge",
+    "kiro_crew.skills",
+    "kiro_crew.messaging",
+    "kiro_crew.session",
+    "kiro_crew.cron",
+    "kiro_crew.apps.bridges",
+)
+
+
+def test_dashboard_start_skips_unused_application_subsystems(tmp_path: Path) -> None:
+    """The real start-up path, ``slim_server(["mcp-dashboard"])``, in a fresh interpreter.
+
+    It runs every import the server makes before it reads stdin, including the
+    installed-app config-key scan. The first tool call imports ``mcp_core``.
+    """
+    (tmp_path / "home").mkdir()
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, sys\n"
+            "from kiro_crew.mcp_entry import slim_server\n"
+            "assert slim_server(['mcp-dashboard']) is not None\n"
+            "print(json.dumps(sorted(sys.modules)))",
+        ],
+        env=_child_env(tmp_path, KIROCREW_PROJECT_DIR=str(tmp_path)),
+        cwd=str(tmp_path),
+        capture_output=True,
+        **UTF8_TEXT,
+        timeout=120,
+        check=False,
+    )
+    assert out.returncode == 0, out.stderr
+    loaded = set(json.loads(out.stdout.strip().splitlines()[-1]))
+    assert "kiro_crew.mcp_dashboard" in loaded
+    assert not loaded & set(DASHBOARD_START_UNUSED), sorted(loaded & set(DASHBOARD_START_UNUSED))
+
+
 def test_slim_entry_module_scope_imports_nothing_from_the_package(tmp_path: Path) -> None:
     # Only the package root (whose __init__ is stdlib-only) may be present.
     probe = _loaded_after(
@@ -301,6 +345,9 @@ def _spy_steps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
         monkeypatch.setattr(
             owner, "ensure_data_home", lambda: steps.append("data_home") or real_home()
         )
+    from kiro_crew.config import validation
+
+    monkeypatch.setattr(validation, "prime_extension_config_keys", rec("config_keys"))
     monkeypatch.setattr(cli, "_setup_cli_logging", rec("logging"))
     monkeypatch.setattr(mcp_entry, "_setup_logging", rec("logging"))
     monkeypatch.setattr(cli, "boot_platform", rec("boot"))
@@ -345,12 +392,74 @@ def test_cli_and_slim_start_run_the_same_steps_for_an_mcp_server(
     cli_steps, cli_env = run(via_cli)
     slim_steps, slim_env = run(lambda: mcp_entry.run_if_slim(["mcp-guide"]))
     assert cli_steps[-1] == "server"
+    assert cli_steps.index("config_keys") < cli_steps.index("logging")
     assert slim_steps == cli_steps
     assert slim_env == cli_env
 
 
+def test_slim_start_primes_config_keys_without_admission_side_effects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Priming runs before logging, so it must not seed the admission policy,
+    publish a posture, or write a SEL record, even with no policy file present."""
+    from kiro_crew import sel as sel_mod
+    from kiro_crew.config import validation
+    from kiro_crew.platform import admission, discovery, governance_health
+
+    home = tmp_path / "home"
+    home.mkdir()
+    real_prime = validation.prime_extension_config_keys
+    side_effects: list[str] = []
+
+    class _Dist:
+        files: list = []
+
+        @staticmethod
+        def read_text(_name: str) -> str:
+            return json.dumps({"name": "companion", "config_keys": ["companion-owned"]})
+
+    class _EntryPoint:
+        name = "companion"
+        group = discovery.PLUGIN_GROUP
+        value = "companion:build"
+        dist = _Dist()
+
+    monkeypatch.setenv("KIROCREW_HOME", str(home))
+    monkeypatch.delenv("KIROCREW_ADMISSION_POLICY", raising=False)
+    steps = _spy_steps(monkeypatch, tmp_path)
+    monkeypatch.setattr(validation, "prime_extension_config_keys", real_prime)
+    monkeypatch.setattr(discovery, "plugin_entry_points", lambda: [_EntryPoint()])
+    monkeypatch.setattr(sel_mod, "sel", lambda: side_effects.append("sel"))
+    monkeypatch.setattr(
+        governance_health, "mark_governance_incident", lambda *a, **k: side_effects.append("mark")
+    )
+    monkeypatch.setattr(
+        governance_health, "set_admission_posture", lambda *a, **k: side_effects.append("posture")
+    )
+    try:
+        mcp_entry.run_if_slim(["mcp-guide"])
+        assert steps[-1] == "server"
+        assert side_effects == []
+        assert not admission._policy_default_path().exists()
+        assert not admission._seed_marker_path().exists()
+        assert validation.extension_config_keys("plugins") == frozenset({"companion-owned"})
+    finally:
+        for source in ("apps", "plugins"):
+            validation.replace_extension_config_keys(source, ())
+
+
+def test_full_cli_keeps_registry_scan_off_the_gateway_readiness_path() -> None:
+    cli_src = (Path(SRC) / "kiro_crew" / "cli.py").read_text(encoding="utf-8")
+    guard = cli_src.index('\n    if args.command != "gateway":\n')
+    prime = cli_src.index("\n        prime_extension_config_keys()\n")
+    first_load = cli_src.index("\n    _setup_cli_logging(args.command, args.verbose)\n")
+    gateway_loop = cli_src.index("\n            asyncio.run(_gateway(**gw_kwargs))\n")
+    assert guard < prime < first_load < gateway_loop
+
+
 def test_slim_servers_match_the_cli_dispatch() -> None:
     import importlib
+    import re
 
     for command, (module, func) in mcp_entry.SLIM_SERVERS.items():
         assert callable(getattr(importlib.import_module(module), func)), command
@@ -358,6 +467,13 @@ def test_slim_servers_match_the_cli_dispatch() -> None:
     for command, (module, func) in mcp_entry.SLIM_SERVERS.items():
         assert f'"{command}"' in cli_src
         assert module in cli_src, module
+    # And the other way: every server cli.main dispatches by name starts slim too,
+    # so a new `elif args.command == "mcp-<name>":` branch cannot quietly fall back
+    # to importing the whole CLI on every agent session.
+    dispatched = set(re.findall(r'elif args\.command == "(mcp-[a-z-]+)":', cli_src))
+    assert dispatched, "cli.main's mcp-* dispatch was not found"
+    slim = set(mcp_entry.SLIM_SERVERS)
+    assert dispatched == slim, sorted(dispatched ^ slim)
 
 
 def test_mcp_guide_answers_initialize_without_the_gateway_stack(tmp_path: Path) -> None:

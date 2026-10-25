@@ -12,7 +12,7 @@ from collections.abc import Iterator
 # tree KiroCrew spawns (the ACP provider, MCP probes, gateway pool backends).
 # Children inherit the environment, so marking the provider process
 # transitively marks every MCP server it launches. The untracked-orphan sweep
-# (``session_pid.py``) reads it back from ``/proc/<pid>/environ`` to positively
+# (``session_pid_orphan_scan.py``) reads it back from ``/proc/<pid>/environ`` to positively
 # identify escaped MCP launcher processes whose *cmdline* carries no KiroCrew
 # fingerprint (e.g. ``npx @playwright/mcp`` -> node) without ever risking a
 # kill of a user's own identically-named processes. Constant by design: it must
@@ -60,6 +60,14 @@ KIROCREW_RUNTIME_AGENT_ENV = "KIROCREW_RUNTIME_AGENT"
 KIROCREW_SANDBOX_TOOL_ENV = "KIROCREW_SANDBOX_TOOL"
 KIROCREW_SANDBOX_TOOL_VALUE = "1"
 
+#: The desktop app's staged KAS engine root, exported by the Electron shell when
+#: the build staged the pinned engine for this architecture
+#: (``website/electron/gateway-env.js``, ``bundledKasEnvironment``). Lives here
+#: rather than in ``acp.kas_bundle`` because ``sandbox`` seals the directory it
+#: names (:func:`sandbox_tiers._resolved_install_root_targets`) and must not import the
+#: ACP tree to learn the env name.
+BUNDLED_KAS_DIR_ENV = "KIROCREW_BUNDLED_KAS_DIR"
+
 # Canonical truthy set for boolean environment variables (KIROCREW_NO_JAIL,
 # KIROCREW_DEV_MODE, …).  Use ``env_flag_enabled`` rather than ``bool(os.environ
 # .get(...))`` — a bare bool() treats ``"0"``/``"false"`` as truthy, which for a
@@ -69,6 +77,11 @@ ENV_TRUTHY = frozenset({"1", "true", "yes", "on"})
 # Canonical falsy set, the explicit opt-out for the crew log, which defaults ON. See
 # ``crew_log_enabled``.
 ENV_FALSY = frozenset({"0", "false", "no", "off"})
+
+# Longest prefix a generated Coder workspace name may carry: names are at most 32
+# characters and the registry adds two separators and an 8-character binding id,
+# so 21 leaves one owner character. Homed here so every boundary refuses at one number.
+CODER_WORKSPACE_PREFIX_MAX_CHARS = 21
 
 
 # Minimum supported Node.js version (major, minor, patch), shared by the startup
@@ -324,7 +337,7 @@ COMPACT_WAIT_TIMEOUT_SECS = 300.0
 SUBAGENT_TIMEOUT_SECS = 10800
 
 # Budget for an agent backend's ``initialize`` handshake, in seconds. Spent by
-# ``acp.runtime`` (which re-exports it as ``_INITIALIZE_TIMEOUT`` and documents why
+# ``acp.runtime_spawn_launch`` (which binds it as ``_INITIALIZE_TIMEOUT`` and documents why
 # the value is what it is), and read by the subagent startup watchdog, whose window
 # has to cover a handshake that spends all of it
 # (``SubagentManager._startup_deadline``). Owned here because that second reader is

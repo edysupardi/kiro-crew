@@ -428,7 +428,7 @@ def test_get_rss_tree_mb_real_process():
     Do not compare this sample with a separate single-process RSS read: resident
     sets are live values and Windows may trim the working set between the two
     calls.  The deterministic root-plus-descendants arithmetic is covered with
-    fixed values in ``test_platform_compat_coverage.py``.
+    fixed values in ``test_platform_compat_coverage_metrics.py``.
     """
     from kiro_crew.acp.runtime import _get_rss_tree_mb
 

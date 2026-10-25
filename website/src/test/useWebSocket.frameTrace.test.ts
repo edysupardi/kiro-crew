@@ -215,6 +215,10 @@ beforeEach(async () => {
     return id
   })
   vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+    // Only frames this stub issued are traced. The store's deferred
+    // notification schedules on the frame source it captured when the store
+    // was made, before this stub, and cancels that frame through the global.
+    if (typeof id !== 'number' || id >= nextFrameId) return
     trace.push(`cancel-frame ${id}`)
     rafQueue = rafQueue.filter(entry => entry.id !== id)
   })
@@ -280,6 +284,7 @@ const FRAME_CASES: Array<[string, Frame[], Frame[]]> = [
   }]],
   ['slots repeated frame only reconciles the queued depth', [{ type: 'slots', data: SLOTS, foldersGeneration: 3 }], [{ type: 'slots', data: SLOTS, foldersGeneration: 3 }]],
   ['slots unchanged generations', [{ type: 'slots', data: SLOTS, foldersGeneration: 3, gitlabHostsGeneration: 4 }], [{ type: 'slots', data: [...SLOTS].reverse(), foldersGeneration: 3, gitlabHostsGeneration: 4 }]],
+  ['slots partial frame of a restarting gateway', [], [{ type: 'slots', data: SLOTS, slotsPartial: true }]],
   ['credential_redaction_changed', [], [{ type: 'credential_redaction_changed', data: { enabled: true, changed_at: TS } }]],
   ['credential_redaction_changed without a boolean', [], [{ type: 'credential_redaction_changed', data: { enabled: 'yes', changed_at: 3 } }]],
   ['skills.pending_changed', [], [{ type: 'skills.pending_changed', data: {} }]],
@@ -593,6 +598,30 @@ describe('useWebSocket lifecycle trace', () => {
     expect(trace).toEqual(EXPECTED_LIFECYCLE['reconnect catch-up'])
   })
 
+  it('hidden reconnect sends no return frame until visibility returns', async () => {
+    const { ws, view } = await mountOpen()
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+    try {
+      act(() => document.dispatchEvent(new Event('visibilitychange')))
+      trace = []
+      vi.useFakeTimers()
+      try {
+        act(() => { ws.drop() })
+        act(() => { vi.advanceTimersByTime(1000) })
+      } finally {
+        vi.useRealTimers()
+      }
+      await act(async () => { WS_INSTANCES[1].open() })
+      expect(trace.some(line => line.includes('slot_focused'))).toBe(false)
+      hidden.mockReturnValue(false)
+      act(() => document.dispatchEvent(new Event('visibilitychange')))
+      expect(trace).toContain('send {"type":"slot_focused","slot":"slot-a"}')
+      view.unmount()
+    } finally {
+      hidden.mockRestore()
+    }
+  })
+
   it('reconnect after an update restart reloads', async () => {
     const { ws } = await mountOpen()
     act(() => { ws.frame({ type: 'update_progress', data: { step: 'restarting', detail: '' } }) })
@@ -871,6 +900,27 @@ describe('useWebSocket lifecycle trace', () => {
     expect(WS_INSTANCES).toHaveLength(1)
   })
 
+  it('a hidden first connect sends no focus frame; reveal sends the return frame', async () => {
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+    try {
+      testStore.dispatch(sseSlots(SLOTS))
+      testStore.dispatch(setActiveSlot(ACTIVE))
+      const view = renderHook(() => useWebSocket(), {
+        wrapper: ({ children }) => createElement(Provider, { store: testStore },
+          createElement(QueryClientProvider, { client: qc }, children)),
+      })
+      const ws = WS_INSTANCES[0]
+      await act(async () => { ws.open() })
+      expect(trace.some(line => line.includes('slot_focused'))).toBe(false)
+      hidden.mockReturnValue(false)
+      act(() => document.dispatchEvent(new Event('visibilitychange')))
+      expect(trace).toContain('send {"type":"slot_focused","slot":"slot-a"}')
+      view.unmount()
+    } finally {
+      hidden.mockRestore()
+    }
+  })
+
   it('focus changes, visibility and the pane-focus emitter share one sender', async () => {
     const { emitSlotFocused } = await import('../hooks/useWebSocket')
     const { view } = await mountOpen()
@@ -900,6 +950,8 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
   ],
   "slots first frame of a connection": [
     'action chat/reconcileSubagentQueuedFromSlots [{"key":"slot-a","title":"Active","last_ts":"2026-09-01T00:00:00.000Z"},{"key":"slot-b","title":"Background","last_ts":"2026-09-01T00:00:00.000Z"}]',
+    'action dashboard/sseSlotListHolds {"heldKeys":[],"holdChannels":false}',
+    'action dashboard/sseSlotsPartial false',
     'action dashboard/sseSlots [{"key":"slot-a","title":"Active","last_ts":"2026-09-01T00:00:00.000Z"},{"key":"slot-b","title":"Background","last_ts":"2026-09-01T00:00:00.000Z"}]',
     'action dashboard/sseYolo true',
     'action dashboard/setChannelTrusted false',
@@ -910,10 +962,21 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
   ],
   "slots repeated frame only reconciles the queued depth": [
     'action chat/reconcileSubagentQueuedFromSlots [{"key":"slot-a","title":"Active","last_ts":"2026-09-01T00:00:00.000Z"},{"key":"slot-b","title":"Background","last_ts":"2026-09-01T00:00:00.000Z"}]',
+    'action dashboard/sseSlotListHolds {"heldKeys":[],"holdChannels":false}',
+    'action dashboard/sseSlotsPartial false',
   ],
   "slots unchanged generations": [
     'action chat/reconcileSubagentQueuedFromSlots [{"key":"slot-b","title":"Background","last_ts":"2026-09-01T00:00:00.000Z"},{"key":"slot-a","title":"Active","last_ts":"2026-09-01T00:00:00.000Z"}]',
+    'action dashboard/sseSlotListHolds {"heldKeys":[],"holdChannels":false}',
+    'action dashboard/sseSlotsPartial false',
     'action dashboard/sseSlots [{"key":"slot-b","title":"Background","last_ts":"2026-09-01T00:00:00.000Z"},{"key":"slot-a","title":"Active","last_ts":"2026-09-01T00:00:00.000Z"}]',
+    'event mc:app:slots',
+  ],
+  "slots partial frame of a restarting gateway": [
+    'action chat/reconcileSubagentQueuedFromSlots [{"key":"slot-a","title":"Active","last_ts":"2026-09-01T00:00:00.000Z"},{"key":"slot-b","title":"Background","last_ts":"2026-09-01T00:00:00.000Z"}]',
+    'action dashboard/sseSlotListHolds {"heldKeys":[],"holdChannels":false}',
+    'action dashboard/sseSlotsPartial true',
+    'action dashboard/sseSlots [{"key":"slot-a","title":"Active","last_ts":"2026-09-01T00:00:00.000Z"},{"key":"slot-b","title":"Background","last_ts":"2026-09-01T00:00:00.000Z"}]',
     'event mc:app:slots',
   ],
   "credential_redaction_changed": [
@@ -1093,7 +1156,7 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'action chat/sseChatMessage {"slot":"slot-a","role":"user","content":"hi","ts":"2026-09-01T00:00:00.000Z"}',
     'send {"type":"slot_read","slot":"slot-a","read_ts":"2026-09-01T00:00:00.000Z"}',
     'action chat/setVoicePlaying false',
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"thinking","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"thinking"}',
     'frame',
     'cancel-frame 1',
     'action dashboard/touchSlotActivity {"key":"slot-a","ts":"2026-09-01T00:00:00.000Z","settled":true}',
@@ -1124,7 +1187,7 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'action chat/sseChatMessage {"slot":"slot-a","role":"subagent","content":"child","ts":"2026-09-01T00:00:00.000Z"}',
     'send {"type":"slot_read","slot":"slot-a","read_ts":"2026-09-01T00:00:00.000Z"}',
     'action chat/setVoicePlaying false',
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"thinking","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"thinking"}',
     'action chat/sseChatMessage {"slot":"slot-a","role":"tool_result","content":"out","ts":"2026-09-01T00:00:00.000Z"}',
     'frame',
     'cancel-frame 1',
@@ -1134,7 +1197,7 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'action chat/sseChatMessage {"slot":"slot-a","role":"inject","cls":"msg msg-note","content":"note","ts":"2026-09-01T00:00:00.000Z"}',
     'send {"type":"slot_read","slot":"slot-a","read_ts":"2026-09-01T00:00:00.000Z"}',
     'action chat/setVoicePlaying false',
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"thinking","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"thinking"}',
     'frame',
     'cancel-frame 1',
     'action dashboard/touchSlotActivity {"key":"slot-a","ts":"2026-09-01T00:00:00.000Z","settled":true}',
@@ -1163,7 +1226,7 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'action chat/appendSlotMessage {"slot":"slot-a","message":{"role":"user","content":"steer","cls":"msg msg-u","meta":{"steer":true}}}',
   ],
   "chat_chunk": [
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"streaming","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"streaming"}',
     'frame',
     'cancel-frame 1',
     'action chat/sseChatMessage {"slot":"slot-a","role":"chunk","content":"Hello world","seq":2,"gen":"g-1","batched":true,"parts":[{"seq":1,"text":"Hello"},{"seq":2,"text":" world"}]}',
@@ -1171,10 +1234,10 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
   "tool_call and refinement": [
     'event kirocrew-tool-call {"slot":"slot-a","tool":"Terminal","kind":"execute","purpose":"List files","input_preview":"ls -la","is_shell":true,"tool_call_id":"tc-1"}',
     'action chat/sseToolActivity {"slot":"slot-a","tool":"Terminal","kind":"execute","purpose":"List files","input_preview":"ls -la","is_shell":true,"tool_call_id":"tc-1","auto":false,"is_update":false}',
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"tool","purpose":"List files","toolName":"Terminal","derivedTitle":"","toolCallId":"tc-1","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"tool","purpose":"List files","toolName":"Terminal","derivedTitle":"","toolCallId":"tc-1"}',
     'event kirocrew-tool-call {"slot":"slot-a","tool":"ls -la","kind":"execute","input_preview":"ls -la","is_shell":true,"tool_call_id":"tc-1","is_update":true}',
     'action chat/sseToolActivity {"slot":"slot-a","tool":"ls -la","kind":"execute","input_preview":"ls -la","is_shell":true,"tool_call_id":"tc-1","is_update":true,"auto":false}',
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"tool","purpose":"List files","toolName":"ls -la","derivedTitle":"","derivedAction":{"type":"list_files"},"derivedMore":0,"toolCallId":"tc-1","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"tool","purpose":"List files","toolName":"ls -la","derivedTitle":"","derivedAction":{"type":"list_files"},"derivedMore":0,"toolCallId":"tc-1"}',
   ],
   "tool_result and mcp_app_render": [
     'action chat/sseToolResult {"slot":"slot-a","output":"ok","tool_call_id":"tc-1"}',
@@ -1272,7 +1335,7 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'action chat/sseContextUsage {"slot":"slot-a","pct":40}',
   ],
   "chat_thinking": [
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"thinking","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"thinking"}',
     'frame',
     'cancel-frame 1',
     'action chat/sseThinkingChunk {"slot":"slot-a","content":"mullmore"}',
@@ -1281,14 +1344,14 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'action chat/sseChatMessage {"slot":"slot-a","role":"_segment"}',
   ],
   "chat_status and variant switch": [
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"thinking","label":"Compacting","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"thinking","label":"Compacting"}',
     'action chat/refreshSlot/pending',
   ],
   "chat_done in the active slot": [
     'action chat/sseChatMessage {"slot":"slot-a","ts":"2026-09-01T00:00:00.000Z","role":"_done"}',
     'event mc-notification {"kind":"turn"}',
     'send {"type":"slot_read","slot":"slot-a","read_ts":"2026-09-01T00:00:00.000Z"}',
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"idle","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"idle"}',
     'action chat/refreshSlot/pending',
     'query refetchQueries ["pull-request-source"] {"type":"active"}',
     'query invalidateQueries ["pull-request-statuses"] {"refetchType":"active"}',
@@ -1299,7 +1362,7 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'event mc-notification {"kind":"turn"}',
     'action dashboard/markSlotUnread {"slot":"slot-b","ts":"2026-09-01T00:00:00.000Z"}',
     'action chat/warmSlotCache/pending',
-    'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"idle","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"idle"}',
     'action chat/refreshSlot/pending',
     'query invalidateQueries ["pull-request-statuses"] {"refetchType":"none"}',
     'query invalidateQueries ["session-control-status","dashboard:slot-b"] {"refetchType":"none"}',
@@ -1309,7 +1372,7 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'event mc-notification {"kind":"turn"}',
     'action dashboard/markSlotUnread {"slot":"slot-b","ts":"2026-09-01T00:00:00.000Z"}',
     'action chat/warmSlotCache/pending',
-    'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"idle","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"idle"}',
     'action chat/refreshSlot/pending',
     'query invalidateQueries ["pull-request-statuses"] {"refetchType":"none"}',
     'query invalidateQueries ["session-control-status","dashboard:slot-b"] {"refetchType":"none"}',
@@ -1318,7 +1381,7 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'action chat/sseChatMessage {"slot":"slot-b","ts":"2026-09-01T00:00:00.000Z","continuing":true,"role":"_done"}',
     'action dashboard/markSlotUnread {"slot":"slot-b","ts":"2026-09-01T00:00:00.000Z"}',
     'action chat/warmSlotCache/pending',
-    'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"idle","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"idle"}',
     'action chat/refreshSlot/pending',
     'query invalidateQueries ["pull-request-statuses"] {"refetchType":"none"}',
     'query invalidateQueries ["session-control-status","dashboard:slot-b"] {"refetchType":"none"}',
@@ -1422,14 +1485,16 @@ const EXPECTED_LIFECYCLE: Record<string, string[]> = {
     'query fetchQuery ["automation-seed","structured"] {"staleTime":0,"retry":false}',
     'action notifications/fetch/pending',
     'query fetchQuery ["workflow-runs-reconcile"] {"staleTime":0,"gcTime":30000,"retry":false}',
+    'action chat/resyncWaitingSideConversations/pending',
     'action chat/clearSubagentsForSnapshot undefined',
     'send {"type":"subscribe_subagents"}',
     'send {"type":"subscribe_logs"}',
-    'send {"type":"slot_focused","slot":"slot-a"}',
+    'send {"type":"slot_focused","slot":"slot-a","announce":true}',
     'action chat/reconcileWorkflowRuns []',
     'query setQueryData ["command-center","workflows"]',
     'action chat/setAutomations {"records":[],"legacyComplete":true,"structuredComplete":true,"protectedSlots":[]}',
     'action notifications/fetch/fulfilled',
+    'action chat/resyncWaitingSideConversations/fulfilled',
   ],
   "reconnect catch-up": [
     'action dashboard/sseDisconnected undefined',
@@ -1458,15 +1523,17 @@ const EXPECTED_LIFECYCLE: Record<string, string[]> = {
     'query fetchQuery ["automation-seed","structured"] {"staleTime":0,"retry":false}',
     'action notifications/fetch/pending',
     'query fetchQuery ["workflow-runs-reconcile"] {"staleTime":0,"gcTime":30000,"retry":false}',
+    'action chat/resyncWaitingSideConversations/pending',
     'action chat/refreshSlot/pending',
     'action chat/clearSubagentsForSnapshot undefined',
     'send {"type":"subscribe_subagents"}',
-    'send {"type":"slot_focused","slot":"slot-a"}',
+    'send {"type":"slot_focused","slot":"slot-a","announce":true}',
     'action dashboard/fetchSlots/fulfilled',
     'action chat/reconcileWorkflowRuns []',
     'query setQueryData ["command-center","workflows"]',
     'action chat/setAutomations {"records":[],"legacyComplete":true,"structuredComplete":true,"protectedSlots":[]}',
     'action notifications/fetch/fulfilled',
+    'action chat/resyncWaitingSideConversations/fulfilled',
     'action chat/refreshSlot/fulfilled',
   ],
   "reconnect after an update restart reloads": [
@@ -1509,15 +1576,17 @@ const EXPECTED_LIFECYCLE: Record<string, string[]> = {
     'query fetchQuery ["automation-seed","structured"] {"staleTime":0,"retry":false}',
     'action notifications/fetch/pending',
     'query fetchQuery ["workflow-runs-reconcile"] {"staleTime":0,"gcTime":30000,"retry":false}',
+    'action chat/resyncWaitingSideConversations/pending',
     'action chat/refreshSlot/pending',
     'action chat/clearSubagentsForSnapshot undefined',
     'send {"type":"subscribe_subagents"}',
-    'send {"type":"slot_focused","slot":"slot-a"}',
+    'send {"type":"slot_focused","slot":"slot-a","announce":true}',
     'action dashboard/fetchSlots/fulfilled',
     'action chat/reconcileWorkflowRuns []',
     'query setQueryData ["command-center","workflows"]',
     'action chat/setAutomations {"records":[],"legacyComplete":true,"structuredComplete":true,"protectedSlots":[]}',
     'action notifications/fetch/fulfilled',
+    'action chat/resyncWaitingSideConversations/fulfilled',
     'action chat/refreshSlot/fulfilled',
   ],
   "StrictMode mounts twice and connects once": [
@@ -1531,16 +1600,18 @@ const EXPECTED_LIFECYCLE: Record<string, string[]> = {
     'query fetchQuery ["automation-seed","structured"] {"staleTime":0,"retry":false}',
     'action notifications/fetch/pending',
     'query fetchQuery ["workflow-runs-reconcile"] {"staleTime":0,"gcTime":30000,"retry":false}',
+    'action chat/resyncWaitingSideConversations/pending',
     'action chat/clearSubagentsForSnapshot undefined',
     'send {"type":"subscribe_subagents"}',
-    'send {"type":"slot_focused","slot":"slot-a"}',
+    'send {"type":"slot_focused","slot":"slot-a","announce":true}',
     'action chat/reconcileWorkflowRuns []',
     'query setQueryData ["command-center","workflows"]',
     'action chat/setAutomations {"records":[],"legacyComplete":true,"structuredComplete":true,"protectedSlots":[]}',
     'action notifications/fetch/fulfilled',
+    'action chat/resyncWaitingSideConversations/fulfilled',
   ],
   "a stream hold defers all three pipelines to one timer each": [
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"streaming","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"streaming"}',
     'action chat/appendQueuedMessage {"slot":"slot-a","content":"q","queue_id":"q-7","ts":"2026-09-01T00:00:00.000Z","queueId":"<id>"}',
     'before hold ends',
     'hold ended',
@@ -1549,7 +1620,7 @@ const EXPECTED_LIFECYCLE: Record<string, string[]> = {
     'action dashboard/touchSlotActivity {"key":"slot-a","ts":"2026-09-01T00:00:00.000Z","settled":true}',
   ],
   "without requestAnimationFrame every pipeline flushes on a 16ms timer": [
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"streaming","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"streaming"}',
     'action chat/appendQueuedMessage {"slot":"slot-a","content":"q","queue_id":"q-6","ts":"2026-09-01T00:00:00.000Z","queueId":"<id>"}',
     'before 16ms',
     '15ms',
@@ -1589,19 +1660,19 @@ const EXPECTED_LIFECYCLE: Record<string, string[]> = {
     'query invalidateQueries ["command-center","questions"]',
     'action chat/setQuestionCard {"slot":"slot-a","ask_id":"ask-9","questions":[{"question":"Which?"}]}',
     'action chat/sseChatMessage {"slot":"slot-b","ts":"2026-09-01T00:00:00.000Z","role":"_done"}',
-    'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"idle","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"idle"}',
     'action chat/refreshSlot/pending',
     'query invalidateQueries ["pull-request-statuses"] {"refetchType":"none"}',
     'query invalidateQueries ["session-control-status","dashboard:slot-b"] {"refetchType":"none"}',
   ],
   "an overflowing chunk lands its status before the flush; reasoning after it": [
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"streaming","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"streaming"}',
     'action chat/sseChatMessage {"slot":"slot-a","role":"chunk","content":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
     'action chat/sseThinkingChunk {"slot":"slot-b","content":"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy',
-    'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"thinking","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"thinking"}',
   ],
   "turn boundaries speak the tail and keep the delivery floor across a segment": [
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"streaming","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"streaming"}',
     'frame',
     'cancel-frame 1',
     'action chat/sseChatMessage {"slot":"slot-a","role":"chunk","content":"First sentence. Second","seq":1,"batched":true,"parts":[{"seq":1,"text":"First sentence. Second"}]}',
@@ -1613,7 +1684,7 @@ const EXPECTED_LIFECYCLE: Record<string, string[]> = {
     'action chat/sseChatMessage {"slot":"slot-a","ts":"2026-09-01T00:00:00.000Z","role":"_done"}',
     'event mc-notification {"kind":"turn"}',
     'send {"type":"slot_read","slot":"slot-a","read_ts":"2026-09-01T00:00:00.000Z"}',
-    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"idle","ts":"<clock>"}',
+    'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"idle"}',
     "synthesize slot-a \"First sentence.\\nSecond\\nAfter tool.\\nTail\"",
   ],
   "unmount during backoff still lands the buffered recency bump": [

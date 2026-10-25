@@ -2,14 +2,14 @@
 
 Three landed fixes are pinned here:
 
-1. **ACP identity plumbing** (``acp/types.py`` + ``acp/_dispatch.py``): an
+1. **ACP identity plumbing** (``acp/types.py`` + ``acp/_dispatch_parts/tool_call_identity.py``): an
    ``AcpEvent`` now carries the NON-model-authored tool identity from
    ``_meta.kiro`` — ``tool_name`` (``_kiro_tool_name``) and ``mcp_server_name``
    (``_kiro_mcp_server_name``). A non-empty ``mcp_server_name`` is the trusted
    "this was a real MCP tool call" discriminator; both are ``""`` when the
    backend emits no ``_meta`` (fail-closed).
 
-2. **chat_runner directive gate** (``dashboard/chat_runner.py``): the
+2. **chat_runner directive gate** (``chat_turn/tool_rows.py``, ``tool_results.py``): the
    ``EVENT_TOOL_CALL`` handler records ``_pending_dir_tool[id]`` ONLY when
    ``event.mcp_server_name`` is set AND ``session_directive.match_tool`` resolves
    a directive tool; the ``EVENT_TOOL_RESULT`` gate applies a directive only for
@@ -53,21 +53,23 @@ class TestKiroMcpServerName:
         update = {"_meta": {"kiro": {"mcpServerName": "kirocrew-core"}}}
         assert _kiro_mcp_server_name(update) == "kirocrew-core"
 
-    def test_absent_meta_yields_empty(self) -> None:
-        assert _kiro_mcp_server_name({"toolCallId": "tc1"}) == ""
-
-    def test_absent_key_yields_empty(self) -> None:
-        """A built-in/shell tool emits ``_meta.kiro`` without an mcpServerName."""
-        assert _kiro_mcp_server_name({"_meta": {"kiro": {"toolName": "execute_bash"}}}) == ""
-
-    def test_malformed_meta_not_dict_yields_empty(self) -> None:
-        assert _kiro_mcp_server_name({"_meta": "nope"}) == ""
-
-    def test_malformed_kiro_not_dict_yields_empty(self) -> None:
-        assert _kiro_mcp_server_name({"_meta": {"kiro": "nope"}}) == ""
-
-    def test_non_string_name_yields_empty(self) -> None:
-        assert _kiro_mcp_server_name({"_meta": {"kiro": {"mcpServerName": 123}}}) == ""
+    @pytest.mark.parametrize(
+        "update",
+        [
+            pytest.param({"toolCallId": "tc1"}, id="absent_meta_yields_empty"),
+            # A built-in/shell tool emits ``_meta.kiro`` without an mcpServerName.
+            pytest.param(
+                {"_meta": {"kiro": {"toolName": "execute_bash"}}}, id="absent_key_yields_empty"
+            ),
+            pytest.param({"_meta": "nope"}, id="malformed_meta_not_dict_yields_empty"),
+            pytest.param({"_meta": {"kiro": "nope"}}, id="malformed_kiro_not_dict_yields_empty"),
+            pytest.param(
+                {"_meta": {"kiro": {"mcpServerName": 123}}}, id="non_string_name_yields_empty"
+            ),
+        ],
+    )
+    def test_no_trusted_name_yields_empty(self, update) -> None:
+        assert _kiro_mcp_server_name(update) == ""
 
 
 class TestBuildToolCallEventIdentity:

@@ -157,6 +157,19 @@ FAKE_BROWSER_SOURCE = textwrap.dedent("""\
                         {"type": "string", "value": "x" * spec["bytes"]}]})
             if SCENARIO.get("load", True) and not SCENARIO.get("load_first"):
                 event("Page.loadEventFired", {"timestamp": 2})
+        elif method == "Page.captureScreenshot":
+            # The scenario's pictures in order, the last one repeated; an error when the
+            # scenario says so, and nothing at all when it holds the browser silent.
+            record("command", method=method, params=message.get("params"))
+            if SCENARIO.get("screenshot_error"):
+                send({"id": message["id"], "error": {"code": -32000, "message": "no surface"}})
+            elif SCENARIO.get("screenshot_silent"):
+                pass
+            else:
+                shots = SCENARIO.get("screenshots") or [""]
+                taken = SCENARIO.setdefault("_taken", 0)
+                SCENARIO["_taken"] = taken + 1
+                send({"id": message["id"], "result": {"data": shots[min(taken, len(shots) - 1)]}})
         else:
             record("command", method=method, params=message.get("params"))
             send({"id": message["id"], "result": {}})
@@ -189,5 +202,10 @@ class FakeBrowser:
         path = self.directory / "received.jsonl"
         if not path.exists():
             return []
-        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        # Only whole lines. The browser appends while a test polls this file, and its
+        # `start` line carries the whole environment, so a read can land mid-write; the
+        # line is read on the next poll, once its newline is down.
+        text = path.read_text()
+        complete = text[: text.rfind("\n") + 1]
+        rows = [json.loads(line) for line in complete.splitlines()]
         return [row for row in rows if row["kind"] == kind]

@@ -301,7 +301,7 @@ def userns_available() -> bool:
 
     Stable cross-module entry point for the namespace-support probe, shared by
     the OS-level sandbox here and the JailProvider extension point
-    (``platform/interfaces.py``), so consumers do not depend on the private
+    (``platform/interfaces_runtime.py``), so consumers do not depend on the private
     ``_probe_unshare`` name.
     """
     return _probe_unshare()
@@ -442,6 +442,7 @@ def wrap_argv(
     strip_python_env: bool = False,
     forward_ssh_auth_sock: bool = False,
     extra_hidden_dirs: tuple[str, ...] = (),
+    seal_hidden_dirs: bool = False,
     extra_hidden_dir_ids: tuple[tuple[str, int, int], ...] = (),
     extra_alias_credential_ids: tuple[tuple[int, int], ...] = (),
     extra_visible_dirs: tuple[str, ...] = (),
@@ -449,6 +450,7 @@ def wrap_argv(
     extra_private_dir_ids: tuple[tuple[str, int, int], ...] = (),
     extra_writable_dirs: tuple[str, ...] = (),
     extra_expose_files: tuple[str, ...] = (),
+    exec_cwd: str = "",
     is_kiro_cli: bool | None = None,
     first_party_fixed_argv: bool = False,
 ) -> tuple[list[str], str | None]:
@@ -480,6 +482,9 @@ def wrap_argv(
             security warning. Inert on
             backends with no path seal to carve (Windows, the no-backend
             fail-open path): there the directory is already writable.
+        exec_cwd: A directory the Linux namespace launcher enters after its seals
+            and before it execs, failing closed unless it is read-only and empty
+            (an app agent's launch copy). Ignored by every other backend.
         is_kiro_cli: Explicit executable classification for descriptor-backed
             Kiro snapshots whose launch path has no ``kiro-cli``
             basename. ``None`` retains basename detection for other callers.
@@ -845,6 +850,7 @@ def wrap_argv(
             or extra_private_dirs
             or extra_writable_dirs
             or extra_expose_files
+            or exec_cwd
         ):
             wrapped = namespace_argv(
                 argv,
@@ -852,6 +858,7 @@ def wrap_argv(
                 strip_python_env=strip_python_env,
                 forward_ssh_auth_sock=forward_ssh_auth_sock,
                 extra_hidden_dirs=extra_hidden_dirs,
+                seal_hidden_dirs=seal_hidden_dirs,
                 extra_hidden_dir_ids=extra_hidden_dir_ids,
                 extra_alias_credential_ids=extra_alias_credential_ids,
                 extra_visible_dirs=extra_visible_dirs,
@@ -859,6 +866,7 @@ def wrap_argv(
                 extra_private_dir_ids=extra_private_dir_ids,
                 extra_writable_dirs=extra_writable_dirs,
                 extra_expose_files=extra_expose_files,
+                exec_cwd=exec_cwd,
             )
         else:
             wrapped = namespace_argv(
@@ -1044,7 +1052,7 @@ def wrap_argv(
                         "This is a container policy restriction, not a host kernel "
                         "limitation. To resolve, choose one of:\n"
                         "  (a) Use the Kiro Crew custom seccomp profile (adds "
-                        "unconditional unshare/clone/mount allows to the Docker "
+                        "unconditional unshare/clone/mount/umount2 allows to the Docker "
                         "default — less permissive than seccomp=unconfined):\n"
                         "        # With a repo checkout:\n"
                         "        docker run --security-opt "

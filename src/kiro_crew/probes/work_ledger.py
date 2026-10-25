@@ -13,7 +13,7 @@ even write, how many wakes one item may cause -- lives in
 :mod:`kiro_crew.ledger_wake` as pure functions. What is left here is the reading
 itself, which is the only part that needs a disk.
 
-Two facts this probe cannot read for itself and takes as values instead:
+Three facts this probe cannot read for itself and takes as values instead:
 
 * ``worker_running`` -- whether a worker's slot has a turn in flight. That lives
   in the dashboard's in-process slot table, which a probe running on a worker
@@ -22,13 +22,19 @@ Two facts this probe cannot read for itself and takes as values instead:
   separate question: "not running" is true of a worker thinking between turns as
   well as of one that ended, which is why ``is_stale`` makes the first wait out a
   window and lets the second skip it.
+* ``worker_looping`` -- whether the worker's own session holds an active loop that
+  will wake it. That lives in the AutoNudge service's loop table, not in the
+  ledger, so the driver injects a resolver for it too.
 
-Both default to the safe direction rather than to nothing: an absent resolver
-reads as "not running" and "not closed", which can only make the gate LOUDER (a
-stall wake the conductor did not need costs one turn) or later, never quieter
-about a worker that stopped. The opposite default would turn a missing handle into
-a watch that never reports a stalled worker, which is the failure this gate exists
-to remove.
+All three default to ``False`` rather than to nothing. For ``worker_running`` and
+``worker_looping`` that is the safe direction: "not running" and "not looping" can
+only make the gate LOUDER (a stall wake the conductor did not need costs one turn),
+never quieter about a worker that stopped, and the opposite default would turn a
+missing handle into a watch that never reports a stalled worker, which is the
+failure this gate exists to remove. ``worker_closed`` is the other way round:
+``True`` is the answer that flags, so "not closed" is the default that cannot invent
+a stall, and a worker that is gone is judged as a quiet one (see
+:func:`_always_open`).
 """
 
 from __future__ import annotations
@@ -42,11 +48,10 @@ from kiro_crew.work_vocab import WORK_BLOCKED_REASONS, WORK_REASON_STATUSES
 
 logger = logging.getLogger(__name__)
 
-#: This probe's subject kind. Defined HERE rather than in ``probes/__init__``, which
-#: imports this module: the constant has to be readable without reaching back into
-#: the package that is still mid-import. ``probes/__init__`` spells it a second time
-#: as its own literal (``WORK_LEDGER``) rather than re-exporting this one, for the
-#: same boot-path reason; the two must stay equal.
+#: This probe's subject kind. ``probes/__init__`` imports this module only inside
+#: ``build``, which keeps the ledger store off the gateway boot path, so it spells the
+#: kind a second time as its own literal (``WORK_LEDGER``) rather than importing this
+#: one; the two must stay equal.
 WORK_LEDGER_KIND = "work-ledger"
 
 #: Events read per item per tick. The kernel masks a repeat by key, so the tail
@@ -62,6 +67,10 @@ _REPORT_KEY = "report"
 
 #: Prefix for a silence wake's dedupe key.
 _STALL_KEY = "stall"
+
+#: Prefix for an undelivered-report wake's dedupe key
+#: (:mod:`kiro_crew.work_ledger_undelivered`).
+_UNDELIVERED_KEY = "undelivered"
 
 #: The one terminal item state that means the item's bar was MET. The other two
 #: (``rejected``, ``abandoned``) close an item without meeting it, so a ledger is
@@ -84,12 +93,9 @@ ACCEPTED_KEY = "all-accepted"
 #: abandoned is not persisted as an outcome its conductor never reached.
 CLOSED_KEY = "all-closed"
 
-_ACCEPTED_KEY = ACCEPTED_KEY
-
 #: :attr:`WorkLedgerProbe.revision` for a ledger that was read but holds no worker
 #: report yet. Not empty, because empty means "not known" to the gate.
 _NO_REPORTS = "no-reports"
-_CLOSED_KEY = CLOSED_KEY
 
 
 def _always_idle(_session_key: str) -> bool:
@@ -105,10 +111,12 @@ def _always_open(_session_key: str) -> bool:
     """Default close resolver: nothing is closed.
 
     Not ``True``, and the reason is the opposite side of :func:`_always_idle`'s. This
-    input only ever REMOVES the staleness window, so answering ``True`` without a handle
-    on the slot table would flag every quiet item the instant it was created -- a wake
-    per item for a worker that is simply still working. ``False`` falls back to measuring
-    the window, which is the behaviour that shipped.
+    input only ever makes the gate flag MORE or SOONER -- it skips the staleness window
+    for an item that has reported, flags a reported ``blocked`` / ``question`` item at
+    once, and outranks an active loop -- so answering ``True`` without a handle on the
+    slot table would flag an item the moment its worker reported ``progress``: a wake
+    per item for a worker that is simply still working. ``False`` falls back to
+    measuring the window.
     """
     return False
 
@@ -129,10 +137,10 @@ class WorkLedgerProbe(irq.Probe):
         worker_running: ``session_key -> has a turn in flight``. Defaults to
             :func:`_always_idle`.
         worker_closed: ``session_key -> its slot is gone``. Defaults to
-            :func:`_always_open`, so a build with no resolver measures the staleness
-            window exactly as it did before this input existed.
+            :func:`_always_open`, so a build with no resolver never skips the
+            staleness window.
         worker_looping: ``session_key -> its session holds an active loop``.
-            Defaults to :func:`_never_looping`, which flags as before.
+            Defaults to :func:`_never_looping`, which never suppresses a flag.
     """
 
     def __init__(
@@ -257,7 +265,7 @@ class WorkLedgerProbe(irq.Probe):
                 epoch=epoch,
                 observations=[
                     irq.Observation(
-                        _ACCEPTED_KEY if finished_well else _CLOSED_KEY,
+                        ACCEPTED_KEY if finished_well else CLOSED_KEY,
                         irq.Severity.TERMINAL,
                         detail,
                         irq.ResetsOn.NEVER,
@@ -330,6 +338,25 @@ class WorkLedgerProbe(irq.Probe):
                     irq.ResetsOn.NEVER,
                 )
             )
+
+        undelivered = work_ledger.read_undelivered(conductor_key, item)
+        if undelivered is not None:
+            # The worker tried to report and the harness never delivered the call, so
+            # there is no report event to wake on and the silence would otherwise read
+            # as a stall. Keyed on the failed call's own stamp: a second failure later
+            # is news, a re-read of the same one is not.
+            token = f"{_UNDELIVERED_KEY}:{undelivered['at']}"
+            if self._spend(conductor_key, item.item_id, token, replaces=f"{_UNDELIVERED_KEY}:"):
+                found.append(
+                    irq.Observation(
+                        f"{_UNDELIVERED_KEY}:{item.item_id}:{undelivered['at']}",
+                        irq.Severity.WAKE,
+                        ledger_wake.undelivered_wake_brief(
+                            item_id=item.item_id, tool=undelivered["tool"]
+                        ),
+                        irq.ResetsOn.NEVER,
+                    )
+                )
 
         if work_ledger.is_stale(
             item,
@@ -452,7 +479,10 @@ def person_wait_fingerprint(
 
     An item whose worker session is gone (*worker_closed*) is not a wait on a person:
     nobody is left to answer its approval, so the patrol must run and the probe's
-    stall wake must reach the conductor.
+    stall wake must reach the conductor. A worker's ``work_report`` / ``work_brief``
+    that never reached the ledger (:func:`kiro_crew.work_ledger.read_undelivered`)
+    moves no report field, so its record is folded into the fingerprint: each new
+    failure releases the hold once, for the probe's undelivered wake.
 
     Positive evidence only, like :func:`has_open_items`: no open item, a torn item
     file, an unreadable header or a read that raises all answer ``None``, so doubt
@@ -477,7 +507,19 @@ def person_wait_fingerprint(
         closed = worker_closed or _always_open
         if any(closed(item.worker_session_key or "") for item in open_items):
             return None
-        return worker_report_revision(items)
+        # A worker whose report the harness never delivered has news the report
+        # fields do not carry, so its record joins the fingerprint: a new failure
+        # releases the hold for the tick that brings it, and the patrol holds again
+        # once that turn has seen it.
+        undelivered: dict[str, str] = {}
+        for item in open_items:
+            lost = work_ledger.read_undelivered(conductor_key, item)
+            if lost is not None:
+                undelivered[item.item_id] = lost["at"]
+        revision = worker_report_revision(items)
+        if not undelivered:
+            return revision
+        return f"{revision}|undelivered:{ledger_wake.revision(undelivered)}"
     except Exception:  # noqa: BLE001 - a read fault must never hold a patrol
         logger.debug("work-ledger probe: person-wait read failed for %s", conductor_key)
         return None

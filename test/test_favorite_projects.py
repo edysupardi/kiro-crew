@@ -20,14 +20,16 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from windows_sim import replace_sharing_violation
 
+from kiro_crew import atomic_write as aw
+from kiro_crew import platform_compat
 from kiro_crew.dashboard import chat_handlers as ch
 
 MOD = "kiro_crew.dashboard.chat_handlers"
@@ -108,29 +110,160 @@ class TestFavoriteProjectsStore:
         assert ch._load_favorite_projects() == [str(second), str(first)]
 
     def test_overlapping_writes_lose_neither_change(self, _home):
-        # Two dashboard tabs adding different projects at once. A load that lingers
-        # makes both read the same empty snapshot unless the transaction is locked,
-        # so without the lock the second write would drop the first project.
+        # Two dashboard tabs adding different projects at once. The add transaction
+        # loads the snapshot, appends, and writes it back under _favorite_projects_lock;
+        # without that lock both adds load the same empty snapshot and the second write
+        # drops the first project. This proves the lock closes that window.
+        #
+        # The interleaving is driven by signals, not a sleep or a timeout. The first add
+        # to load signals ``first_loaded`` and parks on ``release``; the main thread then
+        # asserts _favorite_projects_lock is HELD -- which it is only because the lock
+        # serializes the read-modify-write, so this assertion is itself the regression
+        # detector: drop the lock and a reader reaches this point with nothing held. The
+        # main thread releases immediately, so the passing run finishes in milliseconds;
+        # the bounded join is the only lost-run ceiling. With the lock the second add is
+        # still blocked acquiring it, loads after the first has written, and both land;
+        # without it both wrote from the empty snapshot and the second clobbers the first,
+        # which the final assertion catches on every host.
         first, second = _home / "a", _home / "b"
         first.mkdir()
         second.mkdir()
-        real_load = ch._load_favorite_projects
 
-        def slow_load(**kwargs):
+        real_load = ch._load_favorite_projects
+        first_loaded = threading.Event()
+        release = threading.Event()
+        claimed = threading.Lock()
+        is_claimed = [False]
+
+        def handshake_load(**kwargs):
             snapshot = real_load(**kwargs)
-            time.sleep(0.05)
+            with claimed:
+                park = not is_claimed[0]
+                is_claimed[0] = True
+            if park:
+                first_loaded.set()
+                assert release.wait(timeout=10), "the main thread never released the first load"
             return snapshot
 
-        with patch(f"{MOD}._load_favorite_projects", side_effect=slow_load):
+        with patch(f"{MOD}._load_favorite_projects", side_effect=handshake_load):
             threads = [
                 threading.Thread(target=ch._add_favorite_project, args=(str(p),))
                 for p in (first, second)
             ]
             for t in threads:
                 t.start()
+            try:
+                assert first_loaded.wait(timeout=10), "no add ever loaded its snapshot"
+                # The lock is held across the first add's load-modify-write only because
+                # it serializes the transaction; a dropped lock lets a reader park here
+                # with nothing held, so this is the regression detector, not a timing bet.
+                assert ch._favorite_projects_lock.locked(), "the transaction did not hold the lock"
+            finally:
+                release.set()  # always free the parked load, even if an assertion fired
             for t in threads:
-                t.join()
+                t.join(timeout=30)
+            assert not any(t.is_alive() for t in threads), "an add thread never returned"
         assert sorted(ch._load_favorite_projects()) == sorted([str(first), str(second)])
+
+    def test_a_display_read_in_flight_never_fails_a_write(self, _home):
+        # Windows refuses to rename over a file another handle has open (WinError 5/32);
+        # POSIX allows it, which is why this only ever failed on the Windows shard. The
+        # display read -- every GET, and the tail of every add and remove -- opened the
+        # file with no lock, so an add whose rename landed while it was open raised
+        # PermissionError and its project was lost (main CI on 4f16fd2ffc, in the
+        # overlapping-writes test above). The display read now loads under the same lock
+        # as the write transaction, so no read in this process is open during a rename.
+        #
+        # ``windows_replace`` is the Windows rule: it refuses while a read is open. The
+        # interleaving is driven by signals, not sleeps. The display read parks with the
+        # file "open"; the add then either finds the lock held and waits (the reader
+        # holds it) or reaches the rename while the read is open and fails. The lock
+        # stand-in reports the first case and the add's own exit the second, so the
+        # reader is released only once the add has done one or the other.
+        proj = _home / "a"
+        proj.mkdir()
+        fp = os.fspath(ch._favorite_projects_path())
+        real_load, real_replace = ch._load_favorite_projects, os.replace
+        open_reads = [0]
+        reader_open, release, add_progressed = (threading.Event() for _ in range(3))
+        add_errors: list[BaseException] = []
+
+        def parked_display_load(**kwargs):
+            if kwargs.get("strict") or reader_open.is_set():
+                return real_load(**kwargs)  # the add's transaction and its tail read
+            open_reads[0] += 1
+            try:
+                reader_open.set()
+                assert release.wait(timeout=10), "the main thread never released the read"
+                return real_load(**kwargs)
+            finally:
+                open_reads[0] -= 1
+
+        def windows_replace(src, dst, *args, **kwargs):
+            if os.fspath(dst) == fp and open_reads[0]:
+                raise PermissionError(13, "[WinError 5] Access is denied", fp)
+            return real_replace(src, dst, *args, **kwargs)
+
+        class ContentionReportingLock:
+            """The transaction lock, signalling when a caller finds it already held."""
+
+            def __init__(self) -> None:
+                self._lock = threading.Lock()
+
+            def __enter__(self):
+                if not self._lock.acquire(blocking=False):
+                    add_progressed.set()
+                    self._lock.acquire()
+                return self
+
+            def __exit__(self, *exc) -> None:
+                self._lock.release()
+
+            def locked(self) -> bool:
+                return self._lock.locked()
+
+        def add() -> None:
+            try:
+                ch._add_favorite_project(str(proj))
+            except BaseException as exc:  # recorded for the assertion below
+                add_errors.append(exc)
+            finally:
+                add_progressed.set()
+
+        with (
+            patch(f"{MOD}._load_favorite_projects", side_effect=parked_display_load),
+            patch(f"{MOD}._favorite_projects_lock", ContentionReportingLock()),
+            patch("os.replace", windows_replace),
+        ):
+            reader = threading.Thread(target=ch._read_favorite_projects)
+            adder = threading.Thread(target=add)
+            reader.start()
+            try:
+                assert reader_open.wait(timeout=10), "the display read never loaded"
+                adder.start()
+                assert add_progressed.wait(timeout=10), "the add neither waited nor wrote"
+            finally:
+                release.set()  # always free the parked read, even if an assertion fired
+            for t in (reader, adder):
+                t.join(timeout=30)
+            assert not reader.is_alive() and not adder.is_alive(), "a thread never returned"
+        assert add_errors == []
+        assert ch._load_favorite_projects() == [str(proj)]
+
+    def test_a_write_survives_a_windows_sharing_violation_at_the_rename(self, _home, monkeypatch):
+        # A handle from outside this process -- an indexer, an AV scanner on the fresh
+        # temp file -- fails a Windows rename the same way, and no lock here can stop
+        # it. A bare ``os.replace`` turned that moment into a failed add; the write goes
+        # through the shared ``atomic_write``, whose rename retries that window.
+        monkeypatch.setattr(platform_compat, "IS_WINDOWS", True)
+        monkeypatch.setattr(aw, "_REPLACE_BACKOFF_SECONDS", 0)
+        proj = _home / "a"
+        proj.mkdir()
+        with replace_sharing_violation(match="favorite_projects.json", times=2) as sim:
+            ch._add_favorite_project(str(proj))
+        assert sim["n"] == 3
+        assert ch._load_favorite_projects() == [str(proj)]
+        assert list(_home.glob("*.tmp")) == []
 
     def test_an_add_past_a_hundred_still_lands(self, _home):
         # No cap: the file is owner-written only, so there is nothing a bound defends.
@@ -206,6 +339,13 @@ class TestFavoriteProjectsStore:
     def test_a_write_leaves_no_temp_file_behind(self, _home):
         ch._write_favorite_projects(["/a"])
         assert list(_home.glob("*.tmp")) == []
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_a_write_publishes_the_file_owner_only(self, _home):
+        # The hand-rolled write published mkstemp's 0o600; the shared writer's default
+        # outside the data home is the umask's, so the mode is pinned explicitly.
+        ch._write_favorite_projects(["/a"])
+        assert ch._favorite_projects_path().stat().st_mode & 0o777 == 0o600
 
     def test_a_failed_write_cleans_up_its_temp_file(self, _home):
         with patch(f"{MOD}.os.replace", side_effect=OSError("boom")):

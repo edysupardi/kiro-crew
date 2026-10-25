@@ -27,8 +27,10 @@ from kiro_crew.context_blocks import PHASE_PER_TURN, PHASE_SESSION_START, USER_L
 from kiro_crew.crew_log import eager as crew_log_eager
 from kiro_crew.crew_log import emit as crew_log_emit
 from kiro_crew.crew_log import projection as crew_log
+from kiro_crew.crew_log.projection_usage_measured import MEASURED_FIELDS, MEASURED_FORMAT
 from kiro_crew.dashboard.handlers import usage as usage_mod
 from kiro_crew.dashboard.handlers.telemetry import api_context_trace
+from kiro_crew.engine_context import MAX_COUNT
 
 SLOT = "chat-1"
 UNIT = "acp-ctx-trace"
@@ -325,6 +327,26 @@ class TestContextTrace:
                 cur = up
             return out
 
+        def function_of(node: ast.AST) -> ast.AST | None:
+            cur = parent.get(id(node))
+            while cur is not None and not isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                cur = parent.get(id(cur))
+            return cur
+
+        # The function that builds the turn closer's payload: the reading it passes is
+        # the one that function unpacks, wherever the turn's phases put it.
+        closer_fns = [
+            function_of(node)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Dict)
+            and {"stop_reason", "context_used", "context_window"}
+            <= {
+                k.value
+                for k in node.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)
+            }
+        ]
+
         # The pair the provider reading is unpacked into, read from the runner rather
         # than assumed, so a rename moves both halves of this check together.
         unpacked: tuple[str, ...] = ()
@@ -337,7 +359,11 @@ class TestContextTrace:
             if name != "read_context_tokens":
                 continue
             target = node.targets[0]
-            if isinstance(target, ast.Tuple) and len(target.elts) == 2:
+            if (
+                isinstance(target, ast.Tuple)
+                and len(target.elts) == 2
+                and any(function_of(node) is fn for fn in closer_fns)
+            ):
                 unpacked = tuple(el.id for el in target.elts if isinstance(el, ast.Name))
                 unpack_guards = guards(node)
         assert len(unpacked) == 2, (
@@ -1126,6 +1152,18 @@ class TestContextTraceWindowBounds:
         )
 
 
+def test_the_engine_measurement_as_a_dict_would_not_have_fit():
+    """Why a row's engine measurement is one string and not a dict of its numbers."""
+    window = _worst_case_window()
+    for n, row in enumerate(window):
+        row["measured"] = {f"field{j}": MAX_COUNT - n - j for j in range(MEASURED_FIELDS)}
+    measured = _deep_bytes(window) + _deep_bytes(_worst_case_turn_keys())
+    assert measured > TestContextTraceWindowBounds.CACHE_MEMBER_CEILING, (
+        f"the dict shape measures {measured:,} bytes and now fits under the ceiling, so "
+        "the stated reason for the string shape no longer holds"
+    )
+
+
 def _worst_case_turn_keys() -> str:
     """A FULL ordinal memo, the other large member of the ``usage`` fold state.
 
@@ -1185,6 +1223,9 @@ def _worst_case_window(
                 "model": "claude-opus-4-5-20260101",
                 "window": 200_000,
                 "step": 3,
+                # The engine's measurement at its cap: every position filled with the
+                # widest value the fold keeps. Built per row, as the fold builds it.
+                "measured": ",".join([MEASURED_FORMAT, *[str(MAX_COUNT - n)] * MEASURED_FIELDS]),
             }
         )
     return window
@@ -1246,6 +1287,10 @@ class TestContextTraceParityWithTheShardScan:
                     "model": "opus-5",
                     "ordinal": 1,
                     "first_start": True,
+                    # Fields added after the scan: what the agent engine measured of
+                    # the turn, absent for a turn it did not measure.
+                    "engine": None,
+                    "ttft_ms": None,
                 },
                 {
                     "phase": "per_turn",
@@ -1256,6 +1301,10 @@ class TestContextTraceParityWithTheShardScan:
                     "model": "opus-5",
                     "ordinal": 2,
                     "first_start": False,
+                    # Fields added after the scan: what the agent engine measured of
+                    # the turn, absent for a turn it did not measure.
+                    "engine": None,
+                    "ttft_ms": None,
                 },
             ],
             "totals": {"memory": 30_000, "lessons": 5_000, "your_message": 460, "surface": 200},
@@ -1264,6 +1313,7 @@ class TestContextTraceParityWithTheShardScan:
             "peak_context_used": 12_500,
             "context_window": 200_000,
             "window_days": 14,
+            "engine_unknown": {},
             "recording": True,
         }
         # A stamp is an ISO-8601 UTC string, which is what the declared shape says and

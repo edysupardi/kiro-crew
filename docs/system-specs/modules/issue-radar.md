@@ -34,8 +34,9 @@ provider cannot be registered while the gate silently keeps comparing three.
 
 **Each client module is the stable composition façade for its provider.** The
 routes and tests continue to import `github_client`, `gitlab_client` and
-`azure_client`; those modules retain the protocol surface, exception aliases,
-the constants something actually binds, and patchable I/O chokepoints. A mirror
+`azure_client`; those modules carry the protocol surface, exception aliases,
+the constants something actually binds, and patchable I/O chokepoints (`github_client`
+and `azure_client` serve them from their owners, below). A mirror
 NOTHING binds is not part of that surface: the sibling that owns the value reads
 its own module global, so a façade copy is never the seam it resembles and
 patching it changes nothing. Binding means the façade's own code, a test that
@@ -46,10 +47,45 @@ the implementation boundaries explicit: `*_transport.py` owns URL, environment,
 request and pagination mechanics; `*_normalization.py` converts provider payloads
 into the shared GitHub-shaped records; and `github_queries.py` owns GitHub's
 GraphQL, dependency and search query plans. The façades inject their current
-bindings into those helpers so established monkeypatch seams remain authoritative.
+bindings into those helpers so established monkeypatch seams remain authoritative
+(for `github_client` and `azure_client`, their owners inject them, and the mirror
+keeps them patchable through the façade).
 The reviewed real `glab` and `az` process spawns remain in
-`gitlab_client._glab_run` and `azure_client._az_run`, respectively, which keeps
-the spawn-audit allowlist tied to the same security chokepoints.
+`gitlab_client._glab_run` and `azure_client_cli._az_run` (served as
+`azure_client._az_run`), respectively, which keeps the spawn-audit allowlist tied
+to the same security chokepoints.
+
+**`github_client` is a mirror façade over six owners.** Its code lives in the
+`github_client_*.py` siblings, one responsibility each, and the façade serves every
+name from the owner that binds it (`kiro_crew._facade_mirror`), so a patch of
+`github_client.<name>` reaches every owner holding that name, as it reached the one
+module. `github_client_cli` holds the exception aliases, the timeouts, the hardened
+`gh` spawn `_gh_run` and the REST runner `_run_gh_api`; `github_client_repo_reads`
+the repo access check, the issue lists and their change probe, the viewer's login
+and contributed repos, labels and members; `github_client_detail` issue detail,
+reference summaries, the issue and PR timeline, the dependency graph and the crew
+claim; `github_client_writes` the triage writes, the permission read that gates
+them, and every pull-request action, with the PR's workflow-run read that its CI
+actions and the failure watch use; `github_client_pulls` the PR lists, detail,
+checks, list-card enrichment and search; and `github_client_ci` the viewer's open-PR
+heads and each repo's recent workflow runs. New GitHub code goes to the owner of its
+responsibility, and an owner never imports the façade.
+
+**`azure_client` is a mirror façade over seven owners**, the same way. Its code lives in
+the `azure_client_*.py` siblings: `azure_client_cli` holds the exception aliases, the
+timeouts, the per-endpoint API versions and paging limits, the hardened `az` spawn
+`_az_run` and the `az devops invoke` runner `_az_invoke` with its paging;
+`azure_client_work_items` the project's GUID, the template's own state names, the
+signed-in identity, WIQL and the batched hydrate; `azure_client_repo_reads` the repo
+access check and permission read, the work-item lists and their change probe, tags as
+labels, members, the login and its default organization, and contributed repos;
+`azure_client_detail` work-item detail, reference summaries and the work-item and PR
+timelines; `azure_client_writes` the work-item triage writes and the issue and PR
+comments, whose bodies `_comment_text` redacts; `azure_client_pulls` the PR lists,
+detail with its mergeability and merge-strategy vocabulary, policy evaluations and
+builds read as checks, list-card enrichment and search; and `azure_client_pr_actions`
+close or reopen, review, merge, auto-complete and a PR's builds. New Azure DevOps code
+goes to the owner of its responsibility, and an owner never imports the façade.
 
 | | GitHub | GitLab | Azure DevOps |
 |---|---|---|---|
@@ -290,6 +326,23 @@ per-repo store-scoping rule.
 | PUT | `/crew/work` | Record one work-item step and its progress event (the write behind `issue_radar_crew_record`) |
 | POST | `/crew/pause` | Pause or resume a crew |
 
+**`website/src/apps/issue-radar/api.ts` holds the dashboard's calls to these
+routes** (`issueRadarApi`), plus the base path and the AI-language hint that
+`/issue-ai`, `/pull-ai` and `/recommendations` take. The crews pipeline view
+reads `/crew/fabric` through its own client,
+`website/src/apps/issue-radar/pipeline/api.ts`. `api.ts` is also the one import
+path the app's modules use for these calls and their shapes, and the one module
+id their specs mock. The shapes live in two owners that `api.ts` re-exports, and
+a new shape goes to the owner for its routes:
+`website/src/apps/issue-radar/apiTypes.ts` for the repo, issue and pull-request
+routes (with the error classes the calls throw and the `RepoRef` query and body
+helpers), and `website/src/apps/issue-radar/apiCrewTypes.ts` for the crew routes
+(the records, the phase classifications and the event kinds that mirror the
+backend crew store). Neither owner imports `api.ts`, and no other module of the
+app imports an owner, so a spec's mock of `api.ts` replaces every call
+`issueRadarApi` makes for every importer.
+`website/src/apps/issue-radar/api.owners.test.tsx` pins that shape.
+
 ## GitLab groups
 
 A user who reviews across a large GitLab group follows the GROUP instead of
@@ -399,7 +452,7 @@ a raw HTTP call. An agent session holds no dashboard credential:
 
 - the access cookie is `httpOnly`, so the frontend cannot hand it to the agent;
 - `.local_secret` — needed for the `GET /api/token/local` bootstrap — is on the
-  sensitive-path list in `security/paths.py`, so the tool gate refuses an agent's
+  sensitive-path list in `security/paths_lists.py`, so the tool gate refuses an agent's
   reads of it. The OS sandbox does not hide it
   (`sandbox._CREW_SANDBOX_VISIBLE_LEAVES`), because in-sandbox MCP servers
   authenticate back to the dashboard with it; the tool gate is the only fence.
@@ -508,6 +561,21 @@ cache fails its route or aborts the remaining post-write cache repairs. The
 investigation record is deliberately excluded — it is the only copy of a user's
 findings, so reading a malformed root as "absent" would let the next write replace
 it.
+
+**Where the store's code lives.** `store.py` is a mirror façade
+(`kiro_crew._facade_mirror`): routes, tests and sibling modules still reach
+`store.<name>`, and a patch through it reaches every owner binding the name. The
+code is in six owners: `store_repos` (the data root, `config.json` and its lock, the
+provider-scoped directories, the connected repos with their name matching,
+permissions and settings, the watchers' per-repo state, and GitLab groups),
+`store_labels` (the label and member caches), `store_ai` (the AI triage and PR
+summary caches, label recommendations, the tagging queue, investigation records
+and the `now_iso` clock that stamps them), `store_deps` (the dependency-edge cache),
+`store_issues` (the issue list,
+detail and reference caches, and the write-through patches a triage write applies)
+and `store_pulls` (the PR list and detail caches). New storage goes to the owner of
+its responsibility. The crew store, `crew_store.py`, is a mirror façade over its own
+`crew_store_*` owners the same way; `crew_ledger_spec.md` beside the backend names them.
 
 ## Permissions
 
@@ -1136,6 +1204,16 @@ An in-process asyncio loop (`watch.py`) polls opted-in repos every 60s for new
 issues (high-water mark in `watch-state.json`). Sends dashboard bell
 notifications via `state.notify`. Zero-LLM. Guarded by `is_app_enabled` — silent
 when disabled. Lifecycle hooks registered via `app.on_startup`/`on_cleanup`.
+
+The same loop drives the crew sweep, `crew_runtime.sweep_repo`. `crew_runtime.py`
+keeps the sweep and its unblock signals, and is a mirror façade
+(`kiro_crew._facade_mirror`) for the rest of the crew runtime:
+`crew_runtime_prompt` (the brief, the nudge and the turn prompt),
+`crew_runtime_session` (a crew's slot, minting its scoped auto-approve grant, launch
+and turn dispatch) and `crew_runtime_supervision` (trust reconciliation, the wake,
+the watchdog, the slot-close and app-disable hooks, and the revocation of a crew's
+execution and grants). New crew-runtime code goes to the owner of its
+responsibility.
 
 ## First Paint (progressive open-list load)
 

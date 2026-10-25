@@ -93,13 +93,18 @@ _STEER_STATE_REQUEUED = "requeued"
 
 
 def _is_steer_row(row: dict) -> bool:
-    """Whether *row* is a mid-turn steer: a ``user`` row whose ``meta.steer`` is True.
+    """Whether *row* is a mid-turn steer: a ``user`` row whose ``meta.steer`` is True,
+    or a ``nudge`` row with it (a monitor loop's wake steered into the turn).
 
     A steer is delivered into a turn that is already running, so it never opens a
-    turn even though its role is ``user``.
+    turn even though its role is one that otherwise does.
     """
     meta = row.get("meta")
-    return row.get("role") == "user" and isinstance(meta, dict) and meta.get("steer") is True
+    return (
+        row.get("role") in ("user", "nudge")
+        and isinstance(meta, dict)
+        and meta.get("steer") is True
+    )
 
 
 def _interrupted_opener_kind(row: dict) -> str:
@@ -276,6 +281,17 @@ _REPLAY_INJECT_MAX_ROWS = (
 
 _REPLAY_CONVERSATION_MAX_ROWS = 500
 
+#: ``meta.notice`` on the row the conductor context cap appends when it trims a
+#: session (``dashboard/chat_turn/context_cap.py``). The row is for the person: the
+#: trimmed session learns of the trim from its seed, so no replay carries the row.
+CONTEXT_CAP_NOTICE = "context_cap"
+
+
+def is_context_cap_notice(row: dict) -> bool:
+    """Whether *row* is the conductor context cap's notice row."""
+    meta = row.get("meta")
+    return isinstance(meta, dict) and meta.get("notice") == CONTEXT_CAP_NOTICE
+
 
 def _replay_identity(row: dict) -> tuple | None:
     """Delivery identity, never a global text-equality deduplication key."""
@@ -365,12 +381,18 @@ def _quota_tail(messages: list[dict], *, conv_max: int, inject_max: int) -> list
     return kept
 
 
-def replay_text(messages: list[dict], model_window: int | None) -> str:
+def replay_text(
+    messages: list[dict], model_window: int | None, *, budget_chars: int = _REPLAY_BUDGET_CHARS
+) -> str:
     """The tail-heavy replay of *messages* within the window-scaled replay budget.
 
     Keeps as many recent messages as fit, newest first. ``inject`` rows are clipped
     to a per-row ceiling and spend their own share of the budget, so conversation is
     never starved by breadcrumbs. Returned unredacted; the caller redacts.
+
+    *budget_chars* is the budget at the reference window: ``_REPLAY_BUDGET_CHARS``
+    for every cold start but the conductor context cap's trim, which passes a
+    larger one.
     """
     # Replay is a separate, existing tail-history allowance, not background
     # capacity. Preserve small-window replay limits; larger windows cannot
@@ -379,7 +401,7 @@ def replay_text(messages: list[dict], model_window: int | None) -> str:
         0.2,
         min(1.0, _budgets._effective_window(model_window) / _budgets._REFERENCE_WINDOW_TOKENS),
     )
-    replay_budget = round(_REPLAY_BUDGET_CHARS * factor)
+    replay_budget = round(budget_chars * factor)
     inject_cap = max(1, min(replay_budget, round(_REPLAY_INJECT_CAP_CHARS * factor)))
 
     # Reserved so conversation cannot be starved by breadcrumbs: inject rows spend

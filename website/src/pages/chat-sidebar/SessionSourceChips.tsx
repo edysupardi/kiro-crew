@@ -2,10 +2,8 @@
  *  status glyph a change chip shows, and the strip with its expandable `+N`
  *  overflow, which fetches the links the slots payload leaves out. */
 import { useState, useRef, useEffect, useMemo } from 'react'
-import { X, ChevronUp, Link2, Circle, Check, Loader2, RotateCcw, GitMerge, CircleDot, TriangleAlert } from 'lucide-react'
-import GithubLogo from '../../components/icons/GithubLogo'
-import GitlabLogo from '../../components/icons/GitlabLogo'
-import JiraLogo from '../../components/icons/JiraLogo'
+import { X, ChevronUp, Circle, Check, Loader2, RotateCcw, GitMerge, CircleDot, TriangleAlert } from 'lucide-react'
+import SourceProviderMark, { sourceProviderHasMark } from '../../components/SourceProviderMark'
 import { sourceProviderMeta, sourceTabQualifier } from '../../utils/sourceProviderMeta'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../../api/client'
@@ -62,9 +60,12 @@ function showsChipCi(state: SourceLinkState | undefined): boolean {
  */
 function chipStatusGlyph(
   link: SidebarSourceLink,
-): 'failed' | 'conflict' | 'running' | 'passed' | null {
+): 'failed' | 'failed_running' | 'conflict' | 'running' | 'passed' | null {
   if (!showsChipCi(link.state)) return null
-  if (link.ci === 'failed') return 'failed'
+  // Failure wins, but "failed with checks still in flight" is its own state:
+  // the bare red × reads as a finished run, so the user could not tell that
+  // CI was still moving.
+  if (link.ci === 'failed') return link.ciPending === '1' ? 'failed_running' : 'failed'
   // GitHub can settle `mergeStateStatus: dirty` while `mergeable` is still
   // `unknown` (the two fields are recorded independently, each only once it is
   // real), and GitLab's `conflict` normalizes into both — so either field
@@ -75,8 +76,8 @@ function chipStatusGlyph(
   return null
 }
 
-/** The provider's mark for a chip, or a neutral link glyph for a provider this
- * build does not recognize.
+/** The provider's mark for a chip, through the one resolver every source-link
+ * surface shares (`SourceProviderMark`).
  *
  * One resolver rather than a ternary inlined at each chip: the change chip and
  * the issue chip render the identical mark, so the two copies were pure
@@ -85,35 +86,16 @@ function chipStatusGlyph(
  * which is exactly the knowledge that belongs with the parser rather than
  * spread across two render sites.
  *
- * The `default` is not dead code even though `provider` is typed as three
- * literals. That type describes what the serializer sends TODAY; the value
- * itself arrives over the wire from Python, where nothing enforces it. The
- * branch it replaced used GitLab as its implicit `else`, so an unrecognized
- * provider rendered GitLab's brand mark on someone else's review system --
- * a wrong attribution is worse than an anonymous one, and this is the one
- * failure mode a chip must not have.
- *
- * A REGISTERED provider sits between those two cases: it is not a built-in, so
- * it has no bundled mark here, but its descriptor may have supplied one. That
- * icon is consulted before the neutral glyph, which is what lets an edition
- * wear its own brand without any provider being able to wear another's. Mirrors
- * the fallback order in `MarkdownRenderer`'s forge chip and
- * `PullRequestPanel`'s tab strip.
+ * The neutral fallback is not dead code even though `provider` is typed as the
+ * ids the serializer sends TODAY: the value itself arrives over the wire from
+ * Python, where nothing enforces it. An unrecognized provider must never wear
+ * another vendor's mark -- a wrong attribution is worse than an anonymous one,
+ * and this is the one failure mode a chip must not have. A REGISTERED provider's
+ * own icon is consulted before the neutral glyph, which is what lets an edition
+ * wear its own brand without any provider being able to wear another's.
  */
 function SourceLinkIcon({ provider }: { provider: SidebarSourceLink['provider'] }) {
-  switch (provider) {
-    case 'github':
-      return <GithubLogo size={10} className="shrink-0" />
-    case 'gitlab':
-      return <GitlabLogo size={10} className="shrink-0" />
-    case 'jira':
-      return <JiraLogo size={10} className="shrink-0" />
-    default: {
-      const Icon = sourceProviderMeta(provider).icon
-      if (Icon) return <Icon size={10} className="shrink-0" />
-      return <Link2 className="lucide-inline shrink-0" aria-hidden="true" />
-    }
-  }
+  return <SourceProviderMark provider={provider} size={10} />
 }
 
 /** A session row's pull-request / issue chip strip, including the expandable
@@ -122,7 +104,7 @@ function SourceLinkIcon({ provider }: { provider: SidebarSourceLink['provider'] 
  *  A component rather than a block inside the row's render callback because the
  *  overflow chip is interactive and therefore needs per-row state. The slots
  *  payload deliberately serializes at most three links IN TOTAL per card,
- *  pull requests first and issues only in the slots left over (state.py's
+ *  pull requests first and issues only in the slots left over (state_parts/source_links.py's
  *  `_SERIALIZED_SOURCE_LINKS_PER_SLOT`), so the strip stays short and a
  *  broadcast carrying dozens of rows stays small -- which means the links
  *  behind "+N" are not on the client at all and expanding has to fetch them. */
@@ -226,11 +208,30 @@ export function SessionSourceChips({ slotKey, links, total, connected, isActive,
     : i18nT('pages.chatSidebar.more_pull_request_in_this_session', { count: hidden })
   /** Chip tooltip. A plain click now reveals in-panel, so a bare "Open <url>"
    *  would promise the browser and mislead; naming the modifier is also the only
-   *  way that escape hatch is discoverable rather than found by accident. */
-  const chipTitle = (link: SidebarSourceLink) => i18nT('pages.chatSidebar.open_source_link_in_side_panel', {
-    url: link.url,
-    modifier: platformShortcut('Cmd+click'),
-  })
+   *  way that escape hatch is discoverable rather than found by accident.
+   *
+   *  A chip with no mark of its own (the neutral glyph) leads with its
+   *  provider and reference ("Bitbucket Server PR #42"): a GitHub or GitLab chip
+   *  names its provider through its logo, and nothing else on this one does. A
+   *  change is named by the provider's long reference label when that says more
+   *  than the bare number; an issue, or a provider this build has no label for,
+   *  keeps the chip's own label, so the tooltip never names it differently from
+   *  the chip. */
+  const chipTitle = (link: SidebarSourceLink) => {
+    const values = { url: link.url, modifier: platformShortcut('Cmd+click') }
+    if (sourceProviderHasMark(link.provider)) {
+      return i18nT('pages.chatSidebar.open_source_link_in_side_panel', values)
+    }
+    const meta = sourceProviderMeta(link.provider)
+    const longRef = meta.refLabel(link.number)
+    const isChange = (link.kind ?? 'change') === 'change'
+    const ref = isChange && longRef !== `#${link.number}` ? longRef : chipLabel(link)
+    return i18nT('pages.chatSidebar.open_named_source_link_in_side_panel', {
+      ...values,
+      provider: meta.displayName,
+      ref,
+    })
+  }
   /** Chip click: switch to the session the chip belongs to and reveal its pull
    *  request / issue in that session's side panel, rather than sending the user
    *  out to the provider's website.
@@ -319,6 +320,19 @@ export function SessionSourceChips({ slotKey, links, total, connected, isActive,
                 return <Check className="lucide-inline shrink-0 text-ok" aria-label={i18nT('pages.chatSidebar.checks_passed')} />
               case 'failed':
                 return <X className="lucide-inline shrink-0 text-danger" aria-label={i18nT('pages.chatSidebar.checks_failed')} />
+              case 'failed_running': {
+                // The failure glyph plus the same static pending dot, never a
+                // spinner (see above). One labelled group so a screen reader
+                // hears the combined state once; the group is icon-only, so
+                // like the merged glyph it carries a title as well.
+                const failedRunningLabel = i18nT('components.pullRequestPanel.checks_failed_others_still_running')
+                return (
+                  <span className="inline-flex shrink-0 items-center" role="img" aria-label={failedRunningLabel} title={failedRunningLabel}>
+                    <X className="lucide-inline shrink-0 text-danger" aria-hidden="true" />
+                    <Circle className="lucide-inline shrink-0 text-warn scale-75" fill="currentColor" strokeWidth={0} aria-hidden="true" />
+                  </span>
+                )
+              }
               case 'conflict':
                 // The panel's own conflict-banner key, reused rather than
                 // duplicated: the chip and the banner describe one pull

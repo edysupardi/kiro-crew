@@ -208,13 +208,15 @@ def _state_digest(state: dict[str, Any]) -> str:
 #: number retires savepoints written under the shape before it and the shape changed once.
 _FOLD_STATE_PINS: dict[str, tuple[str, int]] = {
     "status": ("929af8634f6d6a5f", 4),
-    "usage": ("502f1d8eda19fb9f", 15),
+    "usage": ("44a2ec30deecc134", 16),
     "timeline": ("4f461179faff39a3", 5),
     "tools": ("008b36fed498d32b", 4),
     "approvals": ("c9db629215cc2620", 4),
     "subagents": ("698287ed09ff8981", 7),
     "class": ("1eb292eff34fd7d9", 4),
-    "outline": ("fae51a8d8dc9bfa7", 4),
+    "outline": ("9cc1e74d9957469f", 6),
+    "otel_usage": ("0bad643b5ea85012", 7),
+    "otel_session_tree": ("712a2be72f4195b7", 4),
 }
 
 

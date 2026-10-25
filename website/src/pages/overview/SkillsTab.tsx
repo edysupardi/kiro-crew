@@ -8,6 +8,7 @@ import AskAgentButton from '../../components/AskAgentButton'
 import { Badge, Card, Btn, SearchInput, EmptyState, Toggle } from '../../components/ui'
 import InfoTip from '../../components/InfoTip'
 import Modal from '../../components/Modal'
+import { useConfirm } from '../../components/ConfirmDialog'
 import SkillForm, { assembleSkillContent, parseSkillContent, skillPathProblem, skillPostPath, type SkillFormData } from '../../components/SkillForm'
 import SkillDirectoryBrowser from '../../components/SkillDirectoryBrowser'
 import SkillBrowserModal from '../../components/SkillBrowserModal'
@@ -134,6 +135,7 @@ export default function SkillsTab() {
   const [conflictReading, setConflictReading] = useState(false)
   // Bumped when a conflict's Discard reseeds the editor, to remount SkillForm.
   const [formGen, setFormGen] = useState(0)
+  const { confirm, confirmDialog } = useConfirm()
 
   // Deep-linkable view param: ?view=budget swaps to the control plane.
   // Entering the budget view PUSHES a history entry so browser Back returns to
@@ -469,6 +471,7 @@ export default function SkillsTab() {
   return (<>
     <PendingSkillsPanel />
     <ProjectSkillsTrustList />
+    {confirmDialog}
     {/* Create Skill Modal */}
     {/* The gate reads the SANITIZED name and category, not the raw ones and not
         the combined path: a segment that sanitizes to nothing (typically one
@@ -690,7 +693,7 @@ export default function SkillsTab() {
                           would clear the second's failure notice, and the
                           optimistic snapshots would restore each other's
                           rows. One delete at a time, like the create modal. */}
-                      <Btn danger disabled={deleteSkill.isPending} onClick={() => { if (deleteSkill.isPending) return; if (confirm(i18nT('pages.overview.skillsTab.delete_confirm', { name: selectedSkill.key }))) deleteSkill.mutate(selectedSkill.key) }}>{i18nT('pages.overview.skillsTab.delete')}</Btn>
+                      <Btn danger disabled={deleteSkill.isPending} onClick={async () => { if (deleteSkill.isPending) return; if (await confirm({ title: i18nT('pages.overview.skillsTab.delete_confirm', { name: selectedSkill.key }), confirmLabel: i18nT('pages.overview.skillsTab.delete') })) deleteSkill.mutate(selectedSkill.key) }}>{i18nT('pages.overview.skillsTab.delete')}</Btn>
                     </div>
                   )}
                 </div>
@@ -830,6 +833,9 @@ interface PendingDetail {
   /** True when the live skill advanced past the version this was merged from. */
   stale_base?: boolean
   script_validation?: SkillScriptValidation
+  /** sha256 of the candidate as this read served it. Approve sends it back and
+   *  the server refuses (409 `pending_skill_changed`) if the file moved since. */
+  content_sha256?: string
 }
 
 /** A refused approve, parsed from the ApiError body (code + findings report). */
@@ -876,10 +882,11 @@ function PendingCandidateRow({ p, autoOpen, approveRefusal, mixedQueue, onApprov
   /** True when the queue holds a flagged candidate — the only shape where the
       disabled fade can be misread as a validation state. */
   mixedQueue?: boolean
-  onApprove: (slug: string) => void
+  onApprove: (slug: string, contentSha256: string) => void
   onDismiss: (slug: string) => void
 }) {
   const [open, setOpen] = useState(false)
+  const { confirm, confirmDialog } = useConfirm()
   const rowRef = useRef<HTMLDivElement>(null)
   // Deliberately an effect and not a `useState(autoOpen)` initializer: the panel
   // latches the deep-linked slug in an effect of its own, so `autoOpen` can flip
@@ -910,6 +917,7 @@ function PendingCandidateRow({ p, autoOpen, approveRefusal, mixedQueue, onApprov
   })
   return (
     <div ref={rowRef} className={`p-2 rounded-md border ${autoOpen ? 'border-accent ring-1 ring-accent' : 'border-border'}`}>
+      {confirmDialog}
       <div className="flex items-center gap-3">
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium text-text-strong truncate">
@@ -955,7 +963,7 @@ function PendingCandidateRow({ p, autoOpen, approveRefusal, mixedQueue, onApprov
           // while it flies -- and stays there when it fails. Either way what is
           // shown is not known to be the file Approve would promote.
           const detailUnconfirmed = detailFetchStatus !== 'idle' || !!detailReadError
-          const approveDisabled = !open || !detail || detailUnconfirmed || (isUpdate && (!detail.diff || !!detail.stale_base))
+          const approveDisabled = !open || !detail || !detail.content_sha256 || detailUnconfirmed || (isUpdate && (!detail.diff || !!detail.stale_base))
           return (
             <Btn
               /* Non-primary while the candidate is flagged AND the button is
@@ -970,11 +978,11 @@ function PendingCandidateRow({ p, autoOpen, approveRefusal, mixedQueue, onApprov
                  it would restate the already-visible hint. */
               primary={approveDisabled || p.script_validation?.ok !== false}
               disabled={approveDisabled}
-              onClick={() => onApprove(p.slug)}
+              onClick={() => { if (detail?.content_sha256) onApprove(p.slug, detail.content_sha256) }}
             >{i18nT('pages.overview.skillsTab.approve')}</Btn>
           )
         })()}
-        <Btn danger onClick={() => { if (confirm(i18nT('pages.overview.skillsTab.dismiss_confirm', { name: p.name }))) onDismiss(p.slug) }}>{i18nT('pages.overview.skillsTab.dismiss')}</Btn>
+        <Btn danger onClick={async () => { if (await confirm({ title: i18nT('pages.overview.skillsTab.dismiss_confirm', { name: p.name }), confirmLabel: i18nT('pages.overview.skillsTab.dismiss') })) onDismiss(p.slug) }}>{i18nT('pages.overview.skillsTab.dismiss')}</Btn>
       </div>
       {p.script_validation?.ok === false && approveRefusal?.code !== 'script_validation_failed' && (
         /* Visible everywhere the flagged badge is, collapsed AND expanded:
@@ -1273,8 +1281,9 @@ function PendingSkillsPanel() {
     })
   }, [pending, isSuccess])
   const approve = useMutation({
-    mutationFn: (slug: string) => api.approvePendingSkill(slug),
-    onMutate: (slug: string) => {
+    mutationFn: ({ slug, contentSha256 }: { slug: string; contentSha256: string }) =>
+      api.approvePendingSkill(slug, contentSha256),
+    onMutate: ({ slug }) => {
       // A retry starts clean; a stale refusal must not outlive the click that
       // supersedes it. The panel-level notice is cleared ONLY when it is about
       // THIS candidate: approving row A must not erase an unresolved failure
@@ -1288,7 +1297,7 @@ function PendingSkillsPanel() {
         return next
       })
     },
-    onError: (err, slug) => {
+    onError: (err, { slug }) => {
       let code: string | undefined
       let reason: string | undefined
       const report: Record<string, string[]> = {}
@@ -1313,6 +1322,8 @@ function PendingSkillsPanel() {
           ? i18nT('pages.overview.skillsTab.approve_failed_script_validation')
           : code === 'live_skill_exists'
             ? i18nT('pages.overview.skillsTab.approve_failed_live_exists')
+            : code === 'pending_skill_changed'
+            ? i18nT('pages.overview.skillsTab.approve_failed_changed')
             : code === 'pending_skill_not_found'
               ? i18nT('pages.overview.skillsTab.approve_failed_not_found')
               : i18nT('pages.overview.skillsTab.approve_failed_generic', {
@@ -1338,6 +1349,11 @@ function PendingSkillsPanel() {
           candidateCreatedAt: pending.find(p => p.slug === slug)?.created_at,
         },
       }))
+      // The file changed after the read the user approved: read it again so the
+      // panel shows what is on disk now; Approve waits for that read to land.
+      if (code === 'pending_skill_changed') {
+        qc.invalidateQueries({ queryKey: ['skills-pending-detail', slug] })
+      }
       // A refused approve can mean the queue moved under us (approved/dismissed
       // elsewhere) — refetch so a not-found card disappears instead of lingering.
       // The refetch UNMOUNTS the row and its per-row notice with it, which
@@ -1379,7 +1395,7 @@ function PendingSkillsPanel() {
         qc.invalidateQueries({ queryKey: ['skills'] })
       }
     },
-    onSuccess: (_data, slug) => {
+    onSuccess: (_data, { slug }) => {
       setApproveRefusals(prev => {
         if (!(slug in prev)) return prev
         const next = { ...prev }
@@ -1489,6 +1505,7 @@ function PendingSkillsPanel() {
       qc.invalidateQueries({ queryKey: ['skills-pending'] })
     },
   })
+  const { confirm, confirmDialog } = useConfirm()
   const dismissAll = useMutation({
     mutationFn: () => api.dismissAllPendingSkills(pending.map(p => p.slug)),
     onMutate: () => {
@@ -1547,6 +1564,7 @@ function PendingSkillsPanel() {
   // of `:first-child` with the pending count.
   return (
     <div className="mb-2">
+      {confirmDialog}
       {/* Suppressed when the ONLY thing to show is the resolved-candidate
           notice: a "Pending review (0)" heading over a sentence explaining
           there is nothing to review reads like a broken count. */}
@@ -1554,7 +1572,7 @@ function PendingSkillsPanel() {
         <h4 className="text-sm font-semibold text-text-strong mb-2 flex items-center gap-2">
           {i18nT('pages.overview.skillsTab.pending_review_count', { count: pending.length })}
           <InfoTip text={i18nT('pages.overview.skillsTab.auto_generated_skill_candidates_awaiting_your_ap')} />
-          <Btn danger className="ml-auto text-[11px]" onClick={() => { if (confirm(i18nT('pages.overview.skillsTab.dismiss_all_confirm', { count: pending.length }))) dismissAll.mutate() }}>{i18nT('pages.overview.skillsTab.dismiss_all')}</Btn>
+          <Btn danger className="ml-auto text-[11px]" onClick={async () => { if (await confirm({ title: i18nT('pages.overview.skillsTab.dismiss_all_confirm', { count: pending.length }), confirmLabel: i18nT('pages.overview.skillsTab.dismiss_all') })) dismissAll.mutate() }}>{i18nT('pages.overview.skillsTab.dismiss_all')}</Btn>
         </h4>
       )}
       {pending.length > 0 && (
@@ -1608,7 +1626,7 @@ function PendingSkillsPanel() {
                 autoOpen={p.slug === reviewSlug}
                 approveRefusal={approveRefusals[p.slug]}
                 mixedQueue={pending.some(c => c.script_validation?.ok === false)}
-                onApprove={s => approve.mutate(s)}
+                onApprove={(slug, contentSha256) => approve.mutate({ slug, contentSha256 })}
                 onDismiss={s => dismiss.mutate(s)}
               />
             ))}

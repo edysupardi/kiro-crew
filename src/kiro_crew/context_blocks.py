@@ -67,6 +67,7 @@ _MARKERS: Final[tuple[tuple[str, str], ...]] = (
     ("user_display", r"\[CURRENT USER\]"),
     ("user_profile", r"\[USER PROFILE\]"),
     ("ui_language", r"\[UI LANGUAGE\]"),
+    ("tool_names", r"\[TOOL NAMES\]"),
     ("response_preferences", r"\[RESPONSE PREFERENCES"),
     ("channel_persona", r"\[CHANNEL\]"),
     ("incognito", r"\[INCOGNITO SESSION\]"),
@@ -160,15 +161,16 @@ _CLOSERS: Final[dict[str, re.Pattern[str]]] = {
         ("skill_hint", r"\[End of relevant skills\]"),
         ("channel_context", r"\[END SLACK THREAD CONTEXT\]"),
         ("conversation_replay", r"\[END CONVERSATION HISTORY\]"),
-        # Two spellings reach this opener: `context.py` emits
-        # `[End of hook context]` and `chat_runner.py` emits `[End hook
-        # context]`. Both are real emit sites, so one alternation covers them
+        # Two spellings reach this opener: `context_assembly/turn_message.py` emits
+        # `[End of hook context]` and `dashboard/chat_turn/turn_dispatch_gates.py` emits
+        # `[End hook context]`. Both are real emit sites, so one alternation covers them
         # rather than picking whichever the assembly happened to use last.
         ("hook_context", r"\[End (?:of )?hook context\]"),
         ("history_prefix", r"\[End of history\]"),
         ("theme_persona", r"\[END THEME PERSONA\]"),
         ("user_profile", r"\[End of user profile\]"),
         ("ui_language", r"\[End of UI language\]"),
+        ("tool_names", r"\[End of tool names\]"),
         ("response_preferences", r"\[END RESPONSE PREFERENCES\]"),
         ("cancelled_turn", r"\[END PREVIOUS TURN\]"),
         ("interrupted_turn", r"\[END INTERRUPTED TURN\]"),

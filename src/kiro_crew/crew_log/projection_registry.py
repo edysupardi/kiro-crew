@@ -14,22 +14,39 @@ from kiro_crew.crew_log.entry_types import (
     DASHBOARD_AGENTIC_ENTRY_TYPE,
     DASHBOARD_FOLD_NAME,
     DASHBOARD_REFUSED_ENTRY_TYPE,
+    GOAL_ENTRY_TYPE,
+    GOAL_FOLD_NAME,
     MISTAKES_FOLD_NAME,
     PANEL_ENTRY_TYPE,
     PANEL_FOLD_NAME,
     RADAR_ENTRY_TYPE,
+    WAITING_ENTRY_TYPE,
+    WAITING_FOLD_NAME,
     WORK_ENTRY_TYPE,
 )
 from kiro_crew.crew_log.projection_catalogue import (
     _FOLD_STATE_VERSION_BASE,
     FOLD_NAMES,
+    INTERNAL_SLOT_PROJECTION_NAMES,
     KNOWN_TYPES,
     SESSION_FOLD_NAMES,
     SLOT_PROJECTION_NAMES,
     TREE_PROJECTION_NAMES,
+    WORKER_FOLD_NAME,
+    WORKERS_FOLD_NAME,
     WORKSTREAMS_FOLD_NAME,
     WORKTREE_FOLD_NAME,
     _Fold,
+)
+from kiro_crew.crew_log.projection_crewmate import (
+    _goal_render,
+    _goal_rows,
+    _goal_start,
+    _goal_step,
+    _waiting_render,
+    _waiting_rows,
+    _waiting_start,
+    _waiting_step,
 )
 from kiro_crew.crew_log.projection_dashboard import (
     _agentic_render,
@@ -55,6 +72,22 @@ from kiro_crew.crew_log.projection_internal import (
     _outline_step,
 )
 from kiro_crew.crew_log.projection_ledger import _ledger_render, _ledger_start, _ledger_step
+from kiro_crew.crew_log.projection_otel_session_tree import (
+    OTEL_SESSION_TREE_FOLD_NAME,
+    OTEL_SESSION_TREE_TYPES,
+    _otel_session_tree_copy,
+    _otel_session_tree_render,
+    _otel_session_tree_start,
+    _otel_session_tree_step,
+)
+from kiro_crew.crew_log.projection_otel_usage import (
+    OTEL_USAGE_FOLD_NAME,
+    OTEL_USAGE_TYPES,
+    _otel_usage_copy,
+    _otel_usage_render,
+    _otel_usage_start,
+    _otel_usage_step,
+)
 from kiro_crew.crew_log.projection_radar import _radar_render, _radar_start, _radar_step
 from kiro_crew.crew_log.projection_side_panel import (
     TIMELINE_TYPES,
@@ -89,6 +122,22 @@ from kiro_crew.crew_log.projection_work import (
     _work_render,
     _work_start,
     _work_step,
+)
+from kiro_crew.crew_log.projection_workers import (
+    WORKER_TYPES,
+    WORKERS_TYPES,
+    _worker_bind_slot,
+    _worker_copy,
+    _worker_render,
+    _worker_rows,
+    _worker_start,
+    _worker_step,
+    _workers_bind_slot,
+    _workers_copy,
+    _workers_render,
+    _workers_rows,
+    _workers_start,
+    _workers_step,
 )
 from kiro_crew.crew_log.projection_workstreams import (
     _workstreams_bind_slot,
@@ -154,6 +203,8 @@ USAGE_TYPES: Final[frozenset[str]] = frozenset(
         # turns not shown" count both drift down and never self-correct.
         "turn/refused",
         "context/composed",
+        # The engine's measurement of a turn, attached to that turn's context row.
+        "context/measured",
         "compaction/applied",
         "step/completed",
         "subagent/completed",
@@ -223,6 +274,8 @@ def _usage_copy(state: dict[str, Any]) -> dict[str, Any]:
     # row: an in-place write would reach a projection already handed to a reader.
     grown["context_turns"] = list(state["context_turns"])
     grown["omitted_models"] = list(state["omitted_models"])
+    # Its rows are REPLACED, never edited, so a shallow copy of the map is enough.
+    grown["context_measured_unknown"] = dict(state["context_measured_unknown"])
     # ``context_turn_keys`` needs no copy: it is a str, which ``_count_turn_ordinal``
     # REPLACES rather than mutates, so the snapshot keeps the value it was handed.
     return grown
@@ -427,7 +480,10 @@ _FOLDS: Final[dict[str, _Fold]] = {
         # inflated count for the life of the unit.
         # Moved again for ``context_started`` and the per-row ``first_start``: a
         # savepoint without them would mark a later rebuild as the session's start.
-        state_version=_FOLD_STATE_VERSION_BASE + 11,
+        # Moved again for the engine-measured rows and the running sum of composed
+        # characters beside them: a savepoint without the sum would subtract nothing
+        # from the engine's user text for the rest of the unit.
+        state_version=_FOLD_STATE_VERSION_BASE + 12,
     ),
     # The panel's feed section reads this one, so it is pushed like the rest; its value
     # is bounded by ``TIMELINE_LIMIT`` whatever the session's length.
@@ -501,6 +557,55 @@ _FOLDS: Final[dict[str, _Fold]] = {
         _outline_render,
         affects=OUTLINE_TYPES,
         copy_state=_outline_copy,
+        # Bumped when the draft gained its model-call step, raw text and an
+        # unreadable-body flag, so a run given back under a row's step joins that row
+        # instead of replacing it (and does not resurrect an unreadable call's empty
+        # preview): an old savepoint describes the pre-join draft and retires cold.
+        state_version=_FOLD_STATE_VERSION_BASE + 2,
+    ),
+    # Keyed by one SESSION and NOT advertised, for the reason stated beside
+    # :data:`INTERNAL_PROJECTION_NAMES`: its one reader is the OTel export
+    # subscriber, which asks for it by name through the crew-log bus rather than
+    # through the side panel. ``affects`` is the two entry types
+    # :mod:`~kiro_crew.crew_log.projection_otel_usage` reads; both are small and rare
+    # next to a session's message bodies, so ``copy_state`` is spelled out rather
+    # than falling back to a deep copy of a state that is already two scalars and a
+    # small dict.
+    OTEL_USAGE_FOLD_NAME: _Fold(
+        OTEL_USAGE_FOLD_NAME,
+        _otel_usage_start,
+        _otel_usage_step,
+        _otel_usage_render,
+        affects=OTEL_USAGE_TYPES,
+        copy_state=_otel_usage_copy,
+        # Three past the base. Two of those are the stored SHAPE: the state carries
+        # ``opened_ts`` beside ``opened`` / ``turns``, and the opened agent is held as
+        # the closed ``opened_agent_kind`` enum, not a raw name. A savepoint whose
+        # shape does not match -- one missing ``opened_ts``, or one carrying a raw
+        # agent string -- retires to a cold fold rather than resuming under a shape
+        # this version does not read.
+        #
+        # The third is a shape the keys cannot show: ``opened_agent_kind`` is answered
+        # from the opening entry's ``slot`` for the ``crewmate`` value, so a savepoint
+        # written by a build that read only ``agent`` holds ``other`` for every
+        # crewmate session it folded. The keys match, the meaning does not, and
+        # resuming such a file would serve that wrong value for the life of the unit --
+        # which is exactly what this number retires.
+        state_version=_FOLD_STATE_VERSION_BASE + 3,
+    ),
+    # Keyed by one SESSION and NOT advertised, for the same reason as ``otel_usage``
+    # beside it: its one reader is the OTel export subscriber, which asks for it by
+    # name through the crew-log bus rather than through the side panel. ``affects`` is
+    # the two entry types it reads (``session/opened`` and ``session/spawned``), small
+    # and rare next to a session's message bodies, so ``copy_state`` is spelled out
+    # rather than falling back to a deep copy of a state that is already scalars.
+    OTEL_SESSION_TREE_FOLD_NAME: _Fold(
+        OTEL_SESSION_TREE_FOLD_NAME,
+        _otel_session_tree_start,
+        _otel_session_tree_step,
+        _otel_session_tree_render,
+        affects=OTEL_SESSION_TREE_TYPES,
+        copy_state=_otel_session_tree_copy,
     ),
     # The SLOT-keyed folds each answer to exactly ONE entry type -- their ``step``
     # returns on its first line for anything else -- so ``affects`` names that type and
@@ -547,10 +652,12 @@ _FOLDS: Final[dict[str, _Fold]] = {
         affects=frozenset({WORK_ENTRY_TYPE}),
         count_rows=_work_rows,
         count_opaque=_work_opaque,
-        # One past the base: the state now carries ``closed``, ``tombstones`` and
-        # ``forgotten``, and a closed item past the window leaves ``items``. A
+        # Two past the base. The state carries ``closed``, ``tombstones`` and
+        # ``forgotten``, and a closed item past the window leaves ``items``: a
         # savepoint of the shape that holds every item would resume holding them.
-        state_version=_FOLD_STATE_VERSION_BASE + 1,
+        # Each item carries ``pending_since``, which a savepoint without it would
+        # resume short of.
+        state_version=_FOLD_STATE_VERSION_BASE + 2,
     ),
     PANEL_FOLD_NAME: _Fold(
         PANEL_FOLD_NAME,
@@ -598,6 +705,60 @@ _FOLDS: Final[dict[str, _Fold]] = {
         affects=WORKSTREAMS_TYPES,
         copy_state=_workstreams_copy,
         count_rows=_workstreams_rows,
+    ),
+    # A crewmate's own record, the two folds its Dashboard page binds for the goal and
+    # for what waits on the person. Each entry is a whole snapshot the gateway appends
+    # when the fact changes, so the step replaces top-level keys only and a flat copy
+    # covers it.
+    GOAL_FOLD_NAME: _Fold(
+        GOAL_FOLD_NAME,
+        _goal_start,
+        _goal_step,
+        _goal_render,
+        affects=frozenset({GOAL_ENTRY_TYPE}),
+        copy_state=_flat_copy,
+        count_rows=_goal_rows,
+    ),
+    WAITING_FOLD_NAME: _Fold(
+        WAITING_FOLD_NAME,
+        _waiting_start,
+        _waiting_step,
+        _waiting_render,
+        affects=frozenset({WAITING_ENTRY_TYPE}),
+        copy_state=_flat_copy,
+        count_rows=_waiting_rows,
+    ),
+    # The worker sessions a crewmate created, from the crewmate's OWN log: who it made
+    # and when, under the cap. What each worker is doing is ``worker``, merged in at
+    # read. ``affects`` stays the whole set a worker's entries carry, because the eager
+    # path routes a worker's entry to its creator's cell by this fold's types.
+    WORKERS_FOLD_NAME: _Fold(
+        WORKERS_FOLD_NAME,
+        _workers_start,
+        _workers_step,
+        _workers_render,
+        bind_slot=_workers_bind_slot,
+        affects=WORKERS_TYPES,
+        copy_state=_workers_copy,
+        count_rows=_workers_rows,
+    ),
+    # One worker's row, over that worker's own newest units: a cell per worker, so one
+    # worker growing continues its own cell and leaves the others warm.
+    WORKER_FOLD_NAME: _Fold(
+        WORKER_FOLD_NAME,
+        _worker_start,
+        _worker_step,
+        _worker_render,
+        bind_slot=_worker_bind_slot,
+        affects=WORKER_TYPES,
+        copy_state=_worker_copy,
+        count_rows=_worker_rows,
+        mode="lazy",
+        lazy_reason=(
+            "a part of ``workers``, read only when that fold is read: every session's "
+            "turns carry its types, so folding it eagerly would fold for every session "
+            "while only a crewmate's workers are ever read"
+        ),
     ),
     # The TREE-keyed fold, the third key kind, argued where
     # :data:`TREE_PROJECTION_NAMES` names it. ``affects`` is the one work entry type:
@@ -681,7 +842,9 @@ if _ORPHAN_EAGER:  # pragma: no cover - import-time
 #: CONSTANT, which is what this change exists to stop being. Checked at import because a
 #: fold added without a counter would be silently under-charged forever.
 _UNCOUNTED_SLOT_FOLDS: Final[tuple[str, ...]] = tuple(
-    name for name in SLOT_PROJECTION_NAMES if _FOLDS[name].count_rows is None
+    name
+    for name in SLOT_PROJECTION_NAMES + INTERNAL_SLOT_PROJECTION_NAMES
+    if _FOLDS[name].count_rows is None
 )
 if _UNCOUNTED_SLOT_FOLDS:  # pragma: no cover - import-time
     raise RuntimeError(
@@ -699,7 +862,11 @@ _MISKEYED_FOLDS: Final[tuple[str, ...]] = tuple(
     for name in FOLD_NAMES
     if sum(
         name in family
-        for family in (SESSION_FOLD_NAMES, SLOT_PROJECTION_NAMES, TREE_PROJECTION_NAMES)
+        for family in (
+            SESSION_FOLD_NAMES,
+            SLOT_PROJECTION_NAMES + INTERNAL_SLOT_PROJECTION_NAMES,
+            TREE_PROJECTION_NAMES,
+        )
     )
     != 1
 )

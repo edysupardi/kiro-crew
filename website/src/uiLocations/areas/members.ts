@@ -61,6 +61,15 @@ export const LOCATIONS = {
     terms: ADVANCED_TERMS,
     placements: [{ ...ON_PAGE, entry: 'content', requires: [{ kind: 'condition', id: 'no_crewmates' }] }],
   },
+  // The empty roster's Import from file: the first crewmate can be a shared one.
+  'members.empty.import': {
+    kind: 'button',
+    terms: {
+      en: ['import a crewmate', 'open a crewmate file', 'add a shared crewmate'],
+      'zh-CN': ['导入队友', '打开队友文件'],
+    },
+    placements: [{ ...ON_PAGE, entry: 'content', requires: [{ kind: 'condition', id: 'no_crewmates' }] }],
+  },
   // The header "+" (an icon button): its name is the aria-label "Add…".
   // The roster's header "+" (an icon button): its name is the aria-label
   // "Add…". An open crewmate chat folds the roster away on a wide screen, so
@@ -159,6 +168,25 @@ export const LOCATIONS = {
     terms: CREATE_TERMS,
     placements: [{ surface: 'members', parent: 'members.switcher', entry: 'menu' }],
   },
+  // The header "+" menu's Import from file: the phone roster's door to the import dialog.
+  'members.add-menu.import': {
+    kind: 'menu-item',
+    label: { from: 'text', key: 'pages.membersPage.import_from_file' },
+    terms: {
+      en: ['import a crewmate', 'open a crewmate file', 'add a shared crewmate'],
+      'zh-CN': ['导入队友', '打开队友文件'],
+    },
+    placements: [{ surface: 'members', parent: 'members.add-menu', entry: 'menu' }],
+  },
+  // Under it, Import from file: a crewmate someone shared as a .crewmate file.
+  'members.switcher.import': {
+    kind: 'menu-item',
+    terms: {
+      en: ['import a crewmate', 'open a crewmate file', 'add a shared crewmate'],
+      'zh-CN': ['导入队友', '打开队友文件'],
+    },
+    placements: [{ surface: 'members', parent: 'members.switcher', entry: 'menu' }],
+  },
   // The identity pill in the open crewmate's header. Its text (and accessible
   // name) is the crewmate's name; what the click does is the tooltip.
   'members.edit': {
@@ -170,10 +198,54 @@ export const LOCATIONS = {
     },
     placements: [{ ...ON_PAGE, entry: 'content', requires: [{ kind: 'condition', id: 'crewmate_selected' }] }],
   },
-  // The profile card's Permissions row (CrewProfilePanel): "what it may do",
-  // the newcomer's door to a crewmate's tools, which opens the editor. The card
-  // opens from the header pill (`members.edit`), so a guide walks: choose the
-  // crewmate in the roster, open its card, here.
+  // The profile card's Profile tab, last on its rail (the card opens on
+  // Sessions). The Settings row lives on it, so a guide to anything there
+  // selects this tab first; it is the reveal scope for that step.
+  'members.profile-tab': {
+    kind: 'tab',
+    terms: {
+      en: ["my crewmate's profile", 'what my crewmate is about', "the crewmate's memory and workspace"],
+      'zh-CN': ['队友资料', '队友简介', '队友的记忆和工作区'],
+    },
+    placements: [{
+      ...ON_PAGE, entry: 'content',
+      requires: [
+        { kind: 'condition', id: 'crewmate_selected' },
+        { kind: 'shown_by', location: 'members.edit', when: 'crewmate_profile_closed' },
+      ],
+    }],
+  },
+  // The profile card's Settings row (CrewProfileSettings), on its Profile tab:
+  // the door to the crewmate's own settings page (permission, model, worker
+  // model, the dashboard lock). The card opens from the header pill
+  // (`members.edit`) on Sessions, so a guide walks: choose the crewmate, open
+  // its card, its Profile tab, here.
+  'members.settings': {
+    kind: 'button',
+    label: { from: 'attr', attr: 'aria-label' },
+    terms: {
+      en: ['crewmate settings', 'my crewmate\'s model', 'change the crewmate\'s model', 'lock the dashboard layout'],
+      'zh-CN': ['队友设置', '队友的模型', '锁定仪表板布局'],
+      ja: ['クルーメイトの設定'],
+      ko: ['크루메이트 설정'],
+      es: ['ajustes del agente'],
+      fr: ["réglages de l'agent"],
+      de: ['Einstellungen des Agenten'],
+      pt: ['configurações do agente'],
+      it: ["impostazioni dell'agente"],
+      ru: ['настройки агента'],
+    },
+    placements: [{
+      ...ON_PAGE, entry: 'content',
+      requires: [
+        { kind: 'condition', id: 'crewmate_selected' },
+        { kind: 'shown_by', location: 'members.edit', when: 'crewmate_profile_closed' },
+        { kind: 'shown_by', location: 'members.profile-tab', when: 'crewmate_profile_tab_closed' },
+      ],
+    }],
+  },
+  // The Settings page's Permissions row: "what it may do", the newcomer's door
+  // to a crewmate's tools. One more step on the walk above: open Settings, here.
   'members.permissions': {
     kind: 'button',
     label: { from: 'attr', attr: 'aria-label' },
@@ -194,6 +266,8 @@ export const LOCATIONS = {
       requires: [
         { kind: 'condition', id: 'crewmate_selected' },
         { kind: 'shown_by', location: 'members.edit', when: 'crewmate_profile_closed' },
+        { kind: 'shown_by', location: 'members.profile-tab', when: 'crewmate_profile_tab_closed' },
+        { kind: 'shown_by', location: 'members.settings', when: 'crewmate_settings_closed' },
       ],
     }],
   },
@@ -220,15 +294,13 @@ export const LOCATIONS = {
     guide: false,
     placements: [{ ...ON_TAB, entry: 'content' }],
   },
-  // The crewmate editor's section rail (CrewEditorRail): the rows a guide
-  // opens on the way to a control drawn only in that section. Each is drawn
-  // for every crewmate.
+  // The crewmate editor's section rail (CrewEditorNextRail): the sections a
+  // guide opens on the way to a control drawn only there. `section-model` is
+  // General, which holds the model and Edit avatar; it is drawn for every
+  // crewmate, while the default crewmate has no Danger zone. The Memory section
+  // holds no registered control, so it is not registered: its one-word label
+  // would only tie a bare "memory" question with the chat's memory-mode chip.
   'agents.section-model': {
-    kind: 'tab',
-    guide: false,
-    placements: [{ ...ON_TAB, entry: 'content', requires: [{ kind: 'condition', id: 'crewmate_editor_open' }] }],
-  },
-  'agents.section-place': {
     kind: 'tab',
     guide: false,
     placements: [{ ...ON_TAB, entry: 'content', requires: [{ kind: 'condition', id: 'crewmate_editor_open' }] }],
@@ -238,7 +310,8 @@ export const LOCATIONS = {
     guide: false,
     placements: [{ ...ON_TAB, entry: 'content', requires: [{ kind: 'condition', id: 'crewmate_editor_open' }] }],
   },
-  // The editor's Model section: the crewmate's default model.
+  // The model field on the editor's General section: the crewmate's default
+  // model.
   'agents.model': {
     kind: 'field',
     label: { from: 'attr', attr: 'aria-label' },
@@ -261,16 +334,16 @@ export const LOCATIONS = {
     terms: CREATE_TERMS,
     placements: [{ ...ON_TAB, entry: 'content', requires: [{ kind: 'condition', id: 'no_crewmates' }] }],
   },
-  // The crewmate editor's header button (an existing crewmate, not a create).
-  // The Routing pane's "Edit avatar" is the same action deeper in; not registered.
+  // The crewmate editor's Edit avatar button, on its General section (an
+  // existing crewmate, not a create). The avatar itself beside it opens the same
+  // builder; not registered.
   'agents.edit-avatar': {
     kind: 'button',
-    label: { from: 'attr', attr: 'aria-label' },
     terms: {
       en: ["change my crewmate's avatar", 'change the avatar', 'crewmate picture', 'change the face', 'avatar'],
       'zh-CN': ['修改头像', '更换头像', '换头像', '队友头像', '改代理的头像', '改代理头像', '更换代理头像'],
     },
-    placements: [{ ...ON_TAB, entry: 'header', requires: [{ kind: 'condition', id: 'crewmate_editor_open' }] }],
+    placements: [{ surface: 'capabilities', parent: 'agents.section-model', entry: 'tab' }],
   },
   // The editor's Danger zone pane: the first, unarmed half of its two-step
   // delete (the armed half, "Yes, delete it", is a confirmation, not a place).
@@ -284,51 +357,5 @@ export const LOCATIONS = {
     // the workspace, memory store and transcripts.
     cautionKey: 'pages.kiroCrewAgentsPage.deleting_a_crew_unbinds_it_from_new_sessions_its',
     placements: [{ surface: 'capabilities', parent: 'agents.section-danger', entry: 'tab' }],
-  },
-  // The crewmate editor's header Chat (beside Edit avatar): opens a chat with
-  // that crewmate.
-  'agents.chat': {
-    kind: 'button',
-    terms: {
-      en: [
-        'chat with a crewmate', 'talk to a crewmate', 'message a crewmate', 'start a chat with a crewmate',
-        'talk to an agent', 'chat with an agent',
-      ],
-      'zh-CN': ['和队友聊天', '跟队友对话', '和代理聊天', '单独和队友聊', '给队友发消息', '和助手成员聊天'],
-      ja: ['クルーメイトとチャット', 'エージェントと話す'],
-      ko: ['크루메이트와 채팅', '에이전트와 대화'],
-      es: ['chatear con un agente', 'hablar con un agente'],
-      fr: ['discuter avec un agent', 'parler à un agent'],
-      de: ['mit einem Agenten chatten', 'mit einem Agenten sprechen'],
-      pt: ['conversar com um agente', 'falar com um agente'],
-      it: ['chattare con un agente', 'parlare con un agente'],
-      ru: ['написать агенту', 'поговорить с агентом'],
-    },
-    placements: [{ ...ON_TAB, entry: 'header', requires: [{ kind: 'condition', id: 'crewmate_editor_open' }] }],
-  },
-  // The editor's Workspace · Memory pane (MemoryStoreField): opens the memory
-  // the crewmate keeps, in Settings > Overview's memory view. Drawn only for a
-  // private memory or the default crewmate's global one.
-  'agents.manage-memory': {
-    kind: 'button',
-    terms: {
-      en: [
-        'what a crewmate remembers', "crewmate's memory", "see a crewmate's memory", "edit a crewmate's memory",
-        'what does my agent remember', 'private memory',
-      ],
-      'zh-CN': ['队友的记忆', '查看队友记忆', '助手记住了什么', '代理记住了什么', '管理队友记忆', '私有记忆'],
-      ja: ['クルーメイトの記憶', '何を覚えているか'],
-      ko: ['크루메이트의 기억', '무엇을 기억하는지'],
-      es: ['memoria del agente', 'qué recuerda el agente'],
-      fr: ["mémoire de l'agent", "ce dont l'agent se souvient"],
-      de: ['Gedächtnis des Agenten', 'was der Agent sich merkt'],
-      pt: ['memória do agente', 'o que o agente lembra'],
-      it: ["memoria dell'agente", "cosa ricorda l'agente"],
-      ru: ['память агента', 'что помнит агент'],
-    },
-    placements: [{
-      surface: 'capabilities', parent: 'agents.section-place', entry: 'tab',
-      requires: [{ kind: 'condition', id: 'crewmate_memory_manageable' }],
-    }],
   },
 } as const satisfies UiLocationArea

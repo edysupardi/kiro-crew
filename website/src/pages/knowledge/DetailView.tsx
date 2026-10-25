@@ -4,6 +4,7 @@ import { ChevronLeft, Copy, Download, Archive, X, RefreshCw, AlertCircle, Link2,
 import { Card, Btn, Badge, ContentSkeleton } from '../../components/ui'
 import Clickable from '../../components/Clickable'
 import MarkdownRenderer from '../../components/MarkdownRenderer'
+import { useConfirm } from '../../components/ConfirmDialog'
 import { knowledgeApi } from './api'
 import { typeBadgeVariant, formatDate, useCopy } from './helpers'
 import type { KnowledgeItem, Entity } from './types'
@@ -101,6 +102,7 @@ function isMarkdownContent(item: KnowledgeItem): boolean {
 
 export default function DetailView({ itemId, onBack, onEntityClick }: { itemId: string; onBack: () => void; onEntityClick?: (name: string) => void }) {
   const queryClient = useQueryClient()
+  const { confirm, confirmDialog } = useConfirm()
   const { data: item, isLoading: loading } = useQuery({
     queryKey: ['knowledge-item', itemId],
     queryFn: () => knowledgeApi<KnowledgeItem>(`/items/${itemId}`),
@@ -252,13 +254,14 @@ export default function DetailView({ itemId, onBack, onEntityClick }: { itemId: 
         {item.status === 'archived'
           ? <Btn disabled={archiveMutation.isPending} onClick={() => archiveMutation.mutate({ id: item.id, status: 'active' })}><RefreshCw size={12} /> {i18nT('pages.knowledge.detailView.unarchive')}</Btn>
           : <Btn disabled={archiveMutation.isPending} onClick={() => archiveMutation.mutate({ id: item.id, status: 'archived' })}><Archive size={12} /> {i18nT('pages.knowledge.detailView.archive')}</Btn>}
-        <Btn disabled={deleteMutation.isPending} onClick={() => { if (confirm(i18nT('pages.knowledge.detailView.permanently_delete_this_item'))) deleteMutation.mutate(item.id) }}><X size={12} /> {i18nT('pages.knowledge.detailView.delete')}</Btn>
+        <Btn disabled={deleteMutation.isPending} onClick={async () => { if (await confirm({ title: i18nT('pages.knowledge.detailView.permanently_delete_this_item'), confirmLabel: i18nT('pages.knowledge.detailView.delete') })) deleteMutation.mutate(item.id) }}><X size={12} /> {i18nT('pages.knowledge.detailView.delete')}</Btn>
       </div>
       {(archiveMutation.isError || deleteMutation.isError) && (
         <div className="mt-2 text-[12px] text-danger flex items-center gap-1">
           <AlertCircle size={12} /> {(archiveMutation.error || deleteMutation.error)?.message || i18nT('pages.knowledge.detailView.action_failed')}
         </div>
       )}
+      {confirmDialog}
     </div>
   )
 }

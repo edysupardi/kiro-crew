@@ -9,6 +9,7 @@ import ErrorNotice from '../../components/ErrorNotice'
 import Modal from '../../components/Modal'
 import SearchableSelect from '../../components/SearchableSelect'
 import MarkdownRenderer from '../../components/MarkdownRenderer'
+import { useConfirm } from '../../components/ConfirmDialog'
 import ListDetailBack from '../../components/ListDetailBack'
 import { useListDetailView } from '../../hooks/useListDetailView'
 import type { SteeringFile, SteeringList } from '../../types'
@@ -399,6 +400,7 @@ export default function SteeringTab() {
    * later chat switch is picked up on return, while a value that cannot change
    * mid-mount keeps it stable as a query key.
    */
+  const { confirm, confirmDialog } = useConfirm()
   const [slotKey] = useState<string | undefined>(() => {
     const slot = store.getState().chat.activeSlot
     return slot ? `dashboard:${slot}` : undefined
@@ -870,7 +872,7 @@ export default function SteeringTab() {
                         title={selectedReadOnly
                           ? i18nT('pages.overview.steeringTab.linked_read_only', { target: selected.target })
                           : undefined}
-                        onClick={() => { if (confirm(i18nT('pages.overview.steeringTab.delete_confirm', { path: selected.rel }))) deleteFile.mutate(selected.key) }}>{i18nT('pages.overview.steeringTab.delete')}</Btn>
+                        onClick={async () => { if (await confirm({ title: i18nT('pages.overview.steeringTab.delete_confirm', { path: selected.rel }), confirmLabel: i18nT('pages.overview.steeringTab.delete') })) deleteFile.mutate(selected.key) }}>{i18nT('pages.overview.steeringTab.delete')}</Btn>
                     </>)}
                   </div>
                 </div>
@@ -932,5 +934,6 @@ export default function SteeringTab() {
         </div>
       )}
     </Card>
+    {confirmDialog}
   </>)
 }

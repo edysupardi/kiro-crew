@@ -12,6 +12,17 @@ function connectedStore() {
   s.dispatch(sseConnected())
   return s
 }
+
+async function answerConfirm(confirmLabel: string, yes: boolean) {
+  // The dialog's subtree re-renders while the library animates, so a node held
+  // across ticks goes stale. Re-query and require a CONNECTED node inside waitFor.
+  await waitFor(() => {
+    const dialog = screen.getByRole('dialog')
+    const btn = within(dialog).getByRole('button', { name: yes ? confirmLabel : 'Cancel' })
+    expect(btn.isConnected).toBe(true)
+    fireEvent.click(btn)
+  }, { timeout: 3000 })
+}
 import { api } from '../api/client'
 import type { Artifact, ArtifactFolder, SessionDoc } from '../types'
 
@@ -971,7 +982,6 @@ describe('ArtifactsPage — artifact rows', () => {
   it('refuses the row delete offline instead of dead-clicking it', async () => {
     const user = userEvent.setup()
     const m = seed({ artifacts: [mkArtifact('cr-queue')] })
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     renderWithProviders(<ArtifactsPage />)
     await waitFor(() => expect(screen.getByText('cr queue')).toBeInTheDocument())
     await user.click(screen.getByLabelText(/Remove from artifacts library.*gateway offline/i))
@@ -1005,11 +1015,11 @@ describe('ArtifactsPage — artifact rows', () => {
   it('deletes from a row once the confirmation is accepted', async () => {
     const user = userEvent.setup()
     const m = seed({ artifacts: [mkArtifact('cr-queue')] })
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     renderWithProviders(<ArtifactsPage />, { store: connectedStore() })
     await waitFor(() => expect(screen.getByText('cr queue')).toBeInTheDocument())
 
     await user.click(screen.getByLabelText('Remove from artifacts library'))
+    await answerConfirm('Remove artifact', true)
 
     await waitFor(() => expect(m.deleteArtifact).toHaveBeenCalledWith('cr-queue'))
   })

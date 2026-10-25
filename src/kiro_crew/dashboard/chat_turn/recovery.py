@@ -8,37 +8,43 @@ import inspect
 import time
 from typing import TYPE_CHECKING, Any, Callable
 
+from kiro_crew.dashboard.chat_utils import (
+    _COMPACTION_CONTINUE_MSG,
+    _PROMISE_ONLY_CONTINUE_MSG,
+    _SYNTHETIC_RECOVERY_MSGS,
+    APP_AGENT_REFUSED_KIND,
+    AUTH_REQUIRED_KIND,
+    CONTEXT_OVERFLOW_KIND,
+    FALSE_TOOL_BLOCKER_REPLAY_KIND,
+    KIRO_CLI_MISSING_KIND,
+    MODEL_UNENTITLED_KIND,
+    SESSION_START_FAILED_KIND,
+    TRANSIENT_RETRY_KIND,
+    USAGE_LIMIT_KIND,
+    ResetCause,
+    _remove_queued_by_id,
+    build_recovery_requeue,
+    is_synthetic_payload_item,
+)
+from kiro_crew.dashboard.poisoned_escalation import PoisonedConversationEscalation
+from kiro_crew.dashboard.state import SUBAGENT_SYNTHESIS_PROMPT
+from kiro_crew.llm_helpers import acp_error_is_throttle
+
 if TYPE_CHECKING:
     from kiro_crew.dashboard.chat_runner import (
-        _COMPACTION_CONTINUE_MSG,
-        _PROMISE_ONLY_CONTINUE_MSG,
-        _SYNTHETIC_RECOVERY_MSGS,
-        APP_AGENT_REFUSED_KIND,
-        AUTH_REQUIRED_KIND,
-        CONTEXT_OVERFLOW_KIND,
-        FALSE_TOOL_BLOCKER_REPLAY_KIND,
-        MODEL_UNENTITLED_KIND,
-        SESSION_START_FAILED_KIND,
         SUBAGENT_COMPLETION_KIND,
-        SUBAGENT_SYNTHESIS_PROMPT,
         SYNTHETIC_RECOVERY_KIND,
-        TRANSIENT_RETRY_KIND,
-        USAGE_LIMIT_KIND,
         DashboardState,
         KiroCrewConfig,
-        PoisonedConversationEscalation,
         RefusalInfo,
-        ResetCause,
         _ChatSlot,
         _has_user_queued_followup,
-        _remove_queued_by_id,
         append_and_surface,
-        build_recovery_requeue,
         effective_session_key,
-        is_synthetic_payload_item,
         logger,
         model_is_unusable,
     )
+    from kiro_crew.dashboard.chat_turn.turn_stats import _emit_recovery_outcome
     from kiro_crew.dashboard.recovery_replays import ConsumePhase, LiveSlot, ReplayFamily
 
 
@@ -250,7 +256,7 @@ async def _note_cycle_failure(
 def _terminal_error_meta(exc: BaseException) -> dict[str, object] | None:
     """Row-level kind for a terminal ACP error, or None for a plain error row.
 
-    Six structural tags, read here without looking at the prose. Four are set
+    Seven structural tags, read here without looking at the prose. Four are set
     by ``_raise_acp_error`` from the raw frame: a model-entitlement rejection
     (``rejected_model`` / ``advertised``), a sign-in failure (``auth_required``),
     a spent plan allowance (``usage_limit``) and a context overflow
@@ -266,6 +272,9 @@ def _terminal_error_meta(exc: BaseException) -> dict[str, object] | None:
     ``agent_unavailable``, is set by the session start that finds no definition
     for its agent (``AcpAgentUnavailable``); its row is the app-agent refusal,
     because a retry finds the same missing definition and the prose names the fix.
+    The seventh, ``kiro_cli_missing``, is set where the kiro-cli binary is not
+    found at spawn (``AcpKiroCliMissing`` on the runtime path, ``AcpError`` on the
+    dedicated client); its row lets a feature-request chat offer the form.
     """
     unentitled = _model_unentitled_meta(exc)
     if unentitled is not None:
@@ -280,6 +289,8 @@ def _terminal_error_meta(exc: BaseException) -> dict[str, object] | None:
         return {"kind": SESSION_START_FAILED_KIND}
     if getattr(exc, "agent_unavailable", False) is True:
         return {"kind": APP_AGENT_REFUSED_KIND}
+    if getattr(exc, "kiro_cli_missing", False) is True:
+        return {"kind": KIRO_CLI_MISSING_KIND}
     return None
 
 
@@ -334,6 +345,41 @@ def _shared_dependency_delay(exc: BaseException, local_delay: float, *, slot_key
     if shared is not None:
         delay = max(delay, shared - time.time())
     return max(0.0, delay)
+
+
+async def _discard_unanswered_attempt(client: Any, slot_key: str) -> None:
+    """Drop a throttled attempt's prompt from the backend's history before re-sending it.
+
+    Without it KAS keeps the failed copy and the model reads every attempt as
+    another queued request. Fail-soft: when the backend cannot or will not, the
+    retry still goes out and the failed copy stays.
+    """
+    try:
+        discarded = await client.discard_unanswered_prompt() is True
+    except Exception:
+        logger.info("Could not drop the throttled prompt in slot %s", slot_key, exc_info=True)
+        return
+    if discarded:
+        logger.info("Dropped the throttled prompt from slot %s before re-sending it", slot_key)
+
+
+def _count_turn_retry(slot: _ChatSlot, exc: BaseException) -> None:
+    """Count one re-send of the current user turn under its mechanism."""
+    mechanism = "throttle" if acp_error_is_throttle(exc) else "transient_5xx"
+    retries = getattr(slot, "_turn_retries", None)
+    if not isinstance(retries, dict):
+        retries = {}
+    retries[mechanism] = retries.get(mechanism, 0) + 1
+    slot._turn_retries = retries
+
+
+def _turn_retry_outcomes(slot: _ChatSlot, outcome: str) -> None:
+    """Emit one recovery-outcome point per retry mechanism the turn used, then forget them."""
+    retries = getattr(slot, "_turn_retries", None)
+    if isinstance(retries, dict):
+        for mechanism, attempts in retries.items():
+            _emit_recovery_outcome(mechanism, outcome, attempts)
+    slot._turn_retries = {}
 
 
 def _should_suppress_requeue(slot) -> bool:
@@ -738,7 +784,7 @@ async def _requeue_after_prompt_busy(
     Within the busy budget a top-level turn is re-queued on the fresh provider;
     past it, or nested, the transcript says so instead.
 
-    *_stop_pressed* is ``_run_chat``'s live Stop read: a Stop that already
+    *_stop_pressed* is ``_on_prompt_busy``'s live Stop read: a Stop that already
     resolved to idle is invisible to ``_should_suppress_requeue`` and
     ``_queue_recovery`` takes no Stop snapshot of its own, so this gate is the
     only place it can veto the replay (the same pairing as the other arms).
@@ -747,7 +793,7 @@ async def _requeue_after_prompt_busy(
         pass
     elif _prompt_depth == 0 and slot._prompt_busy_retries <= 3:
         # Single emit: slot.append persists + broadcasts one chat_message
-        # via _on_message (see the AcpProcessDied note in ``_run_chat``); no explicit
+        # via _on_message (see the note in ``_on_process_died``); no explicit
         # broadcast_ws or the UI shows a duplicate card.
         _retry_msg = "⟳ Session busy — retrying…"
         slot.append("error", _retry_msg, "msg msg-err", meta={"kind": TRANSIENT_RETRY_KIND})

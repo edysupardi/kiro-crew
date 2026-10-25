@@ -44,6 +44,7 @@ from kiro_crew.start_priority import (
     StartPriority,
     person_priority,
 )
+from kiro_crew.testing.wait import async_wait_until, await_until
 
 #: This module drives real cold starts through ``SessionManager``, and one test
 #: reaches ``SubagentManager.spawn``, which refuses while the host looks short of
@@ -62,21 +63,15 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "kiro_crew"
 
 async def until(predicate: Callable[[], bool], what: str) -> None:
     """Yield until *predicate* holds; fail naming *what* after the backstop."""
-
-    async def _poll() -> None:
-        while not predicate():
-            await asyncio.sleep(0)
-
-    try:
-        await asyncio.wait_for(_poll(), timeout=SETTLE_BACKSTOP)
-    except asyncio.TimeoutError:
-        raise AssertionError(f"never reached: {what}") from None
+    await async_wait_until(predicate, describe=lambda: what)
 
 
 async def bounded(awaitable: Awaitable[T], what: str) -> T:
     """Await *awaitable*; fail naming *what* after the backstop."""
     try:
-        return await asyncio.wait_for(awaitable, timeout=SETTLE_BACKSTOP)
+        return await asyncio.wait_for(  # flake-ok: SETTLE_BACKSTOP bounds cleanup; cancels hung acquire to free semaphore queue
+            awaitable, timeout=SETTLE_BACKSTOP
+        )
     except asyncio.TimeoutError:
         raise AssertionError(f"never finished: {what}") from None
 
@@ -856,12 +851,10 @@ def _priority_args(path: str, function: str, callee: str) -> list[str]:
             "owner_start_priority(request)",
         ),
         ("dashboard/stt_stream.py", "_classify", "run_bg_oneliner", "StartPriority.FOREGROUND"),
-        # The dashboard runner hands every start the turn's own priority.
-        ("dashboard/chat_runner.py", "_run_chat", "run_bg_oneliner", "_turn_priority"),
         # The turn's eager respawn runs in its tail, from the priority the turn
         # recorded in its outcome.
         (
-            "dashboard/chat_runner.py",
+            "dashboard/chat_turn/queue_cycle.py",
             "_end_turn_tail",
             "schedule_eager_spawn",
             "outcome.start_priority",
@@ -903,21 +896,48 @@ def test_an_unattended_stream_claims_nothing():
     )
 
 
-def test_the_dashboard_runner_allocates_at_the_turns_priority():
+def _turn_tree() -> ast.Module:
+    """The dashboard runner and the chat_turn owners it composes, parsed as one module."""
     runner = _SRC / "dashboard/chat_runner.py"
-    tree = ast.parse(
+    return ast.parse(
         "\n".join(
             turn_file.read_text(encoding="utf-8")
             for turn_file in [*sorted(runner.with_name("chat_turn").glob("*.py")), runner]
             if turn_file.name != "__init__.py"
         )
     )
-    run_chat = next(
-        n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_run_chat"
+
+
+def test_the_dashboard_runner_hands_every_start_the_turns_priority():
+    """Every ``run_bg_oneliner`` start of the dashboard runner and its ``chat_turn`` phases
+    (the poisoned-conversation canary in ``_on_acp_error_card`` today) passes the turn's
+    own priority."""
+    starts = [
+        call
+        for call in ast.walk(_turn_tree())
+        if isinstance(call, ast.Call)
+        and (
+            (isinstance(call.func, ast.Attribute) and call.func.attr == "run_bg_oneliner")
+            or (isinstance(call.func, ast.Name) and call.func.id == "run_bg_oneliner")
+        )
+    ]
+    # Control: the sweep finds the canary's start, so it cannot pass on nothing.
+    assert starts, "no run_bg_oneliner call found in the runner or its chat_turn owners"
+    for call in starts:
+        assert [ast.unparse(k.value) for k in call.keywords if k.arg == "start_priority"] == [
+            "_turn_priority"
+        ], ast.unparse(call)
+
+
+def test_the_dashboard_runner_allocates_at_the_turns_priority():
+    tree = _turn_tree()
+    # The turn's admission phase (chat_turn/turn_admission.py) builds the allocation.
+    admit = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_turn_admit"
     )
     kwargs = [
         n
-        for n in ast.walk(run_chat)
+        for n in ast.walk(admit)
         if isinstance(n, ast.AnnAssign)
         and isinstance(n.target, ast.Name)
         and n.target.id == "_allocation_kwargs"
@@ -980,6 +1000,8 @@ def test_a_slot_action_arms_its_eager_spawn_by_who_asked(request_fields, expecte
     [
         ("dashboard/ws.py", "_handle_slot_focused"),
         ("dashboard/chat_api/session_relaunch.py", "reload_slot_session"),
+        # An agent's session_create: the caller is a model, no person waits.
+        ("dashboard/session_control_parts/session_create.py", "create_session"),
     ],
 )
 def test_the_focus_prefetch_and_reload_arm_background_eager_spawns(path, function):
@@ -1069,7 +1091,9 @@ def test_slack_automation_paths_name_no_priority():
         )
     )
     assert "start_priority" not in source
-    events = (_SRC / "slack/events.py").read_text(encoding="utf-8")
+    events = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted((_SRC / "slack").glob("events*.py"))
+    )
     assert events.count("start_priority=person_priority(not ") == 4
 
 
@@ -1144,7 +1168,7 @@ def test_the_oneliner_does_not_cancel_the_shared_runtimes_own_start():
     """``run_bg_oneliner``'s ``timeout`` bounds the DRIVE only. Cancelling the
     acquisition would kill the shared ``_bg`` (re)spawn every later caller reuses,
     and leak a backend session whose ``session/new`` had already gone out."""
-    tree = ast.parse((_SRC / "llm_helpers.py").read_text(encoding="utf-8"))
+    tree = ast.parse((_SRC / "llm_helpers_parts/background_turns.py").read_text(encoding="utf-8"))
     fn = next(
         n
         for n in ast.walk(tree)
@@ -1195,10 +1219,12 @@ def test_a_recovery_respawn_starts_with_an_empty_queue_total():
     """``_run_inner`` re-runs the same ``SubagentInfo`` on a recovery respawn. The
     previous attempt's queue total (or a mark it was cancelled inside) must not be
     subtracted from a clock that never paid it."""
-    source = (_SRC / "subagent_manager" / "run.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    # run.py binds most of its members from sibling ``run_*`` owners: scan the family.
+    package = _SRC / "subagent_manager"
+    family = [package / "run.py", *sorted(package.glob("run_*.py"))]
+    trees = [ast.parse(path.read_text(encoding="utf-8")) for path in family]
     reset_fields = []
-    for fn in ast.walk(tree):
+    for fn in (node for tree in trees for node in ast.walk(tree)):
         if not isinstance(fn, ast.AsyncFunctionDef):
             continue
         body = ast.unparse(fn)
@@ -1261,8 +1287,8 @@ async def test_a_pending_drain_waits_for_the_widened_total() -> None:
     assert not entered.is_set()  # the holder is still inside
     assert sem._drain_held == 3
     sem.release(StartPriority.BACKGROUND)
-    await asyncio.wait_for(entered.wait(), 5)
+    await await_until(entered)
     assert sem._drain_held == 4
     leave.set()
-    await asyncio.wait_for(task, 5)
+    await await_until(task)
     assert sem._value == 4

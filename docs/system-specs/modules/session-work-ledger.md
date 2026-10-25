@@ -1,6 +1,27 @@
 # Session Work Ledger
 
-Owners: `kiro_crew.session_ledger`, `kiro_crew.mcp_tools.ledger`, and the dashboard ledger routes. The live record is a projection of the session's crew log (`crew-log-core.md`); its entries are removed with that log through the permanent-delete funnel. Cleanup for the two on-disk ledger stores that the sweep still reaches — the retired session ledger-store residue and the conductor work ledger in `kiro_crew.work_ledger` — is owned by `kiro_crew.ledger_sweep`; see [Cleanup](#cleanup).
+Owners: `kiro_crew.session_ledger` (a mirror facade over its `kiro_crew.session_ledger_layout` and `kiro_crew.session_ledger_control` owners; see [Module layout](#module-layout)), `kiro_crew.mcp_tools.ledger`, and the dashboard ledger routes. The live record is a projection of the session's crew log (`crew-log-core.md`); its entries are removed with that log through the permanent-delete funnel. Cleanup for the two on-disk ledger stores that the sweep still reaches — the retired session ledger-store residue and the conductor work ledger in `kiro_crew.work_ledger` (a mirror facade over its `kiro_crew.work_ledger_*` owners) — is owned by `kiro_crew.ledger_sweep`; see [Cleanup](#cleanup).
+
+## Module layout
+
+`session_ledger.py` keeps the record API: the fold and read (`read_state`,
+`crew_log_units`), the write (`record_update`, `record`), the upgrade carry, the
+legacy-store purge (`purge_matching`) and `render_snapshot`. It is a mirror facade
+(`kiro_crew._facade_mirror`) over two owners, lowest layer first, and new work goes to
+the module of its responsibility:
+
+| Owner | Holds |
+|---|---|
+| `session_ledger_layout.py` | the entry type and fold name, every record and control-file bound and file name (the snapshot's bounds stay beside `render_snapshot`), the two errors a write raises, the exact-key identity (`ledger_key`, `_store_name`), the store and control paths, `canonical_slot`, the bounded store lock and the empty record |
+| `session_ledger_control.py` | the per-slot control files: the exclusion transaction (`exclude_units`, `unexclude_units`, `LedgerExclusionError`), the legacy carry's claim and tombstone, the ledger, work and panel unit-order logs and the legacy-document reader |
+
+Every name an owner defines still resolves as `kiro_crew.session_ledger.<name>`, and a
+patch through the facade reaches every owner that binds the name. An owner imports only
+the owner listed before it, never the facade; the family logs as
+`kiro_crew.session_ledger`, and `LedgerUnavailable`, `LedgerEntryTooLarge` and
+`LedgerExclusionError` keep that module name. `test/test_session_ledger_facade.py` pins
+the owner set and its layering, the names the facade binds and serves, the patch reach
+and the logger and error names.
 
 ## 1. Purpose
 
@@ -73,7 +94,7 @@ The claim is TWO-PHASE and answers THREE ways, and `carried` says which phase it
 
 Nothing in the product reclaims either on-disk ledger store, so the only cleanup is an explicit operator command: `kirocrew ledger-sweep`, owned end to end by `kiro_crew.ledger_sweep` (`run_command()` is what `cli.py` dispatches to). It is its own top-level command and not a `doctor` mode, for two reasons that are not symmetry: `doctor` is read-only by its own contract — a diagnostic run because something broke must not unlink files — and `--purge` is irreversible, so the two do not belong under one name; and a separate command removes a whole class of hazard, because inside `doctor`'s flat flag namespace a modifier could be parsed without its mode, so bare `doctor --purge` ran the health pass and exited 0 and read exactly like a purge that found nothing. Here every flag belongs to this command and argparse refuses it anywhere else (`test_the_sweep_is_its_own_command_and_doctor_stays_read_only`). The dry run's closing hint repeats the window the report was built with — `kirocrew ledger-sweep --purge --older-than-days N` — never a bare `--purge`, which would re-scan at the default and delete the ledgers between a larger preview window and 30 days, ones the report never listed (`test_the_printed_purge_hint_carries_the_windows_the_preview_used`). The `kirocrew-commands` skill, which is injected into model context, lists the dry run only: the purge spelling is printed by the dry run to the operator who ran it, and no model-reachable surface names it. It takes `--purge`, `--older-than-days N` (default `ledger_sweep.DEFAULT_OLDER_THAN_DAYS`, 30) and `--purge-unreadable`.
 
-**It stays off every automatic path.** It is not a gateway-start hook, not part of the history-delete funnel described above, and deliberately not an MCP tool: the deletion is irreversible, so no model-reachable surface reaches it. `ledger_sweep.scan()` changes nothing at all, and a purge is a second, separate invocation over the report the first one printed. `scan()` never raises for an absent store or for any damaged record inside one, but it does raise `OSError` when a ledger root exists and cannot be read — that is the whole store the sweep cannot see, and a clean empty report over it would be a false "nothing to clean"; the CLI exits non-zero with the error. `test_an_unreadable_ledger_root_raises_instead_of_reporting_nothing_to_clean` and `test_an_absent_ledger_root_is_an_empty_report` pin both halves.
+**It stays off every automatic path.** It is not a gateway-start hook, not part of the history-delete funnel described above, and deliberately not an MCP tool: the deletion is irreversible, so no model-reachable surface reaches it. `ledger_sweep.scan()` changes nothing at all, and a purge is a second, separate invocation over the report the first one printed. `scan()` never raises for an absent store or for any damaged record inside one, but it does raise `OSError` when a ledger root exists and cannot be read — that is the whole store the sweep cannot see, and a clean empty report over it would be a false "nothing to clean"; the CLI exits non-zero with the error. `test_an_unreadable_ledger_root_raises_instead_of_reporting_nothing_to_clean` and `test_an_absent_ledger_root_is_an_empty_report` pin both halves. `kirocrew doctor` calls `scan()` too, for a count only: one advisory `ledgers:` row under `Ledgers` says `kirocrew ledger-sweep` lists N ledgers (or nothing) with the default 30-day window, and names the command to review them. The count includes every listed entry: finished stores plus unreadable, linked or unaddressable stores listed for a human, without claiming every entry is finished or idle. It never purges or adds a doctor issue; it catches that `OSError` and prints `could not check` so the health run goes on (`test_doctor_counts_what_the_dry_run_lists_and_deletes_nothing`, `test_doctor_counts_a_linked_store_without_calling_it_finished`, `test_doctor_says_so_when_the_dry_run_lists_nothing`, `test_doctor_reports_an_unreadable_root_and_keeps_going`).
 
 `scan()` answers "leave it alone" unless the record itself proves otherwise:
 
@@ -125,6 +146,8 @@ Deletion goes through the two primitives that exist for it. Session ledgers use 
 
 `test_ledger_sweep.py` pins the rules: `test_dry_run_lists_both_kinds_and_deletes_nothing`, `test_purge_removes_only_the_candidates`, `test_an_in_flight_session_ledger_is_never_a_candidate`, `test_a_conductor_with_an_open_item_is_never_a_candidate`, `test_threshold_is_a_boundary_not_a_hint`, `test_unreadable_session_state_is_listed_but_survives_a_plain_purge`, `test_a_torn_item_record_makes_the_whole_conductor_unreadable`, `test_a_store_without_a_breadcrumb_is_reported_and_never_purged`, `test_a_conductor_with_no_items_is_kept_at_any_age`, and `test_a_window_that_is_not_a_finite_count_of_days_refuses` (a clamped negative window would make every ledger a candidate). `test_work_ledger_purge.py::test_purge_conductor_removes_the_ledger_under_the_conductor_lock` pins the lock, asserting what was gone while the hold was still open rather than the return value, which a purge running entirely outside the lock would also produce.
 
+**Where the conductor store's code lives.** `kiro_crew.work_ledger` keeps the projection rebuild (`rebuild_from_projection`), the cache-dirty flag (`mark_cache_dirty`, `cache_dirty`, `clear_cache_dirty`), the write snapshots and the recorded marks, and binds every name its flat sibling owners define, so `work_ledger.<name>` reads and patches as one module. New code goes to the owner of its responsibility: `kiro_crew.work_ledger_records` (vocabulary, caps, `CODE_*` refusal codes, `WorkLedgerError`, the record dataclasses), `kiro_crew.work_ledger_store` (layout, the three locks, record and event-log reads and writes), `kiro_crew.work_ledger_rules` (field checks and the read-side predicates such as `is_stale`), `kiro_crew.work_ledger_writes` (bindings, the conductor actions, worker reports, briefs and acceptance) and `kiro_crew.work_ledger_purge` (`ItemCensus`, `header_damage`, `census_items`, `purge_conductor`).
+
 ## 3. State record and bounded writes
 
 The `ledger` fold renders these fields, the same shape every reader already expected of the stored document, so the MCP tool, the route and the injected snapshot do not have to learn a new one (see `_ledger_render` in `crew_log/projection_ledger.py`):
@@ -163,6 +186,8 @@ Bounds are applied twice, and the reason is that a file's bytes are not the writ
 `session_ledger.render_snapshot()` reads one fold — the record has no file to stat, so asking whether it exists and asking what it says are the same question — and includes the current goal, phase, next step, recent rejected approaches, and artifact pointers, applying its own rendering bounds so every injected snapshot stays small against a clamped-but-full record. It omits terminal records because completed work provides no next-cycle steering; `test_snapshot_empty_without_ledger_or_when_terminal` and `test_snapshot_contains_state_and_is_capped` guard this behavior.
 
 Every `_fire_*_nudge` adapter in `slack.gateway` calls `compose_nudge_body()`, including the messaging and dashboard transports. `test_gateway_fire_callbacks_use_the_composer` enumerates adapters rather than pinning their count, so a new transport cannot silently bypass the ledger snapshot.
+
+The first turn after a confirmed compaction carries the same snapshot. `context_assembly.turn.ledger_reinjection_part()`, called from the `needs_reinjection` branch of `build_message`, adds it under `[REINJECTED AFTER COMPACTION — work ledger]` with structural markers scrubbed, because the ledger is agent-written text. It adds nothing when the snapshot is empty, when the turn text already carries it (a nudge cycle that lands on that turn), on a minimal-context turn, and on a read-blocked turn, and a snapshot exception costs only the block. `test/test_context_ledger_reinjection.py` covers each case.
 
 ## 6. Failure behavior and scope
 

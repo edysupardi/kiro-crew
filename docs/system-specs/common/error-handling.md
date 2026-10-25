@@ -3,8 +3,9 @@
 ## Principles
 
 1. Custom exceptions in `acp/transport_errors.py` (re-exported by `acp/client.py`)
-   for ACP protocol/prompt errors, in `acp/session_handle.py` for runtime/transport
-   errors, and in `acp/runtime.py` for runtime binding and session-start errors
+   for ACP protocol/prompt errors, in `acp/session_handle_runtime_contract.py`
+   (re-exported by `acp/session_handle.py`) for runtime/transport errors, and in `acp/runtime_session_setup.py` and `acp/runtime_session_create.py` (re-exported by
+   `acp/runtime.py`) for runtime binding and session-start errors
 2. Error strings at CLI boundaries (never expose tracebacks to users)
 3. Graceful degradation — partial output returned on timeout
 
@@ -51,17 +52,17 @@ AcpError (base, acp/transport_errors.py) — carries `transient`, the retry verd
 ├── AcpModelUnavailable    — requested model not entitled; non-retryable
 └── AcpPromptBusy          — a prompt is already in flight on this session
 
-AcpRuntimeError (base, acp/session_handle.py)
+AcpRuntimeError (base, acp/session_handle_runtime_contract.py)
 ├── AcpRuntimeDead            — the underlying process has died
 ├── AcpRequestTimeout         — a request's response missed its budget
 │   ├── AcpSessionStartTimeout — `session/new` timed out while a collector owns
-│   │                            the possible late result (acp/runtime.py)
+│   │                            the possible late result (acp/runtime_session_create.py)
 │   └── AcpRuntimeOverloaded  — `initialize` went unanswered while the agents
 │                                slice was throttled; transient=False, because
 │                                the remedy is freeing agent memory, not a retry
 └── AcpWorkspaceBindingError  — descriptor-bound runtime cannot serve another cwd
     └── AcpToolSurfaceBindingError — a shared runtime cannot safely serve the
-                                     requested tool surface (acp/runtime.py)
+                                     requested tool surface (acp/runtime_session_setup.py)
 ```
 
 `AcpToolGateUnroutable` is a distinct type rather than a transport error because
@@ -89,6 +90,7 @@ instead of the row simply disappearing.
 | ACP → CLI | Catch `AcpError`, print user-friendly message, `sys.exit(1)` |
 | JSON-RPC read | Non-JSON lines silently skipped (kiro-cli debug output) |
 | Config load | Invalid JSON → log warning, return defaults |
+| Integer field in a dashboard JSON body | Read through `dashboard/body_numbers.body_int`, which raises `ValueError` for `1e999`/`-1e999` (infinite floats after `json.loads`) where `int()` raises `OverflowError`. The handler's own `except (TypeError, ValueError)` then gives the infinite value the same 400 or fallback any other malformed value gets there, never a 500. Not yet universal: older sites still call `int()` and add `OverflowError` to their own except clause instead; moving them onto `body_int` is tracked in [#22502](https://github.com/kirodotdev/KiroCrew/issues/22502). New sites use `body_int` |
 | Skill index (`list_skills`) | One global SKILL.md that is not UTF-8 or cannot be opened → one warning naming the file, that row dropped, every other row listed. Never a failed listing: the index feeds every chat turn and `GET /api/skills`. Rationale: [memory-skills-hooks](../modules/memory-skills-hooks.md) |
 | Process spawn | Backend-specific executable resolver, including trusted-path checks where required; clear error if missing |
 | Notes git subprocess (`md_notebook/git_ops.py`) | A non-zero exit reports git's last 3 stderr lines PLUS the first transport-caused line when one sits outside that tail. git ends every fetch/push failure with the same access-rights boilerplate and prints an SSH diagnosis first, so a tail alone reports a permission problem the operator does not have (a host reachable only via `~/.ssh/config` never resolved at all). The extra line widens what the message reports; it does not decide whether the command failed. |
@@ -186,7 +188,26 @@ never drift. Notable terminal (non-retryable) classes:
   with a reconnect notice, armed as `ReplayFamily.SESSION_NOT_FOUND`. A Stop that
   already resolved suppresses it; the drain and consume seams veto it on a later
   Stop, a queued follow-up or steer, or a rebind (with a cancel notice), refunding
-  the one-shot. A second loss on the same turn ends with the give-up text.
+  the one-shot. A second loss on the same turn ends with the give-up text. The
+  predicate matches a second raw answer with the same fresh-process remedy: a
+  frame whose `data` names `errorKind: cloud_credential_error` —
+  `_raise_acp_error` reads it structurally, tags the `AcpError`
+  `credential_reload`, and pins it non-transient, because the process's cached
+  credentials cannot be re-loaded and a retry on THAT process only draws the
+  failure again. It rides the reset-and-retry-once path unchanged, under the
+  same one-retry budget and tool-activity gates, and is deliberately not
+  `auth_required`: that tag offers the Kiro sign-in card, which signs in the
+  wrong identity for a harness that loads its own credentials. The dashboard
+  and channel surfaces word the retry for credentials
+  (`CREDENTIAL_RELOAD_RETRY_NOTICE`), and when the fresh process fails too (the
+  helper itself is broken: an expired SSO login, a revoked role) the give-up
+  line carries the provider's own message (`credential_give_up_text`) instead
+  of "start a new chat", which would fail the same way. That message is
+  redacted inside `credential_give_up_text` through `redact_via_context`, the
+  egress path that finds link and credential spans on the original text and
+  rewrites it once (so neither pass hides a value from the other), because the
+  dashboard row and the channel post that show it do not redact on their own,
+  and the frame's trailing `data` repr is dropped from it.
 - **Preserved-thinking binding mismatch**: `AcpConversationBindingMismatch`
   (non-transient) means the stored native conversation carries thinking bound to
   another conversation prefix. A dashboard outer turn with no reply, thought or
@@ -247,7 +268,20 @@ never drift. Notable terminal (non-retryable) classes:
   conversation-discard recovery above is for a rejected image, not for a
   request that is merely too big.
 - **Usage limit** and **model not entitled**: allowance spent, or the plan lacks
-  the model; also terminal, with guidance to switch model or tier.
+  the model; also terminal, with guidance to switch model or tier. `_RE_USAGE_LIMIT`
+  covers two vocabularies, because a Claude seat (`claude-agent-acp`) does not go
+  through Bedrock and words a spent allowance in Anthropic's terms, not AWS's: the
+  window-named limits (`monthly`/`daily`/`weekly`, plus the rolling `session` limit
+  and its `5-hour`/`five-hour` spelling), and the named exceptions
+  (`MonthlyLimitError`, `FreeTierLimitExceeded`). The window must be one of those
+  NAMED spellings, not any word before "limit", so a genuine "hit your rate limit"
+  stays a retryable throttle. The formatter quotes the provider's own sentence
+  verbatim (`_provider_detail`), so the reset time Anthropic appends ("· resets
+  5:50pm", "It resets Monday at 9am") reaches the user unparaphrased. A bare
+  `rate_limit_error` / HTTP 429 WITHOUT that limit wording is deliberately NOT a
+  usage limit: a short-term rate limit clears on its own, so it stays a retryable
+  throttle — it is the named-window wording, not the 429, that marks a spent
+  allowance a retry cannot recover.
 
 The auth family has exactly ONE transient member, **credential propagation**.
 Bedrock refuses a freshly minted credential with "The security token included in
@@ -259,7 +293,7 @@ accepted seconds later, so the existing backoff ladder absorbs it.
 formatter, ahead of `llm_helpers._is_transient_acp_error`'s
 `accessdenied`/`unrecognizedclient` exclusion short-circuit (a
 `_TRANSIENT_MARKERS` entry alone is unreachable, because the exclusion sits
-above the markers), and inside `is_auth_failure_output` so `acp/runtime.py`'s
+above the markers), and inside `is_auth_failure_output` so `acp/runtime_liveness.py`'s
 stderr latch does not convert it to the explicitly non-retryable
 `AcpAuthRequired` and skip the ladder entirely. It is scoped to the "is invalid"
 WORDING, never to the status: a bare 401/403, an `... is expired` token, a
@@ -283,6 +317,16 @@ the hint is its only transient marker). Onboarding a backend means auditing that
 alternation. The kiro-cli mid-stream envelope ("Encountered an error in the
 response stream: …") is deliberately NOT a hint — matching it would make the
 branch a catch-all that discards the real cause.
+
+The **throttle** branch is retryable on every backend, but its wording is
+positive-identity per `AGENTS.md` "Harness parity": only kiro-cli reaches the
+model through Bedrock (`ACP_BACKEND_KIRO`, the empty-string id), so an inline
+`backend == ACP_BACKEND_KIRO` check names Bedrock for it alone and "The model
+provider" for every other harness — a Claude seat, Codex, goose and the rest
+never touch AWS, so naming Bedrock sent their users chasing throttling that does
+not exist. The verb stays "throttling" in both forms so
+`llm_helpers._TRANSIENT_MARKERS` ("throttl") still classifies the formatted
+message as transient; the retry verdict is unchanged, only the subject noun moves.
 
 A **network-path drop** is the one transient class that waits by time rather
 than by count. `AcpError.connection_failure` is set from the raw frame when the

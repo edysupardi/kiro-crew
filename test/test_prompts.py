@@ -1274,6 +1274,7 @@ class TestPromptExpansionStaysOffTheEventLoop:
             for module_tree in trees
             for fn in ast.walk(module_tree)
             if isinstance(fn, ast.AsyncFunctionDef)
+            or (isinstance(fn, ast.FunctionDef) and fn.args.args and fn.args.args[0].arg == "turn")
             for node in ast.walk(fn)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -1281,7 +1282,8 @@ class TestPromptExpansionStaysOffTheEventLoop:
         ]
         offloaded = [
             node
-            for node in ast.walk(tree)
+            for module_tree in trees
+            for node in ast.walk(module_tree)
             if isinstance(node, ast.Call)
             and ast.unparse(node.func) == "asyncio.to_thread"
             and node.args
@@ -1373,7 +1375,8 @@ class TestUnscopedDetailReadStaysOffTheEventLoop:
         answers identically whichever thread read the file, and only slow storage
         tells them apart. Nested ``def``s are pruned — those are the executor jobs,
         which is exactly where the work belongs."""
-        tree = ast.parse(Path(_prompts_mod.__file__).read_text(encoding="utf-8"))
+        owner = Path(_prompts_mod.__file__).with_name("prompts_authoring.py")
+        tree = ast.parse(owner.read_text(encoding="utf-8"))
         handler = next(
             node
             for node in ast.walk(tree)

@@ -133,8 +133,19 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("focus-mode:toggle", handler);
     return () => ipcRenderer.removeListener("focus-mode:toggle", handler);
   },
+  // A macOS swipe main.js relays as one route-history step: -1 Back, 1 Forward
+  // (see swipe-history.js). The SPA takes it through its guarded history step.
+  onHistoryStep: (cb) => {
+    const handler = (_e, delta) => cb(delta);
+    ipcRenderer.on("history:step", handler);
+    return () => ipcRenderer.removeListener("history:step", handler);
+  },
+  // Second argument: whether the macOS menu bar can slide over the window.
+  // Only an explicit `menuBarOverlap: false` from main turns it off, so a
+  // missing or malformed payload keeps the renderer's menu-bar band.
   onFullScreenChanged: (callback) => {
-    const handler = (_event, isFullScreen) => callback(!!isFullScreen);
+    const handler = (_event, isFullScreen, info) =>
+      callback(!!isFullScreen, !(info && info.menuBarOverlap === false));
     ipcRenderer.on("fullscreen-changed", handler);
     return () => ipcRenderer.removeListener("fullscreen-changed", handler);
   },
@@ -252,6 +263,21 @@ contextBridge.exposeInMainWorld("fileOpenAPI", {
 contextBridge.exposeInMainWorld("folderPickAPI", {
   available: () => ipcRenderer.invoke("dashboard:can-pick-folder"),
   pick: () => ipcRenderer.invoke("dashboard:pick-folder"),
+});
+
+// External terminal bridge for the Files tab's "Open in external terminal" row
+// and its Settings picker. `detect` resolves { apps: [{id, label}], capable },
+// the allowlisted terminal apps installed on this machine; for a window whose
+// gateway is not this machine's it resolves { apps: [], capable: false }, so the
+// row and the picker stay hidden there. `open` hands the main process the
+// opaque grant the gateway answered POST /api/terminal/external with, and
+// resolves { ok, app?, error? }; the main process redeems the grant at the
+// gateway and starts nothing without it, so no app name, path or argument
+// crosses this bridge. `open` rejects for a window whose gateway is not this
+// machine's. Absent in a plain browser and the PWA, where the row is hidden.
+contextBridge.exposeInMainWorld("externalTerminalAPI", {
+  detect: () => ipcRenderer.invoke("external-terminal:detect"),
+  open: (grant) => ipcRenderer.invoke("external-terminal:open", String(grant || "")),
 });
 
 // Native zoom bridge for the Settings > Display "Zoom Level" stepper.

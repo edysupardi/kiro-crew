@@ -3,7 +3,7 @@
 **Local page, not a mirror.** Part of the [crew log reference](README.md), which is
 marked as a named exception in [the Reference index](../README.md).
 
-Forty-four types. Read [envelope.md](envelope.md) first for the fields every entry
+Forty-seven types. Read [envelope.md](envelope.md) first for the fields every entry
 carries; this page covers only each type's `data`.
 
 Session entries are written with `src` `gateway` or `acp` and nothing else. They
@@ -40,6 +40,7 @@ The **Emitter** column says whether this build writes the type. Every row below 
 | [`message/queued`](#messagequeued) | A message arrived while a turn was running. | live | `gateway` | — |
 | [`request/configured`](#requestconfigured) | The request configuration, when it changed. | live | `gateway` | — |
 | [`context/composed`](#contextcomposed) | What was put in front of the model, block by block. | live | `gateway` | — |
+| [`context/measured`](#contextmeasured) | What the agent engine measured of a turn: its last request by category, and time to first output. | live | `gateway` | — |
 | [`step/started`](#stepstarted) | Opens one model call inside a turn. | live | `gateway` | opener of `step/completed` |
 | [`step/completed`](#stepcompleted) | Closes one model call. | live | `gateway` | closer |
 | [`tool/called`](#toolcalled) | A tool call, arguments digested. | live | `acp` | opener of `tool/completed` |
@@ -60,9 +61,11 @@ The **Emitter** column says whether this build writes the type. Every row below 
 | [`radar/recorded`](#radarrecorded) | One Issue Radar crew-ledger update: the work-item fields it set and the event explaining them. | live | `gateway` | — |
 | [`work/recorded`](#workrecorded) | One work-board mutation: who acted, on which item, and the fields it set. | live | `gateway` | — |
 | [`panel/published`](#panelpublished) | One publish of a crew's own webview: the data, and the template that renders it. | live | `gateway` | — |
-| [`dashboard/instance_changed`](#dashboardinstance_changed) | One crewmate dashboard-instance change: adopted, edited or rolled back. | live | `gateway` | — |
+| [`dashboard/instance_changed`](#dashboardinstance_changed) | One mate dashboard-instance change: adopted, edited or rolled back. | live | `gateway` | — |
 | [`dashboard/agentic_value`](#dashboardagentic_value) | One agent-written dynamic dashboard value. | live | `gateway` | — |
 | [`dashboard/agentic_refused`](#dashboardagentic_refused) | A refused agentic dashboard write (the mistake book's input), or a correction. | live | `gateway` | — |
+| [`dashboard/goal_recorded`](#dashboardgoal_recorded) | A crewmate's goal record after a change: goals and milestones. | live | `gateway` | — |
+| [`dashboard/waiting_changed`](#dashboardwaiting_changed) | What a crewmate waits on the person for, after it changed. | live | `gateway` | — |
 | [`card/proposed`](#cardproposed) | The agent proposed a change card, at this point in the conversation. | live | `gateway` | opener of `card/finished` |
 | [`card/finished`](#cardfinished) | A change card reached a finished status. | live | `gateway` | closer, by `card_id`; may repeat |
 | [`guide/offered`](#guideoffered) | The agent offered a guide, at this point in the conversation. | live | `gateway` | opener of `guide/finished` |
@@ -733,6 +736,38 @@ figures are on [`turn/completed`](#turncompleted). An entry with no `step` is th
 turn's opening composition; attribute it to the turn's first model call.
 
 **Since** — #10091.
+
+### `context/measured`
+
+What the agent engine measured of a turn: its last model request by category, in
+characters, and how long the turn waited for its first output.
+
+**Kind and `src`** — `session`; `src` is `gateway`.
+
+**When written** — By the turn's closer, after `turn/started` and before the turn's
+`turn/completed`, when the engine reported a breakdown or a time to first token for
+the prompt. Only the KAS backend asks for either, and nothing is written for a turn
+it did not measure, so a reader treats an absent entry as "not measured".
+
+**Pairing** — None. The `usage` fold attaches it to the same turn's `context/composed`
+row.
+
+| Field | Type | Required | Meaning | Enum |
+|---|---|---|---|---|
+| `turn` | int | required | Turn ordinal. | |
+| `turn_id` | string | optional | The engine's turn id. The same id twice is the same measurement. | |
+| `breakdown` | object | optional | `schema`, `categories` (category name to characters, every category the engine sent), `model_calls`, `total_chars`, `compacted` and `history` (`user`, `assistant`, `thinking`, `compaction_summary`). It describes the turn's LAST model request, not the turn as a whole. `history.user` covers the user text of every turn still in the engine's context. | |
+| `ttft` | object | optional | `total_ms` (turn start to first displayed output), and when the engine captured model timing `setup_ms` and `model_ms`. | |
+
+**Invariants** — Every figure in `breakdown` is in characters and describes the turn's last model request. `history.user` covers the user text of every turn still in the engine's context, which is why the `usage` fold keeps Kiro Crew's share as a running sum rather than reading this turn's composition alone.
+
+```json
+{"type":"context/measured","seq":14,"time":1789000004100,"src":"gateway","data":{"turn":3,"turn_id":"e-01","breakdown":{"schema":1,"categories":{"history":4000,"toolSpecs":2865},"model_calls":1,"total_chars":6865,"history":{"user":3990,"assistant":5,"thinking":5,"compaction_summary":0}},"ttft":{"total_ms":2870,"setup_ms":59,"model_ms":1534}}}
+```
+
+**Reader hint** — An absent entry means the engine measured nothing for the turn, never a measurement of zero.
+
+**Since** — #23648.
 
 ### `step/started`
 
@@ -1440,6 +1475,7 @@ log rather than a record beside it; the routes still read that cache.
 | `created_at` | string | optional | The item's committed creation stamp, carried by `create`. | |
 | `last_report_at` | string | optional | The item's committed last-report stamp, carried by `report`. | |
 | `closed_at` | string | optional | The item's committed close stamp, carried by `close`. | |
+| `pending_since` | string | optional | When the item's run of `pending` verdicts began, carried by a `pending` `verdict`. Any other verdict, or an `accept`, clears it. | |
 | `board_round` | int | optional | The board's committed round, carried by a baseline entry. | |
 | `board_created_at` | string | optional | The board's committed creation stamp, carried by a baseline entry. | |
 | `goal_version` | int | optional | The header's goal-write count after this write, set by `goal`. | |
@@ -1538,6 +1574,42 @@ best-effort, so a publish whose entry never landed leaves the fold with no recor
 the file still serves that crew's panel.
 
 **Since** — #13440.
+
+## A crewmate's own record
+
+Two snapshots the gateway appends to a crewmate's own DM session log so its
+Dashboard page can bind them (`dashboard/crewmate_feed.py`). Each replaces the
+last one whole in its slot fold, so a page reading it moves when the fact does,
+with no value the crewmate typed.
+
+#### `dashboard/goal_recorded`
+
+Kind `session`, `src` `gateway`. Written after every write of the crewmate's goal
+record (a goal set, milestones applied, a reading recorded), through
+`member_goals.add_change_listener`, and only when it differs from the last one
+recorded for that thread. A write while the thread has no live session (an idle
+thread between turns, or after a restart) is held, newest wins, and recorded on
+the thread's next growth, when its session is known. Folded as `goal`.
+
+| field | type | notes |
+| --- | --- | --- |
+| `goals` | array of `{text}` | the goals, in the record's order |
+| `milestones` | array of `{text, target, current, at}` | `current` is the reading the crewmate last recorded with `key_result_progress` and `at` its time; whether the target is reached is the crewmate's own word in that reading, not judged by the gateway; at most `CREWMATE_ROW_LIMIT` rows |
+| `goals_total` | integer | how many goals the record holds in all |
+| `milestones_total` | integer | how many milestones the record holds in all |
+
+#### `dashboard/waiting_changed`
+
+Kind `session`, `src` `gateway`. Written when the list
+`dashboard.member_waiting.waiting_items` reads off the thread differs from the
+last one recorded, checked after each growth of the crewmate's DM log (a reply,
+an `[OPTIONS]` chip, a card raised or pressed, a turn ending). Folded as
+`waiting`.
+
+| field | type | notes |
+| --- | --- | --- |
+| `items` | array of `{kind, text, options, options_total, asked_at}` | newest first; `kind` is `options`, `question` or `card`; at most `CREWMATE_WAITING_LIMIT`, each with at most `CREWMATE_OPTION_LIMIT` choices and `options_total` counting them all |
+| `total` | integer | how many items wait in all, including any past `items` |
 
 ## Change cards and guides
 

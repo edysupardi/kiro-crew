@@ -31,6 +31,7 @@ from meetings_routes_helpers import BASE, _start, _start_and_get_session
 from kiro_crew.apps.builtins.meetings.backend import constants as k
 from kiro_crew.apps.builtins.meetings.backend import store
 from kiro_crew.apps.builtins.meetings.backend.routes import _common
+from kiro_crew.testing.wait import await_until
 
 
 class TestMeetingLifecycleRoutes:
@@ -134,6 +135,32 @@ class TestMeetingLifecycleRoutes:
             await client.post(f"{BASE}/meetings/second/init", json={})
             resp = await client.post(f"{BASE}/meetings/second/start", json={})
             assert resp.status == 409
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "blocker_status", [k.STATUS_ACTIVE, k.STATUS_PAUSED, k.STATUS_REVIEWING]
+    )
+    async def test_start_409_names_the_blocking_meeting(self, app, fake_sessions, blocker_status):
+        """The 409 body names the blocking meeting and its status.
+
+        Before this fix the body was ``{error, code}`` only, so the UI could not
+        say which meeting held the slot or that it was a review still open.
+        """
+        async with client_for(app) as client:
+            await _start(client, "first")
+            await client.patch(f"{BASE}/meetings/first", json={"title": "Weekly sync"})
+            if blocker_status != k.STATUS_ACTIVE:
+                resp = await client.post(
+                    f"{BASE}/meetings/first/status", json={"status": blocker_status}
+                )
+                assert resp.status == 200
+            await client.post(f"{BASE}/meetings/second/init", json={})
+            resp = await client.post(f"{BASE}/meetings/second/start", json={})
+            assert resp.status == 409
+            body = await resp.json()
+            assert body["code"] == "meeting_already_active"
+            assert body["blocking_meeting_title"] == "Weekly sync"
+            assert body["blocking_meeting_status"] == blocker_status
 
     @pytest.mark.asyncio
     async def test_start_releases_an_abandoned_meeting_holding_the_latch(
@@ -422,7 +449,7 @@ class TestMeetingLifecycleRoutes:
             assert await asyncio.to_thread(init_entered.wait, 5)
 
             delete_request = asyncio.create_task(client.delete(f"{BASE}/meetings/standup"))
-            await asyncio.wait_for(observed_lock.waiter.wait(), timeout=5)
+            await await_until(observed_lock.waiter)
             release_init.set()
 
             assert (await init_request).status == 200
@@ -471,10 +498,10 @@ class TestMeetingLifecycleRoutes:
                     json={"agent_id": "sketch-artist", "enable": True},
                 )
             )
-            await asyncio.wait_for(toggle_entered.wait(), timeout=5)
+            await await_until(toggle_entered)
 
             delete_request = asyncio.create_task(client.delete(f"{BASE}/meetings/standup"))
-            await asyncio.wait_for(observed_lock.waiter.wait(), timeout=5)
+            await await_until(observed_lock.waiter)
             release_toggle.set()
 
             assert (await toggle_request).status == 200
@@ -1289,7 +1316,7 @@ class TestATeardownNeverClearsAReplacement:
         await asyncio.sleep(0)  # let it reach the flush
         active.set(replacement)  # type: ignore[arg-type]
         release.set()
-        drained = await asyncio.wait_for(teardown, timeout=5)
+        drained = await await_until(teardown)
 
         # The replacement is still installed, and the drained session is what came back.
         assert active.get("the-new-one") is replacement

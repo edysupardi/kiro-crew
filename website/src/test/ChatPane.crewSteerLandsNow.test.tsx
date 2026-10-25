@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { ReactNode } from 'react'
-import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import type { RootState } from '../store'
 import { store as appStore } from '../store'
 import { Provider } from 'react-redux'
@@ -122,7 +122,19 @@ async function settle(body: object = { ok: true }, status = 200) {
   await act(async () => { settleSend(response(body, status)) })
 }
 
-describe('crewmate responsive Send', () => {
+describe('mate composer placeholder', () => {
+  it('names the mate without the sigil hint, while a plain chat keeps it', async () => {
+    renderCrewmate({ running: false })
+    const box = await ready()
+    expect(box).toHaveAttribute('placeholder', 'Message Radar…')
+    cleanup()
+    renderCrewmate({ running: false, ordinary: true })
+    const plain = await ready()
+    expect(plain).toHaveAttribute('placeholder', expect.stringMatching(/^Message Test… \(\/command · @file · \$skill/))
+  })
+})
+
+describe('mate responsive Send', () => {
   it.each([
     { running: false, width: 320 },
     { running: true, width: 390 },
@@ -404,7 +416,7 @@ describe('responsive question and queue repairs', () => {
   })
 })
 
-describe('crewmate chat order and typing while a send waits', () => {
+describe('mate chat order and typing while a send waits', () => {
   const before = (a: HTMLElement, b: HTMLElement) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
 
   it('a queued message sits where it was sent: a later reply draws below it, and the drain keeps the order and the node', async () => {
@@ -533,5 +545,95 @@ describe('crewmate chat order and typing while a send waits', () => {
     await settle({ ok: false, error: 'request refused' }, 409)
     await screen.findByText(/request refused/)
     expect(screen.queryByTestId('crewmate-live-activity')).toBeNull()
+  })
+})
+
+describe('the composer while a send waits for the turn that answers it', () => {
+  // The last turn died on an error, so Resume is on offer before the send.
+  const interrupted: ChatMessage[] = [
+    { role: 'user', content: 'check the build', cls: 'msg msg-u', ts: '2026-10-14T06:59:00Z', meta: { mid: 'u-first' } },
+    { role: 'error', content: 'Bedrock is throttling requests.', cls: 'msg msg-err', ts: '2026-10-14T06:59:01Z' },
+  ]
+  const resumeShown = () => !!screen.queryByTestId('composer-continue') || !!screen.queryByTestId('error-card-continue')
+  // While Resume is on offer the placeholder names it instead of the crewmate.
+  async function typeAndSend(text: string) {
+    const box = await screen.findByPlaceholderText(/Message Radar|press Resume/)
+    await waitFor(() => expect(api.chatSlotDetail).toHaveBeenCalled())
+    fireEvent.change(box, { target: { value: text } })
+    fireEvent.keyDown(box, { key: 'Enter', code: 'Enter' })
+    await waitFor(() => expect(api.sendChat).toHaveBeenCalledTimes(1))
+  }
+
+  // The gateway's frames for a send to an idle DM (responsive_chat.accept): it
+  // writes the user row and starts the turn inside the POST, so the row and
+  // the `queued` receipt land before any frame says the turn is running.
+  async function sendToIdleDm(store: ReturnType<typeof renderCrewmate>['store'], text: string) {
+    await typeAndSend(text)
+    const sendId = vi.mocked(api.sendChat).mock.calls[0][4]!.sendId as string
+    act(() => {
+      store.dispatch(sseChatMessage({ slot: SLOT, role: 'user', content: text, ts: '2026-10-14T07:00:01Z', meta: { sendId, mid: 'u-sent' } }))
+    })
+    await settle({ ok: true, queued: true, queue_id: 'q-idle', responsive: 'queued' })
+  }
+
+  it('reads busy from the Send and never offers Resume before the turn is seen', async () => {
+    const { store } = renderCrewmate({ running: false, messages: interrupted })
+    await screen.findByTestId('composer-continue')
+    await sendToIdleDm(store, 'try again please')
+    expect(userRows(store).at(-1)?.meta?.optimistic).toBeUndefined()
+    expect(screen.getByTestId('stop-button-armed')).toBeInTheDocument()
+    expect(resumeShown()).toBe(false)
+    // A slots frame serialized before the turn started still says idle.
+    act(() => { store.dispatch(updateSlot({ key: SLOT, running: false })) })
+    expect(screen.getByTestId('stop-button-armed')).toBeInTheDocument()
+    expect(resumeShown()).toBe(false)
+    // The turn is live, then answers and ends.
+    act(() => {
+      store.dispatch(updateSlot({ key: SLOT, running: true }))
+      store.dispatch(sseChatMessage({ slot: SLOT, role: 'chunk', content: 'On it', seq: 1 }))
+    })
+    expect(screen.getByTestId('stop-button-armed')).toBeInTheDocument()
+    expect(resumeShown()).toBe(false)
+    act(() => {
+      store.dispatch(sseChatMessage({ slot: SLOT, role: 'assistant', content: 'On it. The build is green.', ts: '2026-10-14T07:00:05Z', meta: { mid: 'a-reply' } }))
+      store.dispatch(sseChatMessage({ slot: SLOT, role: '_done', content: '' } as Parameters<typeof sseChatMessage>[0]))
+      store.dispatch(updateSlot({ key: SLOT, running: false }))
+    })
+    await screen.findByText('On it. The build is green.')
+    expect(screen.queryByTestId('stop-button-armed')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Send', exact: true })).toBeDisabled()
+    expect(resumeShown()).toBe(false)
+  })
+
+  it.each([
+    { what: 'a turn that came and went inside one slots window', turn: 5, gen: 'gen-a' },
+    { what: 'a gateway restart', turn: 0, gen: 'gen-b' },
+  ])('gives Resume back after $what left the send unanswered', async ({ turn, gen }) => {
+    const { store } = renderCrewmate({ running: false, messages: interrupted })
+    await screen.findByTestId('composer-continue')
+    act(() => { store.dispatch(updateSlot({ key: SLOT, turn: 4, turn_gen: 'gen-a' })) })
+    await sendToIdleDm(store, 'try again please')
+    expect(resumeShown()).toBe(false)
+    act(() => { store.dispatch(updateSlot({ key: SLOT, running: false, turn, turn_gen: gen })) })
+    expect(await screen.findByTestId('composer-continue')).toBeInTheDocument()
+    expect(screen.getByTestId('error-card-continue')).toBeInTheDocument()
+    expect(screen.queryByTestId('stop-button-armed')).toBeNull()
+    expect(screen.queryByTestId('crewmate-live-activity')).toBeNull()
+  })
+
+  it('keeps waiting while the send is still queued behind the turn that just ended', async () => {
+    const { appendQueuedMessage } = await import('../store/chatSlice')
+    const { store } = renderCrewmate({ running: true, messages: interrupted })
+    act(() => { store.dispatch(updateSlot({ key: SLOT, turn: 4, turn_gen: 'gen-a' })) })
+    await typeAndSend('after this one')
+    const sendId = vi.mocked(api.sendChat).mock.calls[0][4]!.sendId as string
+    act(() => {
+      store.dispatch(appendQueuedMessage({ slot: SLOT, content: 'after this one', ts: '2026-10-14T07:00:02Z', queue_id: 'q-wait', meta: { sendId } }))
+    })
+    await settle({ ok: true, queued: true, queue_id: 'q-wait' })
+    act(() => { store.dispatch(updateSlot({ key: SLOT, running: false, turn: 5, turn_gen: 'gen-a' })) })
+    expect(screen.getByTestId('crewmate-live-activity')).toBeInTheDocument()
+    expect(screen.getByTestId('stop-button-armed')).toBeInTheDocument()
+    expect(resumeShown()).toBe(false)
   })
 })

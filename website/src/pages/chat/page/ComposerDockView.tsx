@@ -1,6 +1,6 @@
 import type { NavigateFunction } from 'react-router-dom'
 import type { RefObject, Dispatch, SetStateAction, MutableRefObject } from 'react'
-import { createPortal } from 'react-dom'
+import { OverlayPortal } from '../../../components/overlayRoot'
 import { Undo2 } from 'lucide-react'
 import { Composer, type ComposerHandle, type ComposerVoiceOptions } from '../../../chat-core/composer/Composer'
 import type { ComposerPasteSlice } from '../../../chat-core/composer/composerPastes'
@@ -21,6 +21,8 @@ import type { SlotApprovalMode } from '../../../utils/slotApprovalMode'
 import { SETTINGS_DEFAULT_MODEL_ID } from '../../../hooks/useSettingHighlight'
 import { settingsPath } from '../../../components/settingsPath'
 import { agentOrDefaultLabel } from '../../../utils/agentLabel'
+import { isUntitledSession, sessionDisplayTitle } from '../../../utils/sessionDisplayTitle'
+import { sessionMemoryTag } from '../../../lib/agentMemorySource'
 import { dismissFollowupItem, type FollowupItem } from '../../../store/chatSlice'
 import { Input } from '../../../components/ui'
 import { KnowledgeBubbleChip } from '../ChatPageMessageContent'
@@ -32,7 +34,7 @@ import type { useModelPickerModels } from './sessionPicks'
 import { REFUSED_PRESS_TITLE_KEYS, type useRefusedPress } from './turnActions'
 import type { useComposerSend } from './composerSend'
 import type { useSessionControlChips } from './sessionControls'
-import type { useComposerChips } from './composerChips'
+import { enclosingRepoRootOf, type useComposerChips } from './composerChips'
 import type { useSessionAutomation } from './sessionAutomation'
 import { SELECTION_INERT_ATTR } from '../useSelectionInertOverlays'
 import { legacyCodexEffort } from '../../../hooks/useInteractiveModels'
@@ -167,7 +169,7 @@ interface ComposerDockViewProps {
   composerRootChange: (v: string) => void
   composerUserEdit: (v: string) => void
   followUpMulti: boolean
-  followUpOptions: string[]
+  followUpOptions: readonly string[]
   followUpPicked: Set<string>
   followUpPickedRef: MutableRefObject<Set<string>>
   followUpSourceKey: string | null
@@ -195,6 +197,7 @@ interface ComposerDockViewProps {
   handleAddToContext: (absPath: string, kind: 'file' | 'dir', dropAt?: number | null) => void
   mentionKeyEdit: ReturnType<typeof useFileMentionActions>['mentionKeyEdit']
   optimizerMentionGuard: (draft: string) => (rewrite: string) => boolean
+  mentionEditRange: ReturnType<typeof useFileMentionActions>['mentionEditRange']
   removeDirChip: (rel: string) => void
   removeFileChip: (p: string) => void
   selectPickedFile: ReturnType<typeof useFileMentionActions>['selectPickedFile']
@@ -265,7 +268,7 @@ export default function ComposerDockView({
   handleFileOpen, handleOptimizeResult, search, tabsCtl, uploadCount, sendHeld, composerBandRef, scrollBottom, handleResumeSession, composerRootChange, composerUserEdit, followUpMulti,
   followUpOptions, followUpPicked, followUpPickedRef, followUpSourceKey, toggleFollowUpOption, dashCfg, jevAutoConsented, refusedPress, setRefusedPress, send, pickModel, setProject, switchAgent,
   currentSlot, activeFolderName, anchorSessionControl, openSessionControl, refreshSessionControlStatuses, sessionControlKey, sessionControlRect, sessionControls, setOpenSessionControl,
-  activeAgentName, attachmentAnnouncement, clampOutOfTokens, handleAddToContext, mentionKeyEdit, optimizerMentionGuard, removeDirChip, removeFileChip, selectPickedFile, followupAddToSession,
+  activeAgentName, attachmentAnnouncement, clampOutOfTokens, handleAddToContext, mentionKeyEdit, optimizerMentionGuard, mentionEditRange, removeDirChip, removeFileChip, selectPickedFile, followupAddToSession,
   followupStartInNewChat, followupStartInWorktree, displayMode, _modelPinActive, _modelPinAgent, _modelPinPinned, _pinShownModel, _slotProject, defaultEffort, effectiveEffort, effortLevelsOverride,
   effortSupported, modelMarker, pinModelToAgentMut, projectBranch, projectGit, projectGitError, shownModel, cardOwnsRecovery, continuable, continuing, handleContinue, interrupted, dockGutter, dockRef,
   endQuoteFlight, flyingQuote, inputAreaRef, isAtBottom, answerQuestionCard, handleCancelQueued, handleEditQueued, handleInterruptQueued, handleReorderQueued, keepQuestionAnswer, queuedMessages,
@@ -291,7 +294,7 @@ export default function ComposerDockView({
                 width either side of the column lets wheel and touch reach the
                 transcript underneath, as the strip beside an iOS toolbar does.
                 `right: dockGutter` keeps the scrollbar column clear (above). */}
-            <div ref={dockRef} className="absolute left-0 bottom-0 pointer-events-none" style={{ right: dockGutter }} data-testid="composer-dock-root" {...{ [SELECTION_INERT_ATTR]: '' }}>
+            <div ref={dockRef} className="absolute left-0 bottom-0 pointer-events-none" style={{ right: dockGutter }} data-testid="composer-dock-root" {...{ [SELECTION_INERT_ATTR]: '' }} data-scroll-peek-stop="">
               <JumpToBottomButton visible={!isAtBottom && messages.length > 0} onClick={() => scrollBottom(true)} />
               {/* Status chrome never claims more than half the pane. The dock
                   is anchored to the pane's bottom edge and grows upward, so an
@@ -386,8 +389,15 @@ export default function ComposerDockView({
                         onKeyDown={(e) => { if (e.key === 'Enter') handleResumeSession(s.key, s.title || s.key) }}
                       >
                         <div className="flex-1 min-w-0">
-                          <div className="font-mono text-[13px] text-text truncate">{s.title || s.key}</div>
-                          {s.created && <div className="text-[11px] text-muted font-mono mt-0.5">{fmtDateFields(s.created, { year: 'numeric', month: 'short', day: 'numeric' })}</div>}
+                          <div className="font-mono text-[13px] text-text truncate">{sessionDisplayTitle(s)}</div>
+                          {/* An untitled row's name does not say which session it is, so its
+                              key leads the second line: two untitled rows stay distinct, and a
+                              query typed as part of a key shows why the row matched. */}
+                          {(isUntitledSession(s) || s.created) && (
+                            <div className="text-[11px] text-muted font-mono mt-0.5 truncate">
+                              {[isUntitledSession(s) ? s.key : '', s.created ? fmtDateFields(s.created, { year: 'numeric', month: 'short', day: 'numeric' }) : ''].filter(Boolean).join(' · ')}
+                            </div>
+                          )}
                         </div>
                         <Undo2 size={14} className="text-accent shrink-0" />
                       </div>
@@ -426,6 +436,7 @@ export default function ComposerDockView({
                     items={pendingFollowup.items}
                     projectDir={currentSlot?.project || undefined}
                     projectIsRepo={projectGitError ? undefined : projectGit?.repo}
+                    enclosingRepoRoot={enclosingRepoRootOf(projectGit, projectGitError)}
                     onAddToSession={followupAddToSession}
                     onStartInWorktree={followupStartInWorktree}
                     onStartInNewChat={followupStartInNewChat}
@@ -506,6 +517,7 @@ export default function ComposerDockView({
               clampDropOffset={clampOutOfTokens}
               onMentionKey={mentionKeyEdit}
               optimizerMentionGuard={optimizerMentionGuard}
+              mentionEditRange={mentionEditRange}
               project={currentSlot?.project || ''}
               projectBranch={projectBranch}
               projectDetached={!projectGitError && !!projectGit?.detached}
@@ -519,8 +531,11 @@ export default function ComposerDockView({
               // Uses the SLOT's stored agent (not `activeAgentName`, which has
               // already collapsed empty->default) so an agent-less slot reads
               // `<default> · default` and a pinned one reads the bare alias (#8770).
-              agentLabel={agentOrDefaultLabel(currentSlot?.agent, defaultAgent)}
+              agentLabel={agentOrDefaultLabel(currentSlot?.agent, defaultAgent, currentSlot?.agent_kind)}
               agentIsInheritedDefault={!currentSlot?.agent && !!defaultAgent}
+              // Read from the same rows the picker lists, so the chip marks a
+              // session exactly when the picker shows a same-name pair.
+              agentMemory={sessionMemoryTag(currentSlot?.agent, currentSlot?.agent_kind, defaultAgent, effectiveAgents)}
               agentSource={effectiveAgents.find(a => a.name === activeAgentName)?.source}
               modelName={shownModel}
               modelIsInheritedDefault={modelMarker === 'default'}
@@ -642,7 +657,7 @@ export default function ComposerDockView({
               </Composer>
             </div>
             {/* Agent dropdown portal — triggered from input bar */}
-            {agentDropdown && agentBtnRect && createPortal(
+            {agentDropdown && agentBtnRect && <OverlayPortal>{
               // The keydown handler routes arrow/Enter navigation to the inner
               // role="listbox"; the dialog is a focus container (tabIndex={-1}),
               // not an interactive widget itself, so this delegation is intentional.
@@ -659,13 +674,12 @@ export default function ComposerDockView({
                     failed-write alert — offering the write without its error path would make
                     a rejected request indistinguishable from a successful one. */}
                 {/* The default for new sessions is a template; a crewmate's chat offers no such write. */}
-                {!embedded && !isCrewmateChat(currentSlot?.agent_kind, activeAgentName, installedAgents) && <DefaultAgentRow agentName={activeAgentName} isDefault={activeAgentName === defaultAgent} onSetDefault={() => toggleDefaultAgent(activeAgentName, defaultWriteKind(currentSlot?.agent_kind))} />}
+                {!embedded && !isCrewmateChat(currentSlot?.agent_kind, activeAgentName, installedAgents) && <DefaultAgentRow agentName={activeAgentName} isDefault={activeAgentName === defaultAgent} memoryTag={sessionMemoryTag(currentSlot?.agent, currentSlot?.agent_kind, defaultAgent, effectiveAgents)} onSetDefault={() => toggleDefaultAgent(activeAgentName, defaultWriteKind(currentSlot?.agent_kind))} />}
                 {!embedded && <ManageAgentsFooter error={defaultAgentFailed} onManage={() => { setAgentDropdown(false); navigate('/capabilities?tab=crews') }} />}
-              </div>,
-              document.body
-            )}
+              </div>
+            }</OverlayPortal>}
             {/* Model dropdown portal — triggered from input bar */}
-            {modelDropdown && modelBtnRect && createPortal(
+            {modelDropdown && modelBtnRect && <OverlayPortal>
               <ModelEffortDropdown
                 anchorRect={modelBtnRect}
                 dropdownRef={modelDropdownRef}
@@ -710,9 +724,8 @@ export default function ComposerDockView({
                     model: _modelPinActive === 'auto' ? '' : _modelPinActive,
                   })
                 }}
-              />,
-              document.body
-            )}
+              />
+            </OverlayPortal>}
             {/* Project picker — triggered from input bar */}
             <ProjectPicker
               open={projectPickerOpen}

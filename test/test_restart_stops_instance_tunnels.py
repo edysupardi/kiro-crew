@@ -14,6 +14,7 @@ paths call it after the sessions close and before the exec, that the instances
 startup hook registers the manager's teardown and its cleanup hook drops it,
 that the sleep inhibitor registers its release the same way (the stop cancels
 the poll and releases the block, and a restart reaches the exec released),
+that the skill-usage ledger's debounced hits reach disk before either exec,
 that a real child is reaped through the seam on each path and left running when
 the path skips it, that an SSM forwarder's tree kill never blocks the loop, and
 that a fresh manager over the same registry (the new image) reconnects on the
@@ -314,6 +315,81 @@ class TestTheUpdateRestart:
         assert seen == ["close_all", "broker", "exec"]
 
 
+# ── the skill-usage ledger flushes before the exec ───────────────────────
+
+
+class TestTheSkillUsageLedgerJoinsTheSeam:
+    """``os.execv`` kills the ledger's daemon flush thread, like ``os._exit``.
+
+    A hit ``record()`` accepted inside the 60 s debounce window must be on disk
+    before either in-place restart replaces the process image.
+    """
+
+    @staticmethod
+    def _debounced_ledger(monkeypatch, tmp_path):
+        import weakref
+
+        from kiro_crew import skill_usage
+
+        monkeypatch.setattr(skill_usage, "_live_ledgers", weakref.WeakSet())
+        path = tmp_path / "skill-usage.json"
+        ledger = skill_usage.SkillUsageLedger(path)
+        ledger._last_flush = time.time() + 3600  # inside the window: no write yet
+        ledger.record("alpha")
+        assert not path.exists(), "precondition: the hit is only in memory"
+        register_pre_exec_stop("Skill-usage ledger", skill_usage.flush_all_before_exec)
+        return skill_usage, path, ledger  # held, as the loader holds it
+
+    @pytest.mark.asyncio
+    async def test_the_dashboard_restart_persists_the_window(self, monkeypatch, tmp_path):
+        seen: list[str] = []
+        _dashboard_exec_seams(monkeypatch, seen)
+        skill_usage, path, ledger = self._debounced_ledger(monkeypatch, tmp_path)
+
+        restarted = await updates._restart_gateway(
+            _dashboard_state(seen), resolver=lambda: _executable(tmp_path)
+        )
+
+        assert restarted is True
+        assert seen[-1] == "exec"
+        assert skill_usage.SkillUsageLedger(path).score("alpha")[0] == 1.0
+        assert not ledger.dirty
+
+    @pytest.mark.asyncio
+    async def test_the_update_restart_persists_the_window(self, monkeypatch, tmp_path):
+        seen: list[str] = []
+        _update_exec_seams(monkeypatch, seen)
+        skill_usage, path, ledger = self._debounced_ledger(monkeypatch, tmp_path)
+
+        await GatewayOrchestrator._restart_after_update(
+            _orchestrator(seen), lambda: _executable(tmp_path)
+        )
+
+        assert seen[-1] == "exec"
+        assert skill_usage.SkillUsageLedger(path).score("alpha")[0] == 1.0
+        assert not ledger.dirty
+
+    @pytest.mark.asyncio
+    async def test_a_failed_flush_is_logged_and_the_exec_still_runs(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        from kiro_crew import skill_usage
+
+        seen: list[str] = []
+        _dashboard_exec_seams(monkeypatch, seen)
+        monkeypatch.setattr(skill_usage, "flush_all_for_shutdown", lambda: False)
+        register_pre_exec_stop("Skill-usage ledger", skill_usage.flush_all_before_exec)
+
+        with caplog.at_level(logging.WARNING, logger="kiro_crew.skill_usage"):
+            restarted = await updates._restart_gateway(
+                _dashboard_state(seen), resolver=lambda: _executable(tmp_path)
+            )
+
+        assert restarted is True
+        assert seen[-1] == "exec"
+        assert "did not fully flush before restart" in caplog.text
+
+
 # ── the restart claim covers every moment a connect could slip in ────────
 
 
@@ -488,6 +564,88 @@ class TestTheSleepInhibitorJoinsTheSeam:
             )
 
         assert seen[-1] == "exec:False", "the block was held, or engaged again, at the exec"
+
+
+# ── the browser view is the seam's third owner ────────────────────────────
+
+
+class TestTheBrowserViewJoinsTheSeam:
+    """`playwright-cli show` is spawned detached (``start_new_session``), so an
+    in-place restart's exec would leave it running parented to the new image,
+    which then starts a second tree on the next view request. The on_cleanup
+    hook that reaps it is skipped by the exec, so the startup hook registers the
+    same reap with the seam and the cleanup hook drops it."""
+
+    @pytest.mark.asyncio
+    async def test_startup_registers_the_view_stop_and_cleanup_drops_it(self, monkeypatch):
+        from aiohttp import web
+
+        from kiro_crew.dashboard import server
+
+        monkeypatch.setattr(server.browser_cli_view, "stop", Mock())
+        monkeypatch.setattr(server.browser_cli_launcher, "reclaim_stranded", Mock())
+        monkeypatch.setattr(server.browser_cli_launcher, "close_all", Mock())
+        monkeypatch.setattr(server.handlers, "close_relay_client", AsyncMock())
+        state = SimpleNamespace(_background_tasks=set())
+        app = web.Application()
+        server._register_browser_view_cleanup(app, state)
+        app.freeze()
+
+        await app.on_startup.send(app)
+        for task in list(state._background_tasks):
+            await task
+        assert list(pre_exec_stops._stops) == ["Browser view"]
+
+        await app.on_cleanup.send(app)
+        assert pre_exec_stops._stops == {}
+
+    @pytest.mark.asyncio
+    async def test_the_seam_reaps_the_view_child(self, monkeypatch):
+        """The registered stop calls view.stop(), the only reaper of the child."""
+        from aiohttp import web
+
+        from kiro_crew.dashboard import server
+
+        view_stop = Mock()
+        monkeypatch.setattr(server.browser_cli_view, "stop", view_stop)
+        monkeypatch.setattr(server.browser_cli_launcher, "reclaim_stranded", Mock())
+        state = SimpleNamespace(_background_tasks=set())
+        app = web.Application()
+        server._register_browser_view_cleanup(app, state)
+        app.freeze()
+        await app.on_startup.send(app)
+        for task in list(state._background_tasks):
+            await task
+
+        await run_pre_exec_stops()
+
+        view_stop.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_a_restart_reaps_the_view_before_the_exec(self, monkeypatch, tmp_path):
+        from aiohttp import web
+
+        from kiro_crew.dashboard import server
+
+        order: list[str] = []
+        monkeypatch.setattr(server.browser_cli_view, "stop", lambda: order.append("view"))
+        monkeypatch.setattr(server.browser_cli_launcher, "reclaim_stranded", Mock())
+        state = SimpleNamespace(_background_tasks=set())
+        app = web.Application()
+        server._register_browser_view_cleanup(app, state)
+        app.freeze()
+        await app.on_startup.send(app)
+        for task in list(state._background_tasks):
+            await task
+
+        _dashboard_exec_seams(monkeypatch, order)
+        monkeypatch.setattr(updates, "reexec_python_module", lambda *_a, **_k: order.append("exec"))
+
+        await updates._restart_gateway(
+            _dashboard_state(order), resolver=lambda: _executable(tmp_path)
+        )
+
+        assert order == ["close_all", "broker", "view", "exec"]
 
 
 # ── the instances hooks register and drop the manager's teardown ──────────

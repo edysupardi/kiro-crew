@@ -2,7 +2,7 @@
 
 Each method an owner holds is a function taking ``self`` that the class body binds
 under its own name, so the class object every caller, ``patch.object`` and
-``__new__`` fixture holds is the one-module class; ``gateway_runtime.compose`` runs
+``__new__`` fixture holds is the one-module class; ``_facade_compose.compose`` runs
 those functions on the facade's globals. These tests pin what makes that safe:
 
 * a bound function needs nothing only a class body provides (zero-argument
@@ -48,6 +48,7 @@ _BOUND_CLASS_CONSTANTS = {
     "_DEP_INSTALL_TIMEOUT_SECS": "install_repair",
     "_KIRO_CLI_VERSION_TIMEOUT_SECS": "install_repair",
     "_MANDATORY_UPDATE_MAX_DEFER_SECS": "update_schedule",
+    "_SLACK_APPLIER_PREFIXES": "channel_boot",
     "_STARTUP_CHILD_REAP_SECS": "install_repair",
     "_UPDATE_BUSY_RETRY_SECS": "update_schedule",
     "_UPDATE_DRAIN_TIMEOUT_SECS": "update_schedule",

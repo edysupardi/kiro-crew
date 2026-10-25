@@ -166,7 +166,13 @@ class TestRegistrationIsNotRouteDependent:
 
         import kiro_crew.dashboard.server as mod
 
-        src = Path(mod.__file__).read_text(encoding="utf-8")
+        src = "".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                Path(mod.__file__),
+                Path(mod.__file__).parent / "server_runtime" / "api_entrypoint.py",
+            )
+        )
         for entry in ("async def start_dashboard(", "async def start_api_server("):
             assert entry in src
         assert src.count("register_skill_read_observer(") == 2
@@ -176,15 +182,21 @@ class TestRegistrationIsNotRouteDependent:
 
         import kiro_crew.dashboard.server as mod
 
-        src = Path(mod.__file__).read_text(encoding="utf-8")
+        src = (Path(mod.__file__).parent / "server_runtime" / "api_entrypoint.py").read_text(
+            encoding="utf-8"
+        )
         assert 'getattr(task_runner, "_ctx", None)' in src
 
     def test_the_cli_entry_point_registers_without_importing_the_dashboard(self):
+        import sys
         from pathlib import Path
 
         import kiro_crew.cli_server as mod
 
-        src = Path(mod.__file__).read_text(encoding="utf-8")
+        src = "".join(
+            Path(sys.modules[m].__file__).read_text(encoding="utf-8")
+            for m in (mod.__name__, *mod._OWNERS)
+        )
         assert "register_skill_read_observer(ctx)" in src
         # The helper is homed in a leaf module, so no runtime needs to import
         # another surface just to register.

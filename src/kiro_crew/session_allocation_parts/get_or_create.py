@@ -34,6 +34,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from kiro_crew.agent_sdk.kas_floor_wait import await_kas_floor_verdict
 from kiro_crew.aws_project_profiles import (
     AWS_PROFILE_ENV,
     bound_profile_env,
@@ -67,6 +68,18 @@ from kiro_crew.start_priority import (
 
 if TYPE_CHECKING:
     from kiro_crew.session_allocation import LLMProvider, ProviderFactory, SessionAllocationService
+
+
+async def _session_runs_remotely(session_key: str) -> bool:
+    """Whether this session is bound to a remote session environment.
+
+    Fails closed: an unreadable choice record answers True, so the session
+    cold-starts and the runtime seam reports the error instead of a warm local
+    engine quietly serving it.
+    """
+    from kiro_crew.session_environment import session_runs_remotely
+
+    return await asyncio.to_thread(session_runs_remotely, session_key)
 
 
 async def _reacquire_and_validate(
@@ -420,6 +433,15 @@ async def _get_or_create_impl(
     owner = self._owner
     constants = self._deps.constants
     key = owner._fold_key(key)
+    # The app that owns this session (a dashboard app slot), an input to the
+    # session's own model resolution only. Taken out of the factory kwargs so
+    # no provider factory is handed a key it does not know; each retry below
+    # hands it back.
+    app_name = str(extra_factory_kwargs.pop("app_name", "") or "")
+    # The app launch copy kiro-cli is asked for in place of ``agent``
+    # (``apps.agent_launch``); ``agent`` stays the session's identity. Stamped
+    # on the cold-started provider below, never handed to a factory.
+    app_launch_agent = str(extra_factory_kwargs.pop("app_launch_agent", "") or "")
     from kiro_crew.execution_context import read_session_execution
 
     execution = await asyncio.to_thread(read_session_execution, key)
@@ -549,6 +571,8 @@ async def _get_or_create_impl(
             wait_if_busy=wait_if_busy,
             _won_race_retries=_won_race_retries + 1,
             start_priority=start_priority,
+            app_name=app_name,
+            app_launch_agent=app_launch_agent,
             **extra_factory_kwargs,
         )
 
@@ -634,7 +658,15 @@ async def _get_or_create_impl(
         def resolve_model() -> str | None:
             cfg = self._deps.load_config() if preparation.revision else owner._cfg
             selected = preparation.member or agent
-            return self._deps.session_model(cfg, selected, claim_crew)
+            return self._deps.session_model(
+                cfg,
+                selected,
+                claim_crew,
+                app_name=app_name,
+                session_key=key,
+                project_dir=effective_cwd or "",
+                backend_override=extra_factory_kwargs.get("backend_override"),
+            )
 
         model = await asyncio.to_thread(resolve_model)
 
@@ -660,14 +692,19 @@ async def _get_or_create_impl(
         pool_decision = "bypass_resume"
     elif is_stateless:
         pool_decision = "bypass_stateless"
-    elif self._is_member_key(key):
+    elif self._is_member_key(key) or _is_crewmate_worker_key(key):
         # A pooled child was spawned with no session key, so it runs the
         # factory's DEFAULT backend and none of the member construction
         # route (per-session dispatch-tool mount, member backend). A warm
         # hit would silently hand a member DM a session that cannot mount
         # its tools; cold-starting through the factory is what makes the
-        # member route real. String check — as cheap as the arms above.
+        # member route real. String check — as cheap as the arms above. A
+        # crewmate's own worker takes the member backend too, so it bypasses
+        # for the same reason (an in-memory set lookup).
         pool_decision = "bypass_member"
+    elif app_launch_agent:
+        # A pooled child was spawned as the pool's agent, never as this copy.
+        pool_decision = "bypass_app_launch"
     elif memory_mode != "persistent":
         pool_decision = "bypass_restricted_context"
     elif member_context:
@@ -692,6 +729,9 @@ async def _get_or_create_impl(
         # ``""`` is a Kiro request, and under a non-Kiro default the pooled
         # child is on the wrong backend for it too.
         pool_decision = "bypass_backend_override"
+    elif await _session_runs_remotely(key):
+        # A pooled child is a LOCAL engine: claiming it would run a remote session here.
+        pool_decision = "bypass_remote_environment"
     elif await self._crew_pins_effort(agent, extra_factory_kwargs.get("crew_agent")):
         # A CREW's pinned effort is fixed at spawn time and the warm-pool
         # claim path never re-pushes it, so a warm hit would silently run
@@ -859,6 +899,9 @@ async def _get_or_create_impl(
             owner._dispatch_hard_kill(provider)
             raise
     else:
+        # A defaulted KAS waits (bounded) for the kiro-cli floor's verdict, so
+        # the factory below picks the backend the verdict decided.
+        await await_kas_floor_verdict(member=_is_member_key(key))
         provider = factory(
             key,
             agent=agent,
@@ -871,6 +914,7 @@ async def _get_or_create_impl(
         cast(Any, provider).memory_mode = memory_mode
         if self._deps.is_acp_provider(provider):
             cast(Any, provider).member_context = member_context
+            cast(Any, provider).app_launch_agent = app_launch_agent
         if memory_mode != "persistent":
             resume_sid = None
         provider_switched = False
@@ -930,6 +974,18 @@ async def _get_or_create_impl(
                     if provider.process_instance:
                         raise CapabilityStartupError("capability_runtime_not_fresh")
                     await asyncio.to_thread(verify_saved, preparation, provider.cwd)
+                # A crewmate's worker runs with its kit, or not at all: a backend
+                # that cannot carry the per-session spec would run the bare on-disk
+                # base with the crewmate's switched-off tools back (H6 opt-in).
+                from kiro_crew.members import is_crewmate_worker_session
+
+                if (
+                    is_crewmate_worker_session(key)
+                    and provider.mate_worker_kit_supported is not True
+                ):
+                    from kiro_crew.session_capabilities import CapabilityStartupError
+
+                    raise CapabilityStartupError("worker_kit_harness_unsupported")
                 # The key may have been fenced while this call waited for the
                 # semaphore or the reads above: refuse before a process is
                 # spawned that the registration door would only refuse later.
@@ -1073,6 +1129,7 @@ async def _get_or_create_impl(
                 # what keeps the id sent and the id read identical.
                 session.requested_model = model or ""
                 session.backend_override = extra_factory_kwargs.get("backend_override")
+                session.app_launch_agent = app_launch_agent
                 session.extra_env = dict(caller_env) if caller_env else None
                 session.reasoning_effort_override = extra_factory_kwargs.get(
                     "reasoning_effort_override"
@@ -1233,7 +1290,16 @@ async def _get_or_create_impl(
             wait_if_busy=wait_if_busy,
             _won_race_retries=_won_race_retries + 1,
             start_priority=start_priority,
+            app_name=app_name,
+            app_launch_agent=app_launch_agent,
             **extra_factory_kwargs,
         )
 
     return result
+
+
+def _is_crewmate_worker_key(key: str) -> bool:
+    """Whether *key* is a crewmate's own worker session (``members.is_crewmate_worker_session``)."""
+    from kiro_crew.members import is_crewmate_worker_session
+
+    return is_crewmate_worker_session(key)

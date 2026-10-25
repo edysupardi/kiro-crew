@@ -15,7 +15,7 @@ superseded-by: []
 # RFC: Arrival provenance filing — file every arriving session under Imported / from &lt;sender&gt;
 
 - Status: implemented in `src/kiro_crew/dashboard/arrival_folders.py` and
-  `src/kiro_crew/dashboard/session_transfer.py`. This remains the decision
+  `src/kiro_crew/dashboard/session_transfer_install.py`. This remains the decision
   record for the **changed default** on an existing route; every historical
   "exists today" claim below was checked at `f31f25a8a2` (main, 2026-09-19),
   and citations name symbols rather than line numbers.
@@ -127,7 +127,7 @@ them.
    therefore lands unfiled and touches the folder store not at all — it does not
    create, and it does not adopt a folder the person owns. Identity comes from
    the shared `effective_request_app` rule in
-   `src/kiro_crew/dashboard/token_auth.py`, never from the request body.
+   `src/kiro_crew/dashboard/token_auth_callers.py`, never from the request body.
 
 2. **Placement is resolved only after the slot exists.** The import handler
    re-checks the live-slot cap after its last `await` and can answer `429` there.

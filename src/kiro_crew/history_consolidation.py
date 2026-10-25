@@ -94,6 +94,7 @@ from kiro_crew.vector_memory_constants import (
     _MAX_SEMANTIC_PER_CONSOLIDATION,
     _SEMANTIC_PROMPT_CAP_PER_CONSOLIDATION,
 )
+from kiro_crew.warm_task_brief_contract import is_warm_task_brief_message
 
 if TYPE_CHECKING:
     from kiro_crew.history import CacheIdentity, ConversationLog
@@ -1151,6 +1152,7 @@ _BOUND_FOR_IMPORTERS = (
     extracted_lesson_applies,
     frontmatter_value,
     hashlib,
+    is_warm_task_brief_message,
     json,
     math,
     os,
@@ -1204,6 +1206,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
     from kiro_crew.history_consolidation_memory import (  # noqa: F401
         _EMBED_BUDGET_SECS_PER_PASS,
         _INHERIT_GLOBAL,
+        _LESSON_PASSTHROUGH_FIELDS,
         _PLACEHOLDER_BODIES,
         _SEMANTIC_OMISSION_NOTICE,
         _bounded_semantic_table,
@@ -1213,6 +1216,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _is_plausible_memory_file,
         _LessonDeleteDecision,
         _recency,
+        _reroute_lesson_semantic_keys,
         _session_facets,
         _withhold_unseen_deletes,
     )

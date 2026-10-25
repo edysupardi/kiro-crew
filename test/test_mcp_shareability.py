@@ -1237,11 +1237,18 @@ class TestNoBlockingRecordIoOnTheLoop:
         test states the rule instead of re-measuring a machine-dependent number.
         """
         import ast
+        import importlib
         import inspect
 
         from kiro_crew.dashboard.handlers import mcp as handler
 
-        tree = ast.parse(inspect.getsource(handler))
+        # The handler facade and its owners: the boot path imports every one of them.
+        tree = ast.parse(
+            "\n".join(
+                inspect.getsource(m)
+                for m in (handler, *map(importlib.import_module, handler._OWNERS))
+            )
+        )
         banned = {
             "kiro_crew.mcp_gateway.evaluate",
             "kiro_crew.mcp_gateway.preflight",
@@ -1576,8 +1583,9 @@ class TestRecordsDirIsNotGatedOnABroker:
     ],
 )
 def test_to_dict_is_json_serialisable(evidence: ShareEvidence) -> None:
-    """The verdict crosses an HTTP boundary; it must survive json.dumps."""
-    json.dumps(assess(evidence).to_dict())
+    """The verdict crosses an HTTP boundary; it must survive a JSON round trip."""
+    payload = assess(evidence).to_dict()
+    assert json.loads(json.dumps(payload)) == payload
 
 
 class TestBackendRecordsHazards:

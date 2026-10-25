@@ -440,16 +440,25 @@ def test_every_binder_declares_whether_it_vouches():
     #
     # `rebind_cron_session_template` rebinds a `cron:` key, which is never the
     # caller slot of an own-store admission, so it publishes with `vouch=False`.
+    #
+    # `_repoint_member_threads` (the startup crewmate migration) rewrites only the
+    # `template_id` of a member DM thread's record. Its store comes from that same
+    # record, which the session can write, so it must not vouch: the thread's next
+    # gate-verified admission re-vouches from its DM key and config instead.
     expected = {
         ("cron_service/identity.py", "rebind_cron_session_template"): "False",
+        ("mate_config_migration.py", "_repoint_member_threads"): "False",
         ("dashboard/chat_fork.py", "_bind_fork_execution"): "ABSENT",
-        ("dashboard/chat_persistence.py", "_pin_private_agent_assignment"): "True",
+        (
+            "dashboard/chat_persistence_parts/member_store.py",
+            "_pin_private_agent_assignment",
+        ): "True",
         ("dashboard/handlers/hooks.py", "bind_captured"): "False",
         ("dashboard/session_control_parts/session_create.py", "_persist_birth"): "True",
         ("member_memory_auth.py", "bind_private_session_store"): "True",
         ("session_agent_selection.py", "record_agent_selection"): "vouch",
-        ("subagent_manager/run.py", "publish_execution"): "ABSENT",
-        ("subagent_persistence.py", "bind_session_memory_mode"): "ABSENT",
+        ("subagent_manager/run_turn.py", "publish_execution"): "ABSENT",
+        ("subagent_persistence_state.py", "bind_session_memory_mode"): "ABSENT",
     }
     assert actual == expected
 

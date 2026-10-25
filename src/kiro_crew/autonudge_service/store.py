@@ -11,9 +11,9 @@ held or unparsed row.
 
 :class:`~kiro_crew.autonudge.AutoNudgeService` composes one ``LoopStore`` and keeps the
 entry points callers and tests patch (``_write_state``, ``_save``, ``_serialize_state``,
-``_serialized_loops``). The loader that decides what each stored row MEANS stays on the
-service in :mod:`kiro_crew.autonudge`, because it vets and scrubs every row at the trust
-boundary; it reads and records through this store.
+``_serialized_loops``). The loader that decides what each stored row MEANS is bound on the
+service from :mod:`kiro_crew.autonudge_service.store_loader`, which vets and scrubs every row
+at the trust boundary; it reads and records through this store.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from typing import Any, Callable, Iterator, Mapping
 
 from kiro_crew import autonudge_stop_log, platform_compat
 from kiro_crew.autonudge_service.model import AutoNudgeStoreUnvetted, NudgeLoop
+from kiro_crew.metrics import monitor_loops as monitor_loop_metrics
 from kiro_crew.monitoring.models import monitor_state_to_dict
 from kiro_crew.owner_only_files import (
     ensure_directory,
@@ -83,7 +84,7 @@ def _locked_file(path: Path, mode: str) -> Iterator[Any]:
     # read-only handle fails with EACCES, which platform_compat.file_lock
     # swallows (best-effort), silently degrading the reader's lock to a no-op
     # and letting a concurrent _save race the read (same fix as
-    # apps/bridges.py:_mcp_lock). The shared/exclusive decision keys off the
+    # apps/bridges_mcp_config.py:_mcp_lock). The shared/exclusive decision keys off the
     # ORIGINAL mode so a reader still requests a shared lock.
     exclusive = "w" in mode or "+" in mode
     if mode == "r":
@@ -256,27 +257,76 @@ class LoopStore:
             )
 
     def _record_stops_committed(self, payload: dict) -> None:
-        """Log and record every loop this just-committed store stopped.
+        """Log and record every loop this just-committed store stopped or started.
 
         Runs under ``commit_lock`` right after the rename. The commit already
         stands, so nothing here may raise: a failed record costs the record, never
-        the write.
+        the write. Starts are counted here too, from the same baseline, so the two
+        counters are one diff read in two directions (see
+        :meth:`_record_starts_committed`).
         """
         rows = payload.get("loops") or []
         try:
             records = autonudge_stop_log.stop_records(self.committed_active, rows, self.stop_notes)
+            outcomes = monitor_loop_metrics.monitor_outcomes(rows) if records else {}
             for record in records:
                 autonudge_stop_log.log_record(record)
                 autonudge_stop_log.append_record(self.path.parent, record)
+                # Counted from the SAME record as the log line and the stop
+                # file, which is what makes the count exactly-once: a record
+                # exists only for a loop that was active in the last committed
+                # store and is not active now, so a second stop on an
+                # already-stopped loop produces no record here, and the dozen
+                # paths that can stop a loop cannot double-count between them.
+                # In-memory add, so it costs the commit nothing; the record's
+                # free-text reason is mapped to a closed value by the metrics
+                # module and never travels as itself. A monitor row's terminal
+                # outcome is passed alongside, for a provider reason code the
+                # closed set does not name.
+                monitor_loop_metrics.record_loop_stopped(
+                    record, outcomes.get(str(record.get("loop_id") or ""))
+                )
         except Exception:  # noqa: BLE001 - the store write already committed
             logger.warning("AutoNudge: could not record a loop stop", exc_info=True)
         finally:
             # Reseeded even when recording failed: a baseline left stale would make
             # every later commit fail the same way and report nothing again.
             try:
-                self.committed_active = autonudge_stop_log.active_summaries(rows)
+                current = autonudge_stop_log.active_summaries(rows)
             except Exception:  # noqa: BLE001 - see above
-                self.committed_active = {}
+                current = {}
+            self._record_starts_committed(current)
+            self.committed_active = current
+
+    def _record_starts_committed(self, current: Mapping[str, Mapping[str, Any]]) -> None:
+        """Count every loop this commit made active that the last one did not hold.
+
+        The mirror of the stop diff above, over the same baseline: a start is an id
+        active in *current* and absent from ``committed_active``. Taking both from one
+        diff is what keeps them paired by construction -- any mutation that activates
+        a loop reaches this point through ``write_state``, so a new activation path
+        is counted without knowing this counter exists, and a re-save of a loop that
+        was already active counts nothing.
+
+        The boot rule follows from the baseline ``_load`` seeds: rows active on disk
+        are already in it, so a restart counts no start, while a row the load resumed
+        from the torn-deactivation shape was inactive on disk and counts once, at the
+        first commit that writes it active. A row ``_load`` could not parse rides every
+        write verbatim but is not served, so it is skipped: it is outside the loaded
+        baseline, and counting it would add one start per boot that no stop can match.
+        """
+        try:
+            unparsed = {
+                str(row["id"])
+                for row in self.unparsed_rows
+                if isinstance(row, Mapping) and row.get("id")
+            }
+            for loop_id, summary in current.items():
+                if loop_id in self.committed_active or loop_id in unparsed:
+                    continue
+                monitor_loop_metrics.record_loop_started(summary)
+        except Exception:  # noqa: BLE001 - the store write already committed
+            logger.warning("AutoNudge: could not record a loop start", exc_info=True)
 
     def read_quarantine_sidecar(self) -> list:
         """Read held-aside rows from the sidecar, tolerating absence but not corruption.

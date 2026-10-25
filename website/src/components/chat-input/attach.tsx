@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
-import { createPortal } from 'react-dom'
+import { OverlayPortal } from '../overlayRoot'
 import { Crop, FileText, Loader2, PenLine, Plus, X } from 'lucide-react'
 import { useAnchorRemeasure } from '../../hooks/useAnchorRemeasure'
+import { usePressActivation } from '../../hooks/usePressActivation'
 import { isScreenSnipSupported } from '../../hooks/useScreenSnip'
 import { i18nT } from '../../i18n/t'
 import { uiLocation } from '../../uiLocations/uiLocation'
 import { GuideRevealScope } from '../../guide/GuideRevealScope'
 import type { ComposerControl } from '../composerControl'
-import type { useComposerPickers } from './pickers'
+import type { useComposerPickers } from '../../chat-core/composer/pickers'
 import type { ChatInputProps } from './props'
 
 /* The attach control at the head of the bottom row: the "+" drop-up (upload,
    screenshot, sketch, collapse, and the `/` `@` `$` shortcuts) on a pointer
-   device, a bare file-input label on touch, and the cancel control that
-   stands in for either while an upload is in flight. */
+   device and on a touch host that is not collapsible, a bare file-input label
+   on the collapsible touch host, and the cancel control that stands in for
+   either while an upload is in flight. */
 
 /**
  * Where focus goes once the "+" -> Upload file picker closes.
@@ -34,23 +36,27 @@ import type { ChatInputProps } from './props'
  * finishes or fails: by then focus is already in the composer, or wherever the
  * user put it.
  *
- * Pointer path only, keyed on the "+" button existing. On the direct-picker
- * path (a touch device, or the mobile breakpoint) that button is replaced by a
- * bare file label with no menu to lose focus to, and focusing the composer
- * there would raise the soft keyboard, which the composer avoids doing on its
- * own (see the autoFocusKey effect in ChatInput).
+ * Pointer path only, keyed on the input mode rather than on the "+" button:
+ * on touch (a touch device, or the mobile breakpoint) "+" still opens its menu
+ * on non-collapsible hosts, but focusing the composer there would raise the
+ * soft keyboard, which the composer avoids doing on its own (see the
+ * autoFocusKey effect in ChatInput), so neither return runs on touch.
  */
-function useUploadFocusReturn({ fileInputRef, plusBtnRef, composerControl }: {
+function useUploadFocusReturn({ fileInputRef, plusBtnRef, composerControl, isTouchInput }: {
   fileInputRef: RefObject<HTMLInputElement | null>
   plusBtnRef: RefObject<HTMLButtonElement | null>
   composerControl: () => ComposerControl | null
+  isTouchInput: () => boolean
 }) {
   const composerControlRef = useRef(composerControl)
   composerControlRef.current = composerControl
+  const isTouchInputRef = useRef(isTouchInput)
+  isTouchInputRef.current = isTouchInput
   useEffect(() => {
     const input = fileInputRef.current
     if (!input) return
     const parked = () => {
+      if (isTouchInputRef.current()) return false
       const active = document.activeElement
       return !active || active === document.body || active === input || active === plusBtnRef.current
     }
@@ -74,12 +80,14 @@ function useUploadFocusReturn({ fileInputRef, plusBtnRef, composerControl }: {
   }, [fileInputRef, plusBtnRef])
 }
 
-export function usePlusMenu({ pickers, value, onChange, composerControl, fileInputRef }: {
+export function usePlusMenu({ pickers, value, onChange, composerControl, fileInputRef, isTouchInput }: {
   pickers: ReturnType<typeof useComposerPickers>
   value: string
   onChange: (v: string) => void
   composerControl: () => ComposerControl | null
   fileInputRef: RefObject<HTMLInputElement | null>
+  /** Read when the picker closes, so it may close over state declared later in render. */
+  isTouchInput: () => boolean
 }) {
   const { setSlashMenuOpen, setFilePickerOpen, setFileQuery, setSkillPickerOpen, setSkillQuery } = pickers
   // "+" drop-up menu (upload file / image + browse toggle).
@@ -88,11 +96,11 @@ export function usePlusMenu({ pickers, value, onChange, composerControl, fileInp
   const plusWrapRef = useRef<HTMLDivElement>(null)
   const plusBtnRef = useRef<HTMLButtonElement>(null)
   const plusMenuRef = useRef<HTMLDivElement>(null)
-  useUploadFocusReturn({ fileInputRef, plusBtnRef, composerControl })
+  useUploadFocusReturn({ fileInputRef, plusBtnRef, composerControl, isTouchInput })
   const [plusRect, setPlusRect] = useState<DOMRect | null>(null)
   useEffect(() => {
     if (!plusOpen) return
-    // Menu is portaled to <body> (escapes the input's overflow-hidden), so the
+    // Menu is portaled to the body-level overlay root (escapes the input's overflow-hidden), so the
     // outside-click guard must also exclude the portaled menu, not just the button.
     const h = (e: MouseEvent) => {
       const t = e.target as Node
@@ -141,7 +149,11 @@ export function usePlusMenu({ pickers, value, onChange, composerControl, fileInp
   return { plusOpen, setPlusOpen, sketchOpen, setSketchOpen, plusWrapRef, plusBtnRef, plusMenuRef, plusRect, togglePlus, openTrigger }
 }
 
-export function AttachMenu({ plus, onUploadFiles, uploading, onCancelUpload, uploadCount, directFilePicker, collapsible, fileInputId, openPicker, isMac, isMobile, onScreenshot, collapseMenuRow, typedCommandMenus, onFileSelect }: {
+export function AttachMenu({ plus, onUploadFiles, uploading, onCancelUpload, uploadCount, directFilePicker, fileInputId, openPicker, isMac, touchInput, onScreenshot, collapseMenuRow, typedCommandMenus, onFileSelect, optimizeRow = null }: {
+  /** "Optimize prompt" while a turn runs (#23572), a menu row because the
+   *  busy send cluster is at its button cap. Null when idle: the cluster's
+   *  own Optimize button is back then. */
+  optimizeRow?: ReactNode
   plus: ReturnType<typeof usePlusMenu>
   onUploadFiles?: (files: File[]) => void
   uploading: boolean
@@ -149,11 +161,11 @@ export function AttachMenu({ plus, onUploadFiles, uploading, onCancelUpload, upl
   /** Uploads the cancel control aborts; above one, its label names the count. */
   uploadCount: number
   directFilePicker: boolean
-  collapsible: boolean
   fileInputId: string
   openPicker: (imageOnly: boolean) => void
   isMac: boolean
-  isMobile: boolean
+  /** A phone or a touch screen: no Screenshot tile, which needs a desktop. */
+  touchInput: boolean
   onScreenshot?: () => void
   /** The collapse row the "+" menu hosts (null when the host did not opt in). */
   collapseMenuRow: ReactNode
@@ -161,6 +173,11 @@ export function AttachMenu({ plus, onUploadFiles, uploading, onCancelUpload, upl
   onFileSelect: ChatInputProps['onFileSelect']
 }) {
   const { plusOpen, setPlusOpen, setSketchOpen, plusWrapRef, plusBtnRef, plusMenuRef, plusRect, togglePlus, openTrigger } = plus
+  // The "+" trigger opens its menu on the mouse press (usePressActivation);
+  // keyboard and touch stay on click. The outside-press dismiss skips the
+  // trigger's wrapper, so a press on it while open is a toggle. The menu moves
+  // no focus on open, so the trigger takes focus as usual (no keepFocusOffTrigger).
+  const bindPlusPress = usePressActivation()
   /**
    * The exit from an upload in flight, and the reason it REPLACES the attach
    * control rather than sitting beside it.
@@ -223,7 +240,7 @@ export function AttachMenu({ plus, onUploadFiles, uploading, onCancelUpload, upl
           ) : (
             <button
               className={`w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer transition-all disabled:opacity-30 bg-transparent border-none ${plusOpen ? 'text-text bg-bg-hover' : 'text-muted hover:text-text hover:bg-bg-hover'}`}
-              onClick={togglePlus}
+              {...bindPlusPress<HTMLButtonElement>(togglePlus)}
               disabled={uploading}
               aria-haspopup="menu"
               aria-expanded={plusOpen}
@@ -236,7 +253,7 @@ export function AttachMenu({ plus, onUploadFiles, uploading, onCancelUpload, upl
           ))}
           {/* The drop-up's scope owner, outside its own open conditional. */}
           <GuideRevealScope id="menu:composer.add-menu" open={!directFilePicker && plusOpen}>
-          {!directFilePicker && plusOpen && plusRect && createPortal(
+          {!directFilePicker && plusOpen && plusRect && <OverlayPortal>
             <div
               ref={plusMenuRef}
               className="fixed w-[260px] rounded-xl bg-bg-elevated border border-border shadow-xl p-2 animate-slide-up z-[60]"
@@ -252,7 +269,7 @@ export function AttachMenu({ plus, onUploadFiles, uploading, onCancelUpload, upl
                   <FileText size={18} className="text-muted" />
                   <span className="text-[12px] font-medium text-text">{i18nT('components.chatInput.upload_file')}</span>
                 </button>
-                {(isScreenSnipSupported() || isMac) && !isMobile && onScreenshot && (
+                {(isScreenSnipSupported() || isMac) && !touchInput && onScreenshot && (
                   <button
                     type="button"
                     onClick={() => { setPlusOpen(false); onScreenshot() }}
@@ -303,6 +320,7 @@ export function AttachMenu({ plus, onUploadFiles, uploading, onCancelUpload, upl
                     `collapseMenuRowElement` (chat-input/collapse.tsx), which
                     also explains why touch needs a second host at all. */}
                 {collapseMenuRow}
+                {optimizeRow}
               </div>
               {/* In-input trigger shortcuts: clicking inserts the sigil
                *  and opens the matching picker (same as typing /, @, $). */}
@@ -349,40 +367,17 @@ export function AttachMenu({ plus, onUploadFiles, uploading, onCancelUpload, upl
                   </div>
                 </button>}
               </div>
-            </div>,
-            document.body
-          )}
+            </div>
+          </OverlayPortal>}
           </GuideRevealScope>
         </div>
       )}
-      {/* Touch path: directFilePicker replaces the "+" drop-up with a
-          bare file-input label, so the menu's Sketch row never mounts
-          there and neither does the collapse row. Both need a host on
-          touch, and the row cannot simply grow to fit them: with the
-          attach label it would be three peer actions, and
-          max-two-buttons-per-row is explicit that the third "goes into an
-          overflow DropdownMenu (kebab / More), or leaves the row", with a
-          trigger counting as ONE "regardless of how many items it holds".
-          So the pencil becomes that trigger when there is a second action
-          to host, and Sketch moves one tap deeper rather than losing its
-          place. The row stays at two (label + trigger), and the non-touch
-          branch keeps both actions in the "+" menu.
-
-          Sketch alone keeps its dedicated pencil, so a surface that never
-          opted into the collapse (a split pane, the side chat) is
-          untouched by this. */}
-      {onUploadFiles && directFilePicker && !collapsible && (
-        <button
-          className="w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer transition-all disabled:opacity-30 bg-transparent border-none text-muted hover:text-text hover:bg-bg-hover shrink-0"
-          onClick={() => setSketchOpen(true)}
-          disabled={uploading}
-          aria-haspopup="dialog"
-          aria-label={i18nT('components.chatInput.sketch')}
-          title={i18nT('components.chatInput.sketch')}
-        >
-          <PenLine size={17} />
-        </button>
-      )}
+      {/* Touch path: `directFilePicker` (touch AND a collapsible host, see
+          ChatInput) replaces the "+" drop-up with a bare file-input label,
+          so the menu's Sketch and collapse rows never mount there. They hang
+          off the touch overflow instead (ChatInput's `composer-more-trigger`),
+          which keeps the row at two controls under max-two-buttons-per-row.
+          Every other touch host keeps the "+" menu, with Sketch a row in it. */}
     </>
   )
 }

@@ -59,8 +59,8 @@ extension point `McpToolingProvider.extra_mcp_scopes()`
   Kiro global only.
 - `mcp_discovery._extra_scope_sources()` yields no extra scopes, so discovery
   scans the two core files only.
-- `dashboard/handlers/mcp.py`'s apply and uninstall paths write the Kiro scope
-  only.
+- `dashboard/handlers/mcp.py`'s apply and uninstall paths (with
+  `mcp_config_purge.py`) write the Kiro scope only.
 
 The three stay symmetric on purpose. If discovery scanned a file that apply and
 uninstall could not manage, a server would show up in the dashboard that the
@@ -481,7 +481,20 @@ an enabled app's tools vanish).
 
 ## Discovery and probing
 
-Source: `mcp_discovery.py`.
+Source: `mcp_discovery.py`, a mirror facade (`kiro_crew._facade_mirror`) over sibling
+owner modules, so every name they define still reads and patches as
+`mcp_discovery.<name>`. The facade keeps the discovery passes: `probe_all`, with the
+quarantine exclusion, and the discover-and-sync step (`sync_discovered_servers`,
+`register_servers_for_cc`). New work goes to the owner of its responsibility:
+
+| Owner | Owns |
+|---|---|
+| `mcp_discovery_server_info.py` | `McpServerInfo`, the scope names and config-source tables, and `redact_mcp_headers` / `redact_mcp_error` |
+| `mcp_discovery_probe_state.py` | the protocol revision every client handshake offers and steps down to, the probe timeouts and error cap, the once-only warning ledgers, and the probe-result cache |
+| `mcp_discovery_managed.py` | the managed servers' subcommand and tool-module tables, `managed_server_is_session_bound`, the in-process tool read, and stale-command repair |
+| `mcp_discovery_config.py` | loading the agent config and the `mcp.json` sources per scope, and `list_servers` |
+| `mcp_discovery_remote.py` | `_probe_remote`: the SSRF vet and pinned connection, the HTTP handshake, header expansion, and the authorization checks |
+| `mcp_discovery_probe.py` | `probe_server`: refusing a disabled server, and the stdio handshake of a local server spawned in the sandbox on a private loop, with its temp refusals |
 
 `list_servers()` reads `~/.kiro/agents/kirocrew.json`, then each scope file with
 provenance, re-resolves stale managed commands, and overlays cached probe
@@ -496,17 +509,48 @@ Probes run from `POST /api/mcp/probe`:
 
 - **stdio** servers are spawned and driven through an MCP `initialize` handshake
   followed by `tools/list`.
-- **HTTP** servers get the same two JSON-RPC calls over POST. The remote probe
+- **HTTP** servers get the same two JSON-RPC calls over POST. The configured url
+  is first SSRF-vetted off the event loop through `link_unfurl.vet_unfurl_url`
+  (the vet the link preview, calendar, WeCom and OAuth-discovery fetches share)
+  and the connection is pinned to the vetted address, so a server url resolving to
+  a link-local address or the cloud metadata endpoint (`fd00:ec2::254` included)
+  is refused before any POST — a configured entry cannot make the gateway reach
+  the metadata service the agent's own shell is fenced from and reflect the reply
+  onto the row. Two opt-ins fit the vet to a configured endpoint: `allow_any_port`
+  (a server on `:8443` / `:8000` / `:3000` probes) and `allow_private` (a loopback
+  or LAN server, such as an app backend on `127.0.0.1`, probes, as kiro-cli itself
+  connects to it). Redirects are not followed, so a server cannot hand the
+  handshake to an address the vet never checked; a redirect reports as its status
+  and the target it names (scheme, host, port and path only), so a server whose
+  url needs a trailing slash says which url to configure.
+  The remote probe
   offers `MCP_CLIENT_PROTOCOL_VERSION` (`2025-06-18`) in `initialize`. A `-32602`
   refusal of that offer whose `data.supported` lists an older revision makes it
   retry once with the newest such revision. Every request after `initialize`
   carries `MCP-Protocol-Version` set to the revision the server answered with.
   The connection L1 smoke test (`connections/l1_smoke.py`) imports the same
-  helpers, so both paths negotiate the same way. The stdio probe offers
-  `2024-11-05`.
+  helpers, so both paths negotiate the same way. The stdio probe and the
+  gateway's stdio backend handshake (`send_initialize`) offer the same revision
+  and take the same one step down.
 - **Disabled servers are never spawned.** `probe_all()` returns a muted row as
   an unprobed `status: "disabled"` placeholder with no error text, keeping the
   tools of its last real probe, and writes nothing to the probe cache.
+- **Names that start the same process are probed one at a time.** One server is
+  often configured under several names, and probing them together starts the
+  same heavy process several times at once; the copies can each miss the probe
+  timeout and build a quarantine streak against a server that works.
+  `probe_all()` keys every local row by `_spawn_fingerprint` (command plus args;
+  env is left out, because a different token still starts the same package) and
+  holds one lock per key, taken before the shared `PROBE_MAX_CONCURRENCY` slot,
+  so rows with different keys still run in parallel. Remote rows get no key.
+  Each name still gets its own probe, env and verdict, and the quarantine rule
+  is unchanged. The cost: a pass with *n* names of one slow server takes up to
+  *n* full probe durations for that server instead of one, and one probe of a
+  stdio server can last nearly two timeouts (`initialize` and `tools/list`
+  each get a fresh one) plus teardown. The boot gate in
+  `service_boot.py` waits `mcp_probe_timeout_secs + 15` for the first pass and
+  then starts sessions anyway, so a large alias group of a slow server can
+  outlast it; the pass still finishes in the background and fills the cache.
 - **Both calls must succeed for `ok`.** An initialize that answers and a
   `tools/list` that does not (no response, an error reply, a non-200) is a
   server no session can get a tool out of — the badge certifies "tools usable",
@@ -742,6 +786,19 @@ answer, and the process exits with status `75` so the pool relaunches it from th
 current install. Otherwise nothing would bring it back, so it keeps its transport
 and refuses each call with a message to restart Kiro Crew.
 
+## Servers that ask the person (MCP elicitation)
+
+An MCP server the agent calls may gate a tool on a human answer -- a confirmation,
+a short form, a link to visit -- by sending its agent an `elicitation/create`. Kiro
+Crew is the ACP CLIENT of that agent, so the ask reaches it as a server->client
+request (`elicitation/create` on a standard harness, `_kiro/mcp/elicitation` on
+KAS) and is put to the person as a card; no trust tier answers it, and a session
+with no person reachable declines. The wire shapes, the fail-closed parse, the
+consumer opt-in and the dashboard route are in
+[acp-client.md, *MCP elicitation*](../system-specs/modules/acp-client.md#mcp-elicitation-acpelicitationpy).
+This is distinct from everything else in this document, which is about the MCP
+servers Kiro Crew itself SERVES to the agent.
+
 ## Shareability verdicts
 
 `GET /api/mcp-gateway/servers` returns a `recommendation` per row: whether the
@@ -830,8 +887,8 @@ binary on disk: every live provider — the registered sessions plus the warm
 pool the reset would drain — must declare `LLMProvider.mcp_config_hot_reload`
 as a literal `True` (default `False`, harness-parity H14). `AcpProvider`
 answers it from membership in `ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD` (kiro-cli
-only — KAS gets its servers injected on `session/new`, claude reads no agent
-file) AND the `agentInfo.version` its own process reported at `initialize`
+only — KAS gets its servers injected on `session/new` and applies a change by
+re-injection, below; claude reads no agent file) AND the `agentInfo.version` its own process reported at `initialize`
 being at or above `MCP_HOT_RELOAD_MIN_KIRO_CLI_VERSION`. That floor is
 2.21.0 — the release the reconcile semantics were observed on — not 2.10.0,
 where the watcher first shipped: a release in between keeps the always-correct
@@ -847,6 +904,55 @@ declared the capability at all resets every session. `POST
 `sessions_reset: 0` is the observable outcome. With no live process at all
 there is nothing a reset could reach, so the answer is also to skip.
 `POST /api/sessions/restart` stays the unconditional manual path.
+
+KAS satisfies the same gate by a SECOND mechanism, its own membership
+(`ACP_BACKENDS_MCP_WIRE_REINJECT`, declared as `LLMProvider.mcp_config_wire_reinject`
+by `AcpSessionProvider`, read through `AcpProvider`): nothing in that engine
+watches a file, because its servers travel inside the projected agent
+(`_meta.kiro.customAgents`), and the engine registers a session's batch exactly
+once -- a `session/set_mode` re-sent with a new batch is answered `{}` and
+ignored, and a `session/load` of a session the engine still holds is ignored the
+same way. What it does take is `session/close` on the resident session,
+`session/load` of the SAME session id carrying the new batch, then
+`session/set_mode`: the engine replays the conversation it kept, the
+`_kiro/tools/didChange` after the activation lists the added server's tools (and
+no longer lists a withdrawn one's), and the model's next turn reaches the new tool
+while recalling the earlier turns. Measured on KAS 0.66.62 behind kiro-cli 2.34.0:
+`test/fixtures/acp_frames/kas/mcp-live-apply-live.jsonl` (an added server, with
+the refused re-injection in the same session) and `mcp-live-remove-live.jsonl` (a
+withdrawn one). The bundle route runs the same engine over the same wire. So the
+gate is `live_sessions_apply_mcp_live` -- every live provider hot-reloads OR
+re-injects -- and when it holds, `_mcp_hot_reload_active` MARKS each re-injecting
+provider (`mark_mcp_config_changed`, a flag, never on the wire) in the same call
+that skips the reset. The provider applies the mark at its next turn boundary,
+under the shared-turn claim and before the prompt
+(`acp/session_provider_mcp_reinject.py`): `AcpRuntime.evict_session` (the
+standard `session/close`, which keeps the stored record -- unlike KAS's own
+teardown verb `_kiro/session/delete`, which removes it), then
+`AcpRuntime.load_session` on the same id, which re-reads the spec, re-projects
+the batch, re-declares the broker stubs, hoists the managed servers and activates
+the mode with every guard the first load had. The new handle replaces the
+provider's first, and a pinned model is re-applied last, as `new_conversation`
+does -- a cancel during that round trip leaves a usable session on the engine's
+restored model. The mark is
+consumed before the first await and never cleared after one, so a Settings write
+that lands while the load runs marks the provider again and that mark survives
+the apply: the next boundary re-loads from the spec as it is then. Never
+mid-turn: a close on a running prompt would cut it, so a mark landing during a
+turn waits for the next one. The load runs inside
+`AcpRuntime.keep_record_on_teardown`: every failure arm of `load_session` (an
+activation refusal, a stale spec, a timed-out `set_mode`) ends the session
+through `terminate_session`, whose KAS verb `_kiro/session/delete` removes the
+stored record -- the conversation the apply exists to keep -- and inside the
+scope that call is the record-keeping `evict_session` instead. A failed load
+restores the mark and refuses that turn with the restart remedy, so the next
+boundary retries; a close of an id the host does not hold is an error the evict
+ignores, which is what makes a half-done apply converge. The warm pool is marked too: a pre-spawned KAS session applies the
+change at its first turn rather than being drained -- and a fill IN FLIGHT,
+whose provider sits between its `start()` and its enqueue in neither snapshot,
+is reached through `SessionManager.mark_mcp_config_changed`, a generation
+fence the gate bumps in the same call and the fill loop compares across its
+start, marking that provider at its enqueue re-check.
 
 The skip is inferred from that declaration, not observed: kiro-cli's
 `_kiro.dev/mcp/server_initialized` notification is the signal that a reconcile
@@ -904,7 +1010,7 @@ pass, so gatewayd refuses the changed expansion and the next boot retries. A
 changed command, argument or declared env text is still refused.
 Both halves of the fingerprint fold exactly three gateway-computed spellings
 (`hashing.install_aliases`), each in the ONE slot the gateway's own writer
-(`apps/bridges.py`) emits it in: `sys.executable` (what the rewriter substitutes
+(`apps/bridges_mcp.py`) emits it in: `sys.executable` (what the rewriter substitutes
 for a manifest's bare `python3` and for the `kirocrew` host CLI) folds only as
 the command, the absolute path of the `deps_boot` shim folds only as an argument
 (`hashing.launch_token_bytes`, which takes the slot's role from the caller), and
@@ -1524,7 +1630,7 @@ not do is let a Kiro Crew server out, so a handler whose code location cannot be
 keeps the policy.
 
 `tools/call` fails **closed** on the four reasons in `_UNRESOLVED_REFUSES_CALL`
-(`mcp_shared.py`): `policy_unreadable`, `identity_unattested`, `identity_unattestable`
+(`mcp_shared_policy.py`): `policy_unreadable`, `identity_unattested`, `identity_unattestable`
 and `resolution_failed`. Each means "an operator exclusion may exist and this process
 could not read it". `policy_unreadable` is the gateway's `409`
 whose body carries `"code": "policy_unreadable"`: a spec for this session exists and its
@@ -1690,19 +1796,19 @@ Managed servers, registered by `agent._MANAGED_MCP_SERVERS` and installed into
 
 | Server | Process | Tools |
 |--------|---------|-------|
-| `kirocrew-cron` | `kirocrew mcp-cron` (`mcp_cron.py`) | `cron_add`, `cron_list`, `cron_update`, `cron_remove`, `cron_remove_all`, `cron_pause`, `cron_resume`, `cron_trigger`, `cron_secret_request` |
+| `kirocrew-cron` | `kirocrew mcp-cron` (`mcp_cron.py` + `mcp_cron_*.py`) | `cron_add`, `cron_list`, `cron_update`, `cron_remove`, `cron_remove_all`, `cron_pause`, `cron_resume`, `cron_trigger`, `cron_secret_request` |
 | `kirocrew-core` | `kirocrew mcp-core` (`mcp_core.py` + `mcp_core_parts/` + `mcp_tools/`) | spawn/subagent, learn, task, messaging, artifact, workflow, knowledge and session-directive tools (see below) |
 | `kirocrew-computer` | `kirocrew mcp-computer` (`mcp_computer.py`) | `computer_list_apps`, `computer_launch_app`, `computer_get_state`, `computer_click`, `computer_drag`, `computer_type_text`, `computer_press_key`, `computer_set_value`, `computer_scroll`, `computer_perform_action`, `computer_end_turn` |
-| `kirocrew-dashboard` | `kirocrew mcp-dashboard` (`mcp_dashboard.py`) | `chat_folder_tree`, `chat_folder_create`, `chat_folder_move`, `chat_folder_update`, `chat_folder_move_session`, `chat_folder_delete`, `chat_folder_file_self`, `chat_tag_list`, `chat_tag_create`, `chat_tag_update`, `chat_tag_assign`, `chat_tag_column_list`, `chat_tag_column_create`, `chat_tag_column_move`, `session_move_to_column`, `chat_session_pin`, `session_create`, `session_fork`, `session_stop`, `session_end_wait`, `session_retry`, `session_continue`, `session_set_model`, `session_reload`, `session_rename`, `session_generate_title`, `session_close`, `session_revive`, `session_history_list`, `session_send`, `session_broadcast`, `session_status`, `session_adopt`, `session_release`, `session_read_message`, `session_summary` |
+| `kirocrew-dashboard` | `kirocrew mcp-dashboard` (`mcp_dashboard.py` + `mcp_dashboard_*.py`) | `chat_folder_tree`, `chat_folder_create`, `chat_folder_move`, `chat_folder_update`, `chat_folder_move_session`, `chat_folder_delete`, `chat_folder_file_self`, `chat_tag_list`, `chat_tag_create`, `chat_tag_update`, `chat_tag_assign`, `chat_tag_column_list`, `chat_tag_column_create`, `chat_tag_column_move`, `session_move_to_column`, `chat_session_pin`, `chat_session_pin_move`, `session_create`, `session_fork`, `session_stop`, `session_end_wait`, `session_retry`, `session_continue`, `session_set_model`, `session_reload`, `session_rename`, `session_generate_title`, `session_close`, `session_revive`, `session_history_list`, `session_send`, `session_broadcast`, `session_status`, `session_adopt`, `session_release`, `session_read_message`, `session_summary` |
 | `kirocrew-work` | `kirocrew mcp-work` (`mcp_work.py`) | `work_brief`, `work_report`, `work_ledger_read`, `work_ledger_rebuild`, `work_ledger_record` |
 | `kirocrew-crew-log` | `kirocrew mcp-crew-log` (`mcp_crew_log.py`) | `crew_log_list`, `crew_log_read`, `crew_log_projection` |
 | `kirocrew-debug` | `kirocrew mcp-debug` (`mcp_debug.py`) | `debug_gateway`, `debug_refusals`, `debug_threads`, `debug_processes`, `debug_snapshots` |
-| `kirocrew-panel` | `kirocrew mcp-panel` (`mcp_panel.py`) | `panel_publish`, `panel_templates`, `dashboard_fields`, `dashboard_types`, `dashboard_write`, `dashboard_templates`, `dashboard_preview`, `dashboard_apply`, `dashboard_rollback` |
+| `kirocrew-panel` | `kirocrew mcp-panel` (`mcp_panel.py`) | `panel_publish`, `panel_templates`, `dashboard_fields`, `dashboard_types`, `dashboard_write`, `dashboard_templates`, `dashboard_preview`, `dashboard_apply`, `dashboard_rollback`, `dashboard_snapshot` |
 | `kirocrew-guide` | `kirocrew mcp-guide` (`mcp_guide.py`) | `guide_list_actions`, `guide_start`, `guide_status`, `guide_cancel`, `list_change_kinds`, `find_setting`, `get_member_capabilities`, `diagnose_settings`, `propose_change`, `get_change_status`, `search_docs`, `find_ui` |
-| `kirocrew-mate` | `kirocrew mcp-mate` (`mcp_mate.py`) | `update_self`, `set_model`, `set_approval_mode`, `request_capabilities`, `goal_read`, `set_goal`, `set_key_results`, `key_result_progress`, `save_goal_report` |
+| `kirocrew-mate` | `kirocrew mcp-mate` (`mcp_mate.py`) | `update_self`, `set_model`, `set_approval_mode`, `find_capabilities`, `request_capabilities`, `goal_read`, `set_goal`, `set_key_results`, `key_result_progress`, `save_goal_report`, `save_notes` |
 
 `kirocrew-guide` is a platform capability: it is always emitted (not `opt_in`),
-so the default `kirocrew` template, every crewmate built from it, the worker
+so the default `kirocrew` template, every mate built from it, the worker
 derived from it, and every dashboard session on them mount it, deferrable by
 Tool Search like any other MCP server. The conductor and background templates
 (`agent_materialization/conductor_agents.py`, the knowledge, research and
@@ -1730,25 +1836,25 @@ permissions derive from that final filtered list. A harness whose projection
 does not carry the server reports it through the ordinary unresolved-ref doctor
 row ([agent host contract](../system-specs/modules/agent-host-contract.md)); nothing special-cases its
 absence.
-`kirocrew-mate` (`mcp_mate.py`) is the crewmate's own record, mounted on the
+`kirocrew-mate` (`mcp_mate.py`) is the mate's own record, mounted on the
 same specs on the same terms (always emitted, no `autoApprove`, its own server so
 the set is withheld as one and the guide set stays the user's help with the
 dashboard; an existing spec gains the ref and `agent._MATE_AUTO_GRANTS` once,
 `mate_platform_granted.json`). Its tools are named for what they do and act on
-the CALLING crewmate only, never on a name passed in, in two tiers that follow
-who owns the field. `update_self` writes the presentation the crewmate owns (its
+the CALLING mate only, never on a name passed in, in two tiers that follow
+who owns the field. `update_self` writes the presentation the mate owns (its
 display name, description and ghost face, `members.SELF_EDITABLE_FIELDS`) at
 once through `POST /api/member/self/update`: the gateway resolves the member from
 the caller's pinned-thread slot, cleans each value by its own rule
 (`members.update_member_self`), publishes the record, writes `member/config` to
 the member's event log, keeps the previous values in its own bounded in-process
 record (`dashboard/member_self_changes.py`) and draws one `card` row of surface
-`self` in the crewmate's conversation (`chat_cards.record_self_change`) with the
+`self` in the mate's conversation (`chat_cards.record_self_change`) with the
 faces and labels to show and an **Undo**. The undo is the user's click,
 `POST /api/members/{slug}/self-changes/{id}/undo` with `{"slot"}` naming the
 conversation the page is showing, owner-only cookie auth off the strict prefix:
 it restores from the gateway's record, never from the row (the transcript is
-agent-writable, so a row copied into another crewmate's chat with its id and
+agent-writable, so a row copied into another mate's chat with its id and
 slug intact is refused: the record must have been made in the conversation the
 button was pressed in, and a request naming none is `400 slot_required`), and
 marks the row `undone`; a record the gateway no longer holds answers 410. The
@@ -1758,12 +1864,25 @@ path measures it; an avatar mapping by its serialized length). `set_model`, `set
 `request_capabilities` are the card tier: `POST /api/member/self/propose` fixes
 the kind (`crewmate.update`, `crewmate.capabilities`) and the member and runs
 the same propose body `propose_change` runs
-(`handlers.change_cards.propose_for_caller`), so the crewmate names the ask and
-the user presses the same card; the outcome reaches the crewmate on its next
+(`handlers.change_cards.propose_for_caller`), so the mate names the ask and
+the user presses the same card; the outcome reaches the mate on its next
 turn, as every card outcome does. A `set_approval_mode` for the mode the thread
 already runs in (a record pinning none opens in
 `MEMBER_APPROVAL_MODE_UNSET_EFFECTIVE`) is refused `no_change` rather than
 drawn as a card from an empty value.
+`find_capabilities` is a read for the crewmate's conductor: `POST
+/api/member/self/capabilities` (`handlers/member_capability_catalog.py`)
+answers what the crewmate's worker has (`mate_worker.resolve_worker_spec`), the
+servers and skills this gateway has loaded that it lacks, and, for a `query`,
+the MCP registry search the MCP page runs (`mcp_discover.search_registry`,
+external text redacted). Data only, never a transport. A `request_capabilities`
+draft that names `additions` has them resolved by the gateway into the card's
+operations (`additions_to_draft`): a gateway server's own entry, an official
+registry install plan (`mcp_discover.official_install_plan`, the spec
+`/api/mcp/discover/install` would write), or a loaded skill; the card states
+where each comes from and which tools would run without asking, and pressing it
+writes the crewmate's own file in place (crew-mode.md, "Conductor and
+worker"). The worker mounts neither tool (`MATE_WORKER_EXCLUDED_TOOLS`).
 The crewmate's goal (`member_goals.py`, `trust/member-goals/<slug>.json`, never
 `member-rules/`) splits the same way. `set_goal` and `set_key_results` are card
 asks (`crewmate.goal`, `crewmate.key_results`, applied and undone through
@@ -1772,24 +1891,28 @@ compare-and-set; a goal card adds a goal, or replaces one by `goal_id`, and the
 Undo of an added goal removes exactly that one). `goal_read`, `key_result_progress` and `save_goal_report`
 are direct reads and writes through `/api/member/self/goals/*`
 (`dashboard/handlers/member_goals.py`). `save_goal_report` files a weekly
-report or monthly review as a Markdown artifact under `Crewmates/<name>/Reports`
-and sends one notification linking it. These goal operations are deliberately
+report or monthly review under `Crewmates/<name>/Reports`, as `markdown` or as
+`html` (one self-contained printable page, one of the two), and sends one
+notification linking it. `save_notes` replaces the crewmate's own briefing
+(`members/<slug>/briefing.md`, its `[CURRENT ASSIGNMENT]` section) through
+`/api/member/self/notes` (`member_notes.write_member_notes`, the read side's
+pinned, no-follow open), under the same admission as the goal writes. These goal operations are deliberately
 NOT in `_USER_TURN_OPERATIONS`: the check-in turns of
 `dashboard/goal_reminder.py` are gateway-authored hidden turns in the
-crewmate's own thread, and recording readings and filing reports is what they
+mate's own thread, and recording readings and filing reports is what they
 are for. Every other admission check below still applies. Three card asks
-are admitted without a turn the user sent: any turn in the crewmate's own
+are admitted without a turn the user sent: any turn in the mate's own
 pinned thread (a check-in, a sub-agent's result coming back, the goal-setup
 nudge of `dashboard/goal_setup.py`) may call `set_goal`, `set_key_results` and
 `set_check_ins`. `_resolve_agent_caller(..., own_goal=True)` (passed only by
-`member.propose_self`) admits such a turn when the slot is a crewmate DM thread
+`member.propose_self`) admits such a turn when the slot is a mate DM thread
 and marks the request `REQ_OWN_GOAL_TURN`; a channel turn is still refused. The
 route then refuses every other request (`model`, `approval_mode`,
 `capabilities`) with `not_user_turn`. Each is a card: nothing changes until the
-user presses it, so the crewmate may raise its own goal, milestones and
+user presses it, so the mate may raise its own goal, milestones and
 check-ins whenever its work calls for it.
 The workspace, memory store, member id, key and template are not the
-crewmate's to change or to ask for.
+mate's to change or to ask for.
 Its guide and card tools, and every `kirocrew-mate` tool, work only for a turn
 the user sent from the dashboard. The gateway's admission
 (`dashboard.handlers.guide._resolve_agent_caller`, shared by the card and member
@@ -1802,12 +1925,12 @@ the provenance the turn runner recorded: the slot must be executing a turn now
 (`_turn_channel_origin`, set from `_run_chat`'s `_directive_channel_origin` at the
 turn's start and cleared at its end) nor have taken a channel steer since
 (`_turn_channel_narrowed`). Starting something on screen (`guide_start`,
-`propose_change`), changing the calling crewmate's own record (`update_self`,
+`propose_change`), changing the calling mate's own record (`update_self`,
 its card-backed asks), or taking
 `find_ui`'s live observation (`guide.observe`) also needs
 the turn to be one the person sent (`_turn_user_sent`, set from
 `_directive_user_origin` the same way): a loop wake, a cron or app injection, a
-`session_send`, a subagent completion and a crewmate's hidden first-welcome
+`session_send`, a subagent completion and a mate's hidden first-welcome
 kickoff are refused with 403 `not_user_turn`, while their reads still answer. A Slack or Discord conversation is mirrored into a
 dashboard slot, so a live slot alone is not enough: a message from the channel,
 whether the gateway runs it on the mirrored slot or on the channel's own session,
@@ -1843,7 +1966,7 @@ phrase, then tokens); otherwise the better-ranked find is offered. An
 place are guided to the first; otherwise the tied control the user's tab shows now
 (`live` `pointable`/`offscreen`) wins, else the tied results on the feature's own
 page (a page result itself, or a control whose id namespace names the page it is
-drawn on: the Crewmates page's "New crewmate" over the one on Customize),
+drawn on: the Mates page's "New mate" over the one on Customize),
 first-ranked. A tied result with no guide at all (a page the rail has no entry
 for) never wins over a tied control that has one: the Settings Webhooks tab is
 guided, not the Webhooks page. Candidates on two
@@ -1914,7 +2037,7 @@ step completes only through `handlers/guide.run_guided_crewmate_create`, which w
 existing owner-only `POST /api/agents`: the tab names the guide in
 `X-Guide-Id`/`X-Guide-Tab`/`X-Guide-Revision`, the request is associated before
 the handler runs, and the guide advances only from that handler's own 200
-response (the new crewmate's `member_id`). A cancel or expiry in between retires
+response (the new mate's `member_id`). A cancel or expiry in between retires
 the association. A step whose target does not appear within the tab's bounded
 wait is reported `target_missing`; that status is the gateway's and is
 recoverable: when the owning tab sees the SAME step's target again (the human
@@ -1922,7 +2045,7 @@ came back to its page, by the panel's "Go back to this step" -- the action's own
 enter navigation -- or any other way), it reports `target_found` and the gateway
 returns the guide to `active` on that step without advancing it. When the page
 instead comes back at an EARLIER step of the same action (a form that keeps its
-step in local state, like the Crewmates wizard, starts over once remounted),
+step in local state, like the Mates wizard, starts over once remounted),
 the tab reports `target_found` with `resume_step_index` and the gateway moves the
 guide back to that step -- never forward, never across a pending save
 (`invalid_resume_step`). A tab whose current target is absent while an earlier
@@ -1951,7 +2074,7 @@ the gateway's evidence and never a bare "cancelled"; the reason is kept on the
 conversation row (`meta.card.reason`), so the line reads the same after the
 store has forgotten the guide. A save the server refuses
 outright (a 4xx) clears the step's "submitted" state, and the guide stays on
-`crewmate.create`'s one step, the New crewmate card's Create, so the person can
+`crewmate.create`'s one step, the New mate card's Create, so the person can
 press it again. `target_found`
 is a no-op on an active guide, is refused on a terminal one, and needs the owner
 tab, so a cancelled, expired or completed guide never resumes; a reloaded tab
@@ -2079,10 +2202,10 @@ the first write (`409 changed_since_preview`; `changed_since_apply` for undo),
 runs the handler unchanged and records the step only from its own 2xx. A card
 applies once; undo restores the state before the change, and is refused once the
 thing the card made was edited afterwards: the post-apply snapshot carries a
-revision fingerprint (a crewmate's config entry and its spec's editable fields,
+revision fingerprint (a mate's config entry and its spec's editable fields,
 a created schedule's configuration (never what running it updates), an MCP
 server's definition in each scope an uninstall would delete it from (`env`/`headers` values as keyed digests under a vault subkey; an unreadable scope is never read as absent), a secret's stored ciphertext entry -- never its
-value). A `crewmate.create` Undo deletes the crewmate it made through
+value). A `crewmate.create` Undo deletes the mate it made through
 `DELETE /api/agents/<name>`, and that route is name-scoped, so it checks the
 immutable `member_id` the card's own create returned (step 0 evidence) against
 the live crew's own: `after_shows_the_write` offers the Undo only while they are
@@ -2090,7 +2213,7 @@ still equal, and the delete re-reads the raw `agents[<name>]["member_id"]` the
 locked config read returns and refuses before the `del` when it differs or is
 absent (`undo_identity_guard.identity_mismatch`; `None` on either side is not a
 match). An owner who deleted and recreated the same name between apply and Undo
-leaves a different crewmate wearing it, so the Undo answers `409
+leaves a different mate wearing it, so the Undo answers `409
 changed_since_apply` and keeps the replacement and its crew log. The check is
 armed on the owner-authed Undo step alone and runs inside `update_config_locked`
 against the cross-process advisory file lock -- never against the in-process
@@ -2101,7 +2224,7 @@ Undo's first inverse step deletes the schedule the create made, as a
 fingerprint compare the `schedule.create` Undo uses (below); a cron DELETE in an
 Undo that recorded no fingerprint fails closed on an impossible sentinel rather
 than deleting unconditionally. This identity re-read guards the two name-scoped
-deletes above (the crewmate's `member_id`, the schedule's fingerprint). Every
+deletes above (the mate's `member_id`, the schedule's fingerprint). Every
 other card whose inverse is a delete offers no Undo: an MCP add or install
 (uninstall), a connection connect (disconnect), a trusted app (revoke) and a
 denied-command addition (rule delete) reach stores that take no revision or
@@ -2114,7 +2237,7 @@ unconditionally, so it could overwrite an edit another tab saved. A
 `crewmate.update` Undo writes the old fields back with a `PUT /api/agents/<name>`
 armed with the `member_id` its apply snapshot recorded; the update route compares
 it with the live crew's under the config lock it saves under and answers
-`409 changed_since_apply` when a different crewmate now wears the name.
+`409 changed_since_apply` when a different mate now wears the name.
 A template card that changes skills snapshots
 the editor's skill mapping (projected from `resources`) and a fingerprint of
 `resources`, so Undo restores the prior mapping and a later skill edit makes it
@@ -2125,7 +2248,7 @@ while waiting -- and the identity fields earlier steps returned); the card then
 offers Continue, which sends the remaining steps only. An Undo that stopped
 between its steps publishes `undo_resume` the same way, and pressing Undo again
 continues it; every Undo step after the first re-checks what it still removes
-(the crewmate's revision; a capability Undo's second step is held by its own
+(the mate's revision; a capability Undo's second step is held by its own
 preview token and revision) before it runs. The card's body carries no
 free-text editor: a different value is a new card. Cards persist in
 `<data home>/change_cards.json` (24h proposal expiry, finished cards pruned after
@@ -2188,6 +2311,16 @@ names only (`history.md`, "Card rows"). Every owner
 mutation through the hooked routes, card or manual, appends one names-only line
 to Global memory history.
 
+`kiro_crew/change_card_catalog.py` keeps the evidence, undo and result code
+(`extract_evidence`, `build_undo`, `result_summary`) and the manual-change memory
+lines (`describe_manual_change`, `HOOKED_ROUTES`, `MEMORY_ROUTES`), and is a mirror
+facade (`kiro_crew._facade_mirror`) over two sibling owners, so every other name
+still reads and patches as `change_card_catalog.<name>`. New work goes to the owner
+of its responsibility: `change_card_catalog_kinds.py` (the kind ids, the `KINDS`
+table, the risk and limit constants and the parameter validation) and
+`change_card_catalog_plans.py` (the plan steps and fills, the stores and dashboard
+setting tables, the display helpers and `build_preview`).
+
 `kirocrew-panel` is opt-in and reaches a crew member's DM session the way
 `kirocrew-dashboard` does: as a session-level `mcpServers` entry carrying that
 session's identity (`members.member_panel_session_server`), plus
@@ -2211,7 +2344,7 @@ organization has the session verbs too. Whether they prompt depends on how the g
 is spelled — `_mcp_pattern` maps a bare `@kirocrew-dashboard` entry to a one-level
 glob, so it auto-approves every tool the server advertises, while naming tools individually leaves the rest
 to `hooks.on_tool_call`. `_CONDUCTOR_DASHBOARD_GRANTS` and
-`_MEMBER_DASHBOARD_GRANTS` (`agent.py`) are the shipped examples of the individual
+`_MEMBER_DASHBOARD_GRANTS` (`agent_parts/spec_grants.py`) are the shipped examples of the individual
 form, and they differ from each other on exactly this axis: the member's list
 includes `session_send`, `session_broadcast`, `session_stop` and `session_retry` because `authorize_target` refuses a
 member caller on any session it did not create, and the conductor's withholds them
@@ -2377,7 +2510,7 @@ answers `tools/list` from):
 ### A `kirocrew-core` tool has two halves
 
 Each tool is declared twice in the same per-domain module under
-`kiro_crew/mcp_tools/` (`spawn.py`, `artifacts.py`, `workflows.py`, …), and
+`kiro_crew/mcp_tools/` (`learn.py`, `artifacts.py`, `workflows.py`, …), and
 nothing at runtime notices when only one half lands:
 
 - Its **descriptor** — name, model-facing description, JSON Schema — is returned
@@ -2401,6 +2534,25 @@ either half is missing, when the two halves land in different domains, or when a
 name is claimed twice. Parity is read from `schemas()`, the declaration — not
 from `build_tool_list()`, which may legitimately omit a declared tool whose app
 is switched off.
+
+Two domains keep their code in an owner package beside the module: `control.py`
+and `spawn.py` are mirror facades (`kiro_crew._facade_mirror`) over
+`mcp_tools/control_parts/` and `mcp_tools/spawn_parts/`. Both halves are still
+read as `control.schemas()` and `control.HANDLERS`, and every name an owner
+defines reads and patches as `control.<name>` or `spawn.<name>`. The packages are
+not domains — `DOMAIN_MODULES` names the facades — and new code goes to the owner
+of its responsibility:
+
+| Module | Owns |
+|---|---|
+| `control.py` | `task_run`, `wait` and its deferred step, `route_crew`, `select_crew`, `register_hook`, `ask_question` and its card wait, `HANDLERS` |
+| `control_parts/schemas.py` | every control descriptor, and the structured-arming and runtime-ceiling reads that shape one |
+| `control_parts/directive.py` | `_emit_directive`, and the tools whose effect is one directive: `nothing_to_do`, `set_project`, `reset_conversation`, `chat_tag`, `suggest_followup` |
+| `control_parts/monitor.py` | `monitor_start`, `monitor_watch`, `monitor_inspect`, `monitor_update`, `monitor_stop`, `autonudge_stop`, and their context and preflight refusals |
+| `spawn.py` | `spawn_run` with its deferred step and receipt, `spawn_continue`, `spawn_steer`, `spawn_release`, `resource_status`, `HANDLERS` |
+| `spawn_parts/schemas.py` | every spawn descriptor, the agent roster hint and the parent allowlist filter |
+| `spawn_parts/listing.py` | `spawn_list`, `spawn_status` and the queued-wait wording |
+| `spawn_parts/wave.py` | `spawn_sub_agents` with its deferred step and resume hold, and the audit owner |
 
 ### An app's tools follow the app's enablement
 
@@ -2496,10 +2648,40 @@ to the owner of its responsibility:
 | `history` | the chat-history search tools' scoping, redaction and snippet helpers |
 | `radar_crew` | the Issue Radar crew tools' identity, ledger view and write scrubbing |
 
+`mcp_cron.py` keeps the cron server itself — argument validation, the call path, the
+caller's identity and ownership checks, the tool bodies (`_call_tool_inner`) and the
+stdio entry point — and is a mirror facade over four sibling owners, so every name
+still reads and patches as `mcp_cron.<name>`. New cron-server code goes to the owner of
+its responsibility:
+
+| Owner | Owns |
+|---|---|
+| `mcp_cron_shell_scan` | the lexical scanners the cron shell gate runs: the protected-path and secret-environment matchers, quote states, `$` expansions, extglob and brace expansion, and whether a glob can reach a credential directory |
+| `mcp_cron_vet` | the cron gate: the governance, command and script vets, the fire-time re-vet `vet_job_at_fire_time`, the storage-time denial audit, and the folder `cron_add` names |
+| `mcp_cron_tool_list` | the tool catalogue `tools/list` returns |
+| `mcp_cron_list_render` | `cron_list`'s full, compact and JSON renderings and the run-history fold |
+
 The remaining upward dependency is known: the plumbing could move to a module the
 handlers own, which would make `mcp_tools` a leaf. That is a separate change —
 it has to retarget every patch site, which is mechanical but touches far more
 test code than moving the handlers did.
+
+`mcp_shared.py`, the stdio plumbing every managed server shares, keeps the server's entry
+-- `run_mcp_stdio_loop`, the process identity it declares (`set_internal_caller`) and its
+hard-exit signal handlers -- and is a mirror facade (`kiro_crew._facade_mirror`) over four
+owners, so every name they define still reads and patches as `mcp_shared.<name>`. New work
+goes to the owner of its responsibility:
+
+| Owner | Owns |
+|---|---|
+| `mcp_shared_wire` | the JSON-RPC wire: the framing the first frame decides, the private stdout fd, `respond` and `notify`, the frame size limits, the Windows stdin pump |
+| `mcp_shared_calls` | a tool call's life: the queued, parked and cancelled-call bounds, `DeferredTool` with `drive_deferred` and `map_deferred`, the step pool, `ToolCancelled`, and the audited `call_tool_with_logging` |
+| `mcp_shared_policy` | which tools a session may list and call: `_resolve_tool_policy` with its cache and failure backoff, `_UNRESOLVED_REFUSES_CALL`, `ToolPolicy`, the identity notes, `serves_managed_tools` |
+| `mcp_shared_dispatch` | `_run_stdio_dispatch_loop`, the loop `run_mcp_stdio_loop` runs, with its worker, wake pipe and tunables |
+
+A global the family rebinds at run time (the framing, the stdout fd, the policy's failure
+state) lives in the one owner that rebinds it, beside every reader of it, and the owners
+log as `kiro_crew.mcp_shared`. `test/test_mcp_shared_facade.py` pins the contract.
 
 Descriptors carry no per-caller state and are rebuilt per call, not cached: some
 quote a live value (the concurrent sub-agent cap), and a cache would pin the
@@ -2533,6 +2715,22 @@ A new dashboard tool is one more row in the family function it belongs to
 `test_mcp_tool_registry.py` holds the rows to those three, and
 `test_mcp_call_site_auth_coverage.py` checks every declared route against the
 internal allowlists.
+
+`mcp_dashboard.py` keeps the folder, tag and board rows, `TABLE` with its strict gate
+and `SESSION_CONTROL_TOOLS`, and the stdio entry point (`_call_tool`,
+`run_mcp_server`). It is a mirror facade (`kiro_crew._facade_mirror`) over flat
+sibling owners, and binds every name they define, so each still reads and patches as
+`mcp_dashboard.<name>`. New code goes to the owner of its responsibility:
+
+| Owner | Owns |
+|---|---|
+| `mcp_dashboard_folder_tree` | the folder tree as the sidebar draws it: the sort-mode read, the order and name keys, sibling and render order, the free order slot, human paths, and each group's pinned-first session order |
+| `mcp_dashboard_references` | resolving a folder, session, tag or board-column reference to an id, and `_get_rows`, the list read those resolve against |
+| `mcp_dashboard_caller_scope` | what a caller may see or shape: `_caller_app_scope`, `_visible_chat_slots`, `_refuse_tree_shaping_if_unverifiable`, the caller's own slot, the `channel:` board-write refusal, `_is_messaging_caller`, `SERVER_NAME` |
+| `mcp_dashboard_session_tools` | `_session_tools`, the session-control rows (the board's `session_move_to_column` row is in `_board_tools`) |
+| `mcp_dashboard_session_runs` | the body behind each `_session_tools` row, and the folder filing `session_create`, `session_fork` and `session_revive` share |
+| `mcp_dashboard_folder_runs` | every `_run_chat_folder_*` body |
+| `mcp_dashboard_tag_runs` | the tag, pin, pin-move, board-column and move-to-column bodies, and the tag and board renderers |
 
 External servers a user may install (a Slack server, anything else) are ordinary
 user-added servers: they live in one of the scope files and are merged into the
@@ -2572,9 +2770,27 @@ A placement in the app shell (the top bar's Search Everywhere trigger) has no
 route or parent path: find_ui returns `on_every_page: true` for it and keeps it
 under any `surface` filter.
 
+`kiro_crew/ui_index.py` keeps the tool's surface -- `find_ui`, `browse_ui` and its
+areas, the guide bindings `authoritative_find` and `planned_find`, and
+`setting_labels` -- and is a mirror facade (`kiro_crew._facade_mirror`) over three
+sibling owners, so every other name still reads and patches as `ui_index.<name>`.
+New work goes to the owner of its responsibility: `ui_index_match.py` (the shared
+constants, the question vocabulary and the matcher), `ui_index_load.py` (reading,
+validating, merging and caching the packaged index) and `ui_index_records.py` (one
+location's answer record: labels, requirements, guide and find references). The
+owners sit beside the facade because `INDEX_PATH` and `AUTO_INDEX_PATH` resolve from
+their module's own directory.
+
 The index is generated by `website/scripts/gen-ui-index.mjs`
-(`npm run gen:ui`; logic in `scripts/lib/ui-index.mjs`) from registries the
-dashboard already renders, never a parallel route table:
+(`npm run gen:ui`) from registries the dashboard already renders, never a
+parallel route table. Its logic is `scripts/lib/ui-index.mjs`, the one import
+path, which assembles the index and re-exports its three owners' public
+names: `ui-index-source.mjs` reads dashboard source (render-site markers and
+their labels, literal lists, the route table, interactive candidates),
+`ui-index-auto.mjs` maps files to pages and decides each auto site's id and
+guide policy, and `ui-index-guide.mjs` compiles the `ui.show` guide plans. New logic
+goes to the owner of its responsibility, and no owner imports `ui-index.mjs`.
+The inputs:
 
 - pages: `src/surfaces/surfaceData.ts` (the data half of every built-in surface,
   spread by `builtins.tsx`) and `commandPalette/providers/pagesData.ts` (Search
@@ -2611,7 +2827,7 @@ Search Everywhere extra page whose route only redirects (`/mc-agents`, `/tasks`,
 `/instances`) is never returned as a destination: `LEGACY_PAGE_CANONICAL` in
 `descriptors.ts` names the location the redirect lands on, by explicit tab where
 the bare target would restore a remembered tab (`/mc-agents` -> Customize >
-Crewmates at `?tab=crews`), and the page's title becomes an `alias_keys` entry
+Mates at `?tab=crews`), and the page's title becomes an `alias_keys` entry
 of that location, which keeps its own route and prerequisites (Tasks keeps the
 Task Runner page's `app_enabled`). The generator refuses a redirecting page with
 no mapping, a mapping whose location is not where the redirect lands, and a
@@ -2714,7 +2930,7 @@ first placement's route (none for the shell), the role its kind implies and,
 for a control `guide_catalog.ui_find_location_ids` lists, its location id, plus,
 when that placement is a `menu` entry under another listed control, that
 control as `opener` (the notifications bell for Mark all as read, the
-Crewmates header "+" for its New crewmate item), as
+Mates header "+" for its New mate item), as
 `guide_catalog.ui_find_opener` gives it: never a control that removes
 something (a `caution` policy or an English label `REMOVAL_LABEL_RE` matches,
 `ui_find_cautions`) and never a trust-root control.
@@ -2731,17 +2947,17 @@ that very action, and says what it removes and that it cannot be undone.
 #### Guide plans
 
 `gen:ui` gives a registered location a `guide_plan` (`guidePlanFor` in
-`scripts/lib/ui-index.mjs`), deny by default: only a curated location (its
+`scripts/lib/ui-index-guide.mjs`), deny by default: only a curated location (its
 render-site marker proven), whose every placement requires only `viewport`,
 `shown_by`, `preview_flag` and the conditions described below, whose
 placements each take at most 7 steps (six pointing steps plus a preview gate;
 `GUIDE_MAX_STEPS`; placements may differ in length), with one placement per viewport, and which
 is not denied. `GUIDE_CAUTION_IDS` lists the destructive or data-replacing
-controls (crewmate delete, app uninstall, backup import, notification
+controls (mate delete, app uninstall, backup import, notification
 clear-all, schedule delete and cancel-run, stop monitor, sessions clean-up): each is planned
 like any other, and its last step carries `caution: true`. `GUIDE_DENY_IDS`
 lists the registered controls of the agent's own ceiling (the composer's
-approval-mode picker and the crewmate Permissions button today; the
+approval-mode picker and the mate Permissions button today; the
 Security, Computer Use and Secrets tabs are refused whole by
 `TRUST_ROOT_PARENTS`, the tabs `settings.show` refuses too). The script fails
 when either list names an id that is not registered, or one id is on both; a
@@ -2881,12 +3097,12 @@ Wired today: the sessions sidebar and drawer (`SessionsSidebarChrome`), the chat
 (`ChatPage`), the message box (`composer.box`, `ChatInput`), the navigation
 rail (`shell.nav-rail`, `RailBrandToggle`), the docked terminal panel
 (`shell.terminal-panel`, `BottomTerminalPanel`), the phone menu
-(`menu:shell.mobile-menu`, `App`), the crewmate roster on a wide screen and on
+(`menu:shell.mobile-menu`, `App`), the mate roster on a wide screen and on
 a phone (`members.roster`, `members.roster-phone`, `MembersPage`), the
-crewmate's profile card (`members.profile`, `MembersPage`, the scope of the
+mate's profile card (`members.profile`, `MembersPage`, the scope of the
 header pill that reveals its Permissions row, `members.permissions`), `menu:`
 scopes of the sessions list and create menus, the artifacts add menu, the
-terminal and side-panel menus, the crewmates add menu and switcher, App Store
+terminal and side-panel menus, the mates add menu and switcher, App Store
 sources, the composer add menu, the notifications sheet, and the Connections
 MCP tab (`open:connections.mcp-servers-tab`). A scope with no owner mounted reads
 `unknown` and a step on it keeps its `reach` fallback (a later target on
@@ -3054,7 +3270,7 @@ The artifact (`buildAutoArtifact` in `scripts/lib/ui-index.mjs`) holds only the
 auto locations and the labels they use, plus `base_input_digest`, the
 `input_digest` of the committed index it hangs off, and the build-time core
 coverage numbers. The committed index's digest no longer carries anything the
-auto tier derived. `ui_index.py` merges the artifact at load only after checking
+auto tier derived. `ui_index_load.py` merges the artifact at load only after checking
 all of it: schema, `artifact: "auto"`, `base_input_digest` equal to the
 committed index's, the same locales, only `tier: auto` entries (each validated
 like any location, `conditions_unknown: true` and no terms), new ids whose paths
@@ -3420,17 +3636,18 @@ Two steps, and the generator fails on either one alone; then regenerate:
    accepts an intrinsic element, or a component in its `FORWARDING_PROVEN`
    list (`Btn`, `SendBtn`, `DropdownMenuItem`, `Glass`, `IconButton`,
    `Clickable`, `Link`, `NavItem`, `Row`, `AddMenuItem`, `SimpleSelect`,
-   `SegmentedControl`, `CrewEditorRail`, `Table`, `DropdownMenuSubTrigger`,
-   `Item` today),
+   `SegmentedControl`, `CrewEditorNextRail`, `Tablist`, `Table`,
+   `DropdownMenuSubTrigger`, `Item` today),
    each with its own rendered forwarding test, whose `afterEach` fails on any
    `data-ui-location` in the document not registered under that same id
-   (`unregisteredMarkers`, `src/test/guideTargets.ts`). `NavItem` (App.tsx) takes a fixed
+   (`unregisteredMarkers`, `src/test/guideTargets.ts`). `NavItem` (`shell/nav/navRow.tsx`) takes a fixed
    prop list and forwards only its typed `data-ui-location` prop (the one
    `uiLocation()` produces) to the row, pinned by
    `src/test/App.navItemUiLocation.test.tsx`; `SimpleSelect` likewise forwards
    only that prop, to its Radix trigger or (on touch) its native `<select>`.
    A component that draws one control per entry of a data array is the one
    place a marker goes inside an object instead: a `SegmentedControl` segment
+   (or a `CrewEditorNextRail` / `Tablist` tab, through their `segments` prop)
    is marked by spreading the marker into that entry,
    `{ key, label, ...uiLocation('<id>') }`, directly inside the array passed as
    `segments` (the generator's `SEGMENT_HOSTS`; anywhere else the spread is
@@ -3937,7 +4154,7 @@ cannot arrive inside one whose grant was never meant to cover it.
 
 Per-agent scoping composes on top and needs no new mechanism: an agent spec's own
 `mcpServers` map decides which agents see a server at all
-(`agent_discovery.py`), so a server can be handed to an orchestrator-class agent
+(`agent_discovery_parts/agent_roster.py`), so a server can be handed to an orchestrator-class agent
 without every agent inheriting it.
 
 Adding a managed server is a **parity tax** — the name must appear in
@@ -4436,7 +4653,7 @@ is what `nothing_to_do`, `monitor_start`, `monitor_watch`, `monitor_update`,
 `monitor_stop`, `autonudge_stop`, `set_project`, `suggest_followup`,
 `reset_conversation` and `chat_tag` do (`session_directive.DIRECTIVE_TOOLS`). The tool validates its arguments and
 returns a human-readable confirmation plus a marker line carrying the validated
-payload and **no session key**. `dashboard/chat_runner`'s tool-result handler
+payload and **no session key**. `_on_tool_result` (`dashboard/chat_turn/tool_results.py`)
 decodes the marker, applies the effect against **its own** `slot.key`, then
 strips the marker from the stored transcript. Sub-agent isolation is therefore
 structural rather than cryptographic: a sub-agent's tool result flows through the
@@ -4508,7 +4725,7 @@ authenticated identity, applying the arguments validation had just refused; the
 vouch gate below is what stops that. A very long name would make the transport cut
 remove the result's refusal tag, so the decline would read as a lost marker:
 `tag_refusal` elides the middle of an over-long text against
-`MAX_TOOL_RESULT_CHARS`, the single constant `acp/_dispatch.py` slices on.
+`MAX_TOOL_RESULT_CHARS`, the single constant `acp/_dispatch_parts/tool_result_events.py` slices on.
 That bound alone is necessary but not sufficient, because the cut runs AFTER
 redaction and redaction GROWS text (a credential becomes a longer placeholder,
 measured 7,999 chars in and 8,755 out), so `preserve_tail_marker` re-attaches a

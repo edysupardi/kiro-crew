@@ -6,7 +6,7 @@ the stance as declared-not-wired: an app whose update correctness depends on it 
 broken, and the remedy is an idempotent ``onInstall`` -- which a registry update
 re-runs -- not a call site added quietly.
 
-The set of hooks the runtime touches OUTSIDE ``manifest.py``'s own serialization is
+The set of hooks the runtime touches OUTSIDE ``manifest_sections.py``'s own serialization is
 derived from the AST rather than read off a comment. Wiring ``onUpdate`` (or
 dropping a hook) fails here and names the field comment, the manifest-reference
 row and the spec paragraph that must change in the same PR. The reference's
@@ -24,14 +24,14 @@ from kiro_crew.apps.manifest import SetupConfig
 
 _REPO = Path(__file__).resolve().parent.parent
 _APPS = _REPO / "src" / "kiro_crew" / "apps"
-_MANIFEST_PY = _APPS / "manifest.py"
+_MANIFEST_PY = _APPS / "manifest_sections.py"
 _REFERENCE_MD = _REPO / "docs" / "app-kit" / "manifest-reference.md"
 _SPEC_MD = _REPO / "docs" / "system-specs" / "modules" / "app-kit-platform.md"
 
 #: Every ``setup.on*`` hook some code path actually executes. ``onInstall`` is
 #: read by ``registry_pipeline/install.py`` (the install transaction, which a
 #: registry update re-enters); the other three are the ``run_lifecycle_script``
-#: callers in ``routes.py`` and ``teardown.py``.
+#: callers in ``routes.py``, ``routes_enable.py`` and ``teardown.py``.
 DISPATCHED_HOOKS = frozenset({"onInstall", "onUninstall", "onEnable", "onDisable"})
 
 #: Declared on ``SetupConfig`` and round-tripped, but executed by nothing.
@@ -41,9 +41,9 @@ _HOOK_NAME = re.compile(r"^on[A-Z][A-Za-z]*$")
 
 
 def _runtime_touched_hooks() -> dict[str, set[str]]:
-    """Hook names the apps runtime reads, by AST, excluding ``manifest.py``.
+    """Hook names the apps runtime reads, by AST, excluding ``manifest_sections.py``.
 
-    ``manifest.py`` is where every hook is declared and serialized, so it names
+    ``manifest_sections.py`` is where every hook is declared and serialized, so it names
     all of them whether or not anything runs them; it is excluded so that what
     remains is exactly the set of hooks some code path reaches for. Comments and
     docstrings never reach the AST, so a stale mention cannot register as a
@@ -81,7 +81,7 @@ def test_dispatched_hooks_are_exactly_the_four_the_runtime_reads() -> None:
     """Pin the measured set so a quiet new call site has to update the contract.
 
     If this fails because ``onUpdate`` now appears, the field comment in
-    ``manifest.py``, the ``setup.onUpdate`` row in the manifest reference and the
+    ``manifest_sections.py``, the ``setup.onUpdate`` row in the manifest reference and the
     declared-not-wired paragraph in the app-kit platform spec all have to change
     in the same PR -- that is the whole point of pinning it.
     """

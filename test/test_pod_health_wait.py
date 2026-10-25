@@ -30,7 +30,7 @@ from kiro_crew.testing.clock import ManualClock
 def _isolate_pod_host_state(tmp_path_factory, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep pod HOST state (unit file, pods_dir mutex) out of the real home.
 
-    Same isolation as test_pod.py's fixture of the same name: ``unit.unit_path``
+    Same home pin as ``pod_helpers.py``'s fixture of the same name: ``unit.unit_path``
     and ``PodConfig.pods_dir`` resolve through ``Path.home()``, not
     ``KIROCREW_HOME``, so a test reaching ``_up`` would otherwise write the
     developer's real per-user service state.
@@ -383,7 +383,13 @@ class TestUpThreadsTheBudget:
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: was_active)
         monkeypatch.setattr(pod_cli, "_home_holds_state", lambda cfg, n: home_populated)
         monkeypatch.setattr(rt, "unit_state", lambda cfg, n: unit_state)
-        monkeypatch.setattr(rt, "recent_journal", lambda cfg, n, ln=30: "journal tail")
+        journal_calls: list[dict] = []
+        self._journal_calls = journal_calls
+        monkeypatch.setattr(
+            rt,
+            "recent_journal",
+            lambda cfg, n, ln=30, **kw: (journal_calls.append(kw), "journal tail")[1],
+        )
         monkeypatch.setattr(
             rt,
             "stop_pod",
@@ -393,6 +399,38 @@ class TestUpThreadsTheBudget:
         with pytest.raises(SystemExit):
             pod_cli._up(c, _ns(wait_secs=17))
         return audits, stops
+
+    def test_failure_journal_is_read_from_this_starts_mark(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The failure tail starts where THIS start began, not at an earlier boot.
+
+        The mark is taken before `start_pod`, so an earlier start's FATAL that is
+        still in the appended log files is not reported as this start's cause.
+        """
+        order: list[str] = []
+        mark = {"pod.out.log": 7, "pod.err.log": 3}
+        monkeypatch.setattr(rt, "journal_mark", lambda cfg, n: (order.append("mark"), mark)[1])
+        monkeypatch.setattr(
+            rt, "start_pod", lambda cfg, n: (order.append("start"), _cp(returncode=0))[1]
+        )
+        self._fail_up(tmp_path, monkeypatch, unit_state=("failed", 1))
+        assert order == ["mark", "start"]
+        assert self._journal_calls == [{"since": mark}]
+
+    def test_failure_journal_of_a_running_pod_is_the_whole_tail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No start, no mark: an already-active pod's tail is read as it stands."""
+        monkeypatch.setattr(rt, "journal_mark", lambda cfg, n: pytest.fail("no start, so no mark"))
+        self._fail_up(
+            tmp_path,
+            monkeypatch,
+            unit_state=("active", 0),
+            code=pod_cli.HEALTH_NO_CREDENTIAL,
+            was_active=True,
+        )
+        assert self._journal_calls == [{"since": None}]
 
     def test_an_unreadable_credential_does_not_destroy_a_running_pod(
         self,
@@ -506,7 +544,7 @@ class TestUpThreadsTheBudget:
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
         monkeypatch.setattr(pod_cli, "_home_holds_state", lambda cfg, n: True)
         monkeypatch.setattr(rt, "unit_state", lambda cfg, n: ("activating", 2))
-        monkeypatch.setattr(rt, "recent_journal", lambda cfg, n, ln=30: "journal tail")
+        monkeypatch.setattr(rt, "recent_journal", lambda cfg, n, ln=30, **_kw: "journal tail")
         monkeypatch.setattr(rt, "stop_pod", lambda cfg, n: _cp())
         monkeypatch.setattr(
             rt,
@@ -740,6 +778,48 @@ class TestUpThreadsTheBudget:
         assert any(
             k.get("error") == "health wait exhausted while gateway alive" for _a, k in audits
         )
+
+    def test_a_refused_boot_reports_its_recorded_reason(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The refusal verdict quotes the note, never "still starting"."""
+        why = "refusing to use the pod OS home os-home: a symbolic link"
+        monkeypatch.setattr(rt, "refusal_reason", lambda cfg, n: why)
+        audits, stops = self._fail_up(
+            tmp_path, monkeypatch, unit_state=("active", 0), code=pod_cli.HEALTH_BOOT_REFUSED
+        )
+        err = capsys.readouterr().err
+        assert f"the pod's boot refused and exited: {why}" in err
+        assert "still starting" not in err
+        assert "worktree build" not in err
+        assert stops == ["demo"]
+        assert any(k.get("error") == "boot refused" for _a, k in audits)
+
+    def test_up_stamps_the_refusal_note_before_the_start(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stamp the wait compares against is taken before `start_pod`."""
+        order: list[str] = []
+        seen: list[object] = []
+        monkeypatch.setattr(
+            pod_cli, "_refusal_stamp", lambda cfg, n: (order.append("stamp"), (1, 2, 3))[1]
+        )
+        monkeypatch.setattr(
+            rt, "start_pod", lambda cfg, n: (order.append("start"), _cp(returncode=0))[1]
+        )
+        c = self._prep(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            pod_cli,
+            "_wait_healthy",
+            lambda cfg, n, p, tries=0, **kw: (seen.append(kw.get("refusal_mark")), 403)[1],
+        )
+        monkeypatch.setattr(rt, "mint_token", lambda cfg, n, ttl: "tok-9")
+        pod_cli._up(c, _ns(wait_secs=17))
+        assert order == ["stamp", "start"]
+        assert seen == [(1, 2, 3)]
 
     def test_a_brief_serving_pod_is_a_slow_boot_whatever_its_restart_count(
         self,
@@ -1573,3 +1653,97 @@ class TestWaitHealthyRequiresTheCredential:
         monkeypatch.setattr(rt, "health", lambda cfg, n, p: next(codes, 500))
         monkeypatch.setattr(rt, "unit_state", lambda cfg, n: ("active", 0))
         assert pod_cli._wait_healthy(cfg, "x", 7999, tries=3) == 500
+
+
+class TestWaitHealthyStopsOnThisStartsRefusal:
+    """A boot that refuses ends the wait at once, but only THIS start's refusal.
+
+    On macOS a refusal exits 0 so launchd does not restart it, which leaves the
+    unit looking clean: without reading the refusal note, the wait would run out
+    its whole budget and report a slow boot about a pod that had already quit.
+    """
+
+    def _note(self, cfg: PodConfig, name: str) -> Path:
+        path = cfg.refusal_file(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def test_a_refusal_written_during_the_wait_ends_it_early(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = _pin_clock(monkeypatch)
+        cfg = PodConfig.load()
+        note = self._note(cfg, "x")
+        mark = pod_cli._refusal_stamp(cfg, "x")
+        assert mark == ()
+        polls: list[int] = []
+
+        def _health(_cfg: object, _n: object, _p: object) -> int:
+            polls.append(1)
+            if len(polls) == 3:
+                note.write_text("FATAL: refused\n")
+            return 0
+
+        monkeypatch.setattr(rt, "health", _health)
+        # What launchd shows after a refusal that exited 0: nothing failed.
+        monkeypatch.setattr(rt, "unit_state", lambda cfg, n: ("inactive", 0))
+        got = pod_cli._wait_healthy(cfg, "x", 7999, tries=90, refusal_mark=mark)
+        assert got == pod_cli.HEALTH_BOOT_REFUSED
+        assert len(polls) == 3
+        assert clock.monotonic() < 90
+
+    def test_an_earlier_boots_note_does_not_end_the_wait(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = _pin_clock(monkeypatch)
+        cfg = PodConfig.load()
+        self._note(cfg, "x").write_text("FATAL: an earlier boot\n")
+        mark = pod_cli._refusal_stamp(cfg, "x")
+        assert mark != ()
+        monkeypatch.setattr(rt, "health", lambda cfg, n, p: 0)
+        monkeypatch.setattr(rt, "unit_state", lambda cfg, n: ("activating", 0))
+        assert pod_cli._wait_healthy(cfg, "x", 7999, tries=3, refusal_mark=mark) == 0
+        assert clock.monotonic() == 3.0
+
+    def test_a_note_this_boot_cleared_is_not_a_refusal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A boot past every refusal deletes the old note; absent is not refused."""
+        _pin_clock(monkeypatch)
+        cfg = PodConfig.load()
+        note = self._note(cfg, "x")
+        note.write_text("FATAL: an earlier boot\n")
+        mark = pod_cli._refusal_stamp(cfg, "x")
+
+        def _health(_cfg: object, _n: object, _p: object) -> int:
+            note.unlink(missing_ok=True)
+            return 0
+
+        monkeypatch.setattr(rt, "health", _health)
+        monkeypatch.setattr(rt, "unit_state", lambda cfg, n: ("activating", 0))
+        assert pod_cli._wait_healthy(cfg, "x", 7999, tries=3, refusal_mark=mark) == 0
+
+    def test_without_a_mark_the_note_is_never_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A pod this command did not start passes no mark: its note is not ours."""
+        _pin_clock(monkeypatch)
+        cfg = PodConfig.load()
+        note = self._note(cfg, "x")
+
+        def _health(_cfg: object, _n: object, _p: object) -> int:
+            note.write_text("FATAL: refused\n")
+            return 0
+
+        monkeypatch.setattr(rt, "health", _health)
+        monkeypatch.setattr(rt, "unit_state", lambda cfg, n: ("activating", 0))
+        assert pod_cli._wait_healthy(cfg, "x", 7999, tries=3) == 0
+
+    def test_the_refused_sentinel_collides_with_no_sibling(self) -> None:
+        siblings = (
+            0,
+            -1,
+            rt.HEALTH_FOREIGN,
+            pod_cli.HEALTH_NO_CREDENTIAL,
+            pod_cli.HEALTH_SERVING_TOO_BRIEFLY,
+        )
+        assert pod_cli.HEALTH_BOOT_REFUSED not in siblings
+        assert pod_cli.HEALTH_BOOT_REFUSED < 0

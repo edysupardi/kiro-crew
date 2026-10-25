@@ -67,6 +67,19 @@ validated, then runs the shadow apply itself and
 restarts. The full drain lease (§5) and hash-pinned dependency constraints
 remain open. pipx installs keep the installer re-run.
 
+`platform/wheel_engine.py` is the engine's import path and patch surface, a
+mirror facade (`_facade_mirror`) that keeps the offline trust root and the
+manifest signature check that reads it, `download_verified_wheel`, the shadow
+build and promotion, pruning, the update lease and the apply. Four owners hold
+the rest, and new work of each kind goes to its owner:
+`platform/wheel_engine_contract.py` (the bounds, the manifest grammar, the
+error family and the cancel flag), `platform/wheel_engine_layout.py` (the
+layout, the trees' names and the restart interpreter),
+`platform/wheel_engine_build_child.py` (one child process of the apply) and
+`platform/wheel_engine_transfer.py` (the bounded download of a release's
+bytes, where `_download_to_file` compares the wheel's SHA-256 to the signed
+digest; `download_verified_wheel` in the facade is its one caller).
+
 **Landed in [#16202](https://github.com/kirodotdev/KiroCrew/pull/16202)** (with
 [#15838](https://github.com/kirodotdev/KiroCrew/pull/15838) stopping an in-flight
 installer gracefully): the engine hardening, and the gateway's unattended apply
@@ -157,7 +170,7 @@ so no rc-to-rc step was detectable.
 **Phase 1, the architectural half — landed since this snapshot:**
 
 - `platform/update_capability.py` exists and `derive_capability` serves the §2
-  contract to `dashboard/handlers/updates.py` and `cli_server.py`; the tactical
+  contract to `dashboard/handlers/updates.py` and `cli_server_update.py`; the tactical
   `install_kind` / `self_updatable` fields are gone.
 - The `.git` derivation is collapsed into `update_capability.py`.
 - The gateway skips a detached HEAD (`is_primary_branch`) rather than coercing it
@@ -212,8 +225,8 @@ All three backend entry points to the git path guard on roughly the same two
 conditions — `KIROCREW_PROJECT_DIR` set, and a `.git` present — and, as of
 `8861f89e`, with the **same** semantics:
 
-- `dashboard/handlers/updates.py` (`_do_update_check`) — `os.path.exists`
-- `dashboard/handlers/updates.py` (`api_update_apply`) — `os.path.exists`
+- `dashboard/handlers/updates_check.py` (`_do_update_check`) — `os.path.exists`
+- `dashboard/handlers/updates_apply.py` (`api_update_apply`) — `os.path.exists`
 - `cli_server.py` (the CLI update command) — `(proj_path / ".git").exists()`
 
 **Correction to the original draft.** This section previously said the third site
@@ -262,7 +275,7 @@ re-asked which shapes it still governs.
 ### Problems
 
 As of `9348a25a34`: Problem 1 is closed (a managed-venv install updates through
-`_update_wheel` / `_update_managed_venv` in `cli_server.py`; #1734, #16202).
+`_update_wheel` / `_update_managed_venv` in `cli_server_update.py`; #1734, #16202).
 Problem 2 is closed for the changelog modal (`updateFlow.tsx` reads
 `update_can_apply` / `update_can_arm` through `updateAffordance`, and #16245
 replaced the inert toggle with `WhatsNewAutoUpdateToggle` under the
@@ -475,7 +488,7 @@ permanently indeterminate.
 `can_apply` means **appliable by the running process without the user leaving
 the app**. It is not "can this install ever be updated": `source` and `wheel`
 can both be updated from a terminal, and `kirocrew update` genuinely applies on
-`source` today (`cli_server.py`). `can_apply` is the field an
+`source` today (`cli_server_update.py`). `can_apply` is the field an
 implementer reads to decide whether to render an in-app Apply button, so it must
 answer only that question.
 
@@ -798,7 +811,7 @@ go in the same phase, or Phase 1 ships a switch over a key that governs nothing:
 
 - the raw-config toggle in `KiroCrewCfgTab.tsx`;
 - the AboutPanel toggle (`AboutPanel.tsx`);
-- `POST /api/update/auto` (`api_update_auto` in `dashboard/handlers/updates.py`), which
+- `POST /api/update/auto` (`api_update_auto` in `dashboard/handlers/updates_channel.py`), which
   writes it into `config.json`.
 
 The endpoint stays routed but becomes a no-op returning the contract's `mode`,
@@ -820,7 +833,7 @@ contract tells it not to.
   **git-shaped and must stay scoped to the git engine**: `resolve_remote_url`
   runs `git ls-remote --get-url` and returns `""` for a tree with no git remote,
   and `""` under a non-empty pin is documented as *deny*
-  (`update_governance.py`, `governance.py:permits_source`). Applying them
+  (`update_governance.py`, `governance_parts/carriers.py` `UpdatePins.permits_source`). Applying them
   to the wheel and desktop engines would therefore refuse **every** update on
   any fleet that has configured a pin. Each engine needs its own artifact-source
   predicate — the channel feed / artifact origin URL for wheel and desktop — and

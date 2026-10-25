@@ -23,6 +23,7 @@ from kiro_crew.crew_log import session_tree_projection as stp
 from kiro_crew.crew_log.session_tree import EdgeRecord, OpenedRecord
 from kiro_crew.dashboard import session_control as sc
 from kiro_crew.dashboard.chat_utils import slot_history_key
+from kiro_crew.testing.wait import async_wait_until, await_until
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +57,7 @@ def _tree_on(tmp_path, monkeypatch):
         lambda slot: _STORE_HEADS.get(slot, ("", True, True)),
     )
     sc._tree_pending_slots.clear()
+    sc._tree_pending_edges.clear()
     yield
     stp.reset_for_tests()
     _SIDS.clear()
@@ -64,6 +66,7 @@ def _tree_on(tmp_path, monkeypatch):
     # whose stub never settles (the wedged-writer case) leaves one standing on purpose.
     # Cleared on both sides so that is contained to the test that wants it.
     sc._tree_pending_slots.clear()
+    sc._tree_pending_edges.clear()
 
 
 #: Session ids per harness state, cleared between tests by the fixture above.
@@ -574,6 +577,246 @@ def test_two_takeovers_of_one_session_serialize(tmp_path, monkeypatch):
     # went first is the scheduler's business, so the assertion is on the PAIR.
     assert sorted(applied) == ["chat-a", "none"] or sorted(applied) == ["chat-b", "none"]
     assert {r["previous_parent"] or "none" for r in results} == set(applied)
+
+
+def test_a_spawn_edge_in_flight_is_seen_by_an_overlapping_adoptions_loop_guard(
+    tmp_path, monkeypatch
+):
+    """A spawn queues ``child -> creator``; an overlapping adoption of the creator under
+    the child must be refused.
+
+    Spawn-time parenting records its edge through the creator's log the same way a
+    takeover does, and the two can race: the spawn queues ``child -> creator`` and, while
+    that append is still in flight, an adoption of the creator under the child would add
+    ``creator -> child``. Neither edge is in the settled fold yet, so a loop guard reading
+    only the settled tree would wave the adoption through and the pair would close
+    ``child -> creator -> child`` -- a cycle the fold cannot present, flattening the
+    branch. The spawn registers its queued edge for exactly the in-flight window, so the
+    adoption's guard sees it and refuses.
+    """
+    from kiro_crew.dashboard.session_control_parts import session_create as scc
+
+    state = _make_state(tmp_path)
+    creator = _live(state, _slot(state, "chat-creator"), "sid-creator")
+    child = _live(state, _slot(state, "chat-child"), "sid-child")
+
+    # Hold the spawn append unsettled: capture its on_settled, do not call it, so the
+    # queued edge is still in flight when the adoption runs.
+    held: dict = {}
+
+    def _hold_spawn(sid, **kw):
+        held["on_settled"] = kw.get("on_settled")
+
+    monkeypatch.setattr(emit, "on_session_spawned", _hold_spawn)
+
+    # The adoption, if it were wrongly allowed, would settle into the tree -- stubbed the
+    # same way the two-takeover test stubs it, so the folded result is realistic.
+    def _settle_adopt(sid, **kw):
+        settle = kw.pop("on_settled", None)
+        stp.projection().apply_edge(
+            EdgeRecord(slot=kw["slot"], parent_slot=kw["parent_slot"], at=200, sid=sid, seq=9)
+        )
+        if settle is not None:
+            settle(True)
+
+    monkeypatch.setattr(emit, "on_session_adopted", _settle_adopt)
+
+    # A minimal child carrying what _record_spawn reads: a minted lineage whose creator is
+    # the creator slot. _created_by is a SLOT key (session_create sets it to caller_key),
+    # the same namespace the loop guard and the edge store use.
+    child_obj = type(
+        "_Child",
+        (),
+        {
+            "_lineage_minted": True,
+            "_created_by": creator.key,
+            "_created_by_sid": "sid-creator",
+            "key": child.key,
+        },
+    )()
+
+    async def _race():
+        spawn = asyncio.create_task(scc._record_spawn(creator.key, child_obj))
+        await asyncio.sleep(0)  # let the spawn hand its append over and register the edge
+        try:
+            await sc.adopt_target(state, caller_session_key=_key(child), target=creator.key)
+            refused = None
+        except sc.SessionControlError as exc:
+            refused = exc.code
+        # Settle the held spawn so its task completes and the edge is dropped.
+        if held.get("on_settled") is not None:
+            held["on_settled"](True)
+        await spawn
+        return refused
+
+    refused = _run(_race())
+    assert refused == "would_cycle"
+    # The edge is dropped once the spawn settles, so it leaves nothing behind.
+    assert sc._tree_pending_edges == {}
+
+
+def test_a_spawn_settle_from_the_writer_thread_resolves_the_fence_on_the_loop(
+    tmp_path, monkeypatch
+):
+    """The append settles on the crew-log writer thread, not the loop; the fence must be
+    resolved back on the loop and the queued edge dropped.
+
+    ``on_session_spawned`` runs ``on_settled`` from whatever thread drains the writer, so
+    ``_record_spawn`` resolves its fence through ``call_soon_threadsafe`` rather than
+    touching the Future off-loop. This drives the settle from a real worker thread, with
+    asyncio debug on so a cross-thread Future mutation would be flagged, and asserts the
+    spawn returns the settled value and the edge is cleared.
+    """
+    import threading
+
+    from kiro_crew.dashboard.session_control_parts import session_create as scc
+
+    state = _make_state(tmp_path)
+    creator = _live(state, _slot(state, "chat-creator"), "sid-creator")
+    child = _live(state, _slot(state, "chat-child"), "sid-child")
+
+    # Capture the settle callback and fire it from a NON-loop thread, as the writer does.
+    held: dict = {}
+
+    def _hold_spawn(sid, **kw):
+        held["on_settled"] = kw.get("on_settled")
+
+    monkeypatch.setattr(emit, "on_session_spawned", _hold_spawn)
+
+    child_obj = type(
+        "_Child",
+        (),
+        {
+            "_lineage_minted": True,
+            "_created_by": creator.key,
+            "_created_by_sid": "sid-creator",
+            "key": child.key,
+        },
+    )()
+
+    async def _drive():
+        spawn = asyncio.create_task(scc._record_spawn(creator.key, child_obj))
+        # Let the spawn register its edge and hand its append over.
+        for _ in range(100):
+            await asyncio.sleep(0)
+            if held.get("on_settled") is not None:
+                break
+        assert held.get("on_settled") is not None, "spawn never handed its append over"
+        # The queued edge is visible while the append is in flight.
+        assert sc._tree_pending_edges.get(child.key) == (child.key, creator.key)
+        # Settle from a worker thread, the way the crew-log writer does. A direct
+        # fence.set_result here (without the threadsafe hop) would be an off-loop Future
+        # mutation; debug mode makes that a failure instead of a silent hazard. The whole
+        # settle+drain is bounded, so the broken resolver (which never schedules the drop
+        # on the loop) FAILS the wait fast rather than hanging the test and CI.
+        done = threading.Event()
+
+        def _settle_off_loop():
+            held["on_settled"](True)
+            done.set()
+
+        threading.Thread(target=_settle_off_loop).start()
+
+        async def _await_drop():
+            await async_wait_until(
+                lambda: done.is_set() and not sc._tree_pending_edges,
+                describe=lambda: "the off-loop settle never dropped the edge on the loop",
+            )
+            return await await_until(spawn, what="the spawn append")
+
+        return await _await_drop()
+
+    landed = asyncio.run(_drive(), debug=True)
+    # The spawn reported the settled value, and the edge was dropped on the loop.
+    assert landed is True
+    assert sc._tree_pending_edges == {}
+
+
+def test_a_spawn_whose_commit_times_out_keeps_its_edge_until_the_write_settles(
+    tmp_path, monkeypatch
+):
+    """awaiting_commit returning False on a timeout does NOT withdraw the append -- the
+    write is still queued -- so the edge must stand until the real settle, and an
+    overlapping adopt(child -> creator) stays refused in the meantime.
+
+    The hazard the fix closes: a slow writer makes awaiting_commit time out and return
+    False, but on_session_spawned has not settled yet. If the spawn dropped its edge on
+    that False, an adoption of the creator under the child would pass its loop guard and
+    commit creator -> child, closing child -> creator -> child once the slow spawn append
+    finally lands. So the edge is held until on_settled fires -- mirroring how adopt leaves
+    its fence standing on a timeout.
+    """
+    from kiro_crew.dashboard.session_control_parts import session_create as scc
+
+    state = _make_state(tmp_path)
+    creator = _live(state, _slot(state, "chat-creator"), "sid-creator")
+    child = _live(state, _slot(state, "chat-child"), "sid-child")
+
+    # The spawn emitter captures its on_settled but does NOT call it (the writer is held).
+    held: dict = {}
+
+    def _hold_spawn(sid, **kw):
+        held["on_settled"] = kw.get("on_settled")
+
+    monkeypatch.setattr(emit, "on_session_spawned", _hold_spawn)
+
+    # awaiting_commit queues the append (so the edge registers and on_settled is captured)
+    # and then returns False WITHOUT settling -- exactly the timeout outcome: job queued,
+    # settle still to come.
+    async def _commit_times_out(emit_one, *, what, timeout=None):
+        emit_one(lambda wrote: None)  # a throwaway settle; the held emitter ignores it
+        return False
+
+    monkeypatch.setattr(emit, "awaiting_commit", _commit_times_out)
+
+    # The adoption would settle into the tree if it were wrongly allowed, so it is stubbed
+    # realistically (same as the other spawn-guard test).
+    def _settle_adopt(sid, **kw):
+        settle = kw.pop("on_settled", None)
+        stp.projection().apply_edge(
+            EdgeRecord(slot=kw["slot"], parent_slot=kw["parent_slot"], at=200, sid=sid, seq=9)
+        )
+        if settle is not None:
+            settle(True)
+
+    monkeypatch.setattr(emit, "on_session_adopted", _settle_adopt)
+
+    child_obj = type(
+        "_Child",
+        (),
+        {
+            "_lineage_minted": True,
+            "_created_by": creator.key,
+            "_created_by_sid": "sid-creator",
+            "key": child.key,
+        },
+    )()
+
+    async def _drive():
+        # The spawn "times out" (awaiting_commit returns False) but its edge is still held.
+        landed = await scc._record_spawn(creator.key, child_obj)
+        assert landed is False, "the stubbed commit timed out"
+        assert held.get("on_settled") is not None, "the append was queued"
+        # The edge survived the False: the write is still in flight.
+        assert sc._tree_pending_edges.get(child.key) == (child.key, creator.key)
+        # So an overlapping adopt(child -> creator) is refused -- the cycle is caught.
+        try:
+            await sc.adopt_target(state, caller_session_key=_key(child), target=creator.key)
+            refused = None
+        except sc.SessionControlError as exc:
+            refused = exc.code
+        # Now the slow write settles for real; the edge clears on the loop.
+        held["on_settled"](True)
+
+        await async_wait_until(
+            lambda: not sc._tree_pending_edges,
+            describe=lambda: "the settled spawn never cleared its pending edge",
+        )
+        return refused
+
+    refused = asyncio.run(_drive())
+    assert refused == "would_cycle"
+    assert sc._tree_pending_edges == {}
 
 
 # ── the tool surface ─────────────────────────────────────────────────────────
@@ -1525,3 +1768,180 @@ def test_no_suspension_between_the_final_authorization_and_the_append(verb: str,
         if isinstance(node, ast.Await) and node.lineno <= final_gate
     ]
     assert earlier, f"{verb} takes no suspension at all, so this ordering proves nothing"
+
+
+# ── a cycle closed through a queued, unsettled reparent edge ─────────────────
+#
+# A reparent hands its edge to the writer and then WAITS, bounded, for it to land.
+# During that wait the edge is not yet in the settled fold. A second adoption decided in
+# that window must not be able to close a cycle through the queued edge: the loop guard
+# reads the queued-but-unsettled edges ADDITIVELY on top of the settled tree, following a
+# slot's settled parent AND its queued parent, so it refuses a loop that closes anywhere
+# along the chain -- not only on the one slot its own append fences.
+
+
+def _pending_adopt(child: str, parent: str) -> None:
+    """Stand in for an ADOPTION whose append is queued but has NOT settled.
+
+    Registers the target fence and the queued edge exactly as the production path does
+    (``_tree_append_waiter(child)`` plus ``_note_pending_edge``), with the future
+    deliberately never resolved -- the append is handed to the writer and still in
+    flight. The edge is NOT folded into the settled tree, which is the window the hazard
+    lives in. The fixture clears the registry between tests.
+    """
+    loop = asyncio.get_event_loop()
+    future: "asyncio.Future[bool]" = loop.create_future()
+    sc._tree_pending_slots[child] = future
+    sc._note_pending_edge(child, parent, future)
+
+
+def test_a_second_adopt_cannot_close_a_cycle_through_a_queued_edge(tmp_path, monkeypatch):
+    """Two overlapping adoptions must not persist a cycle.
+
+    ``chat-t`` is being adopted under ``chat-a`` (edge t->a), handed to the writer and
+    not yet settled. A second adoption of ``chat-a`` under ``chat-t`` (edge a->t) decided
+    in that window would close the cycle t->a->t: the settled fold has neither edge, so a
+    settled-only walk does not see that ``chat-t`` is about to be ``chat-a``'s parent. The
+    loop guard follows the queued t->a edge and refuses it.
+    """
+    calls = _emitted(monkeypatch)
+    state = _make_state(tmp_path)
+    _live(state, _slot(state, "chat-a"), "sid-a")
+    t = _live(state, _slot(state, "chat-t"), "sid-t")
+    proj = stp.projection()
+    proj.apply(OpenedRecord(sid="sid-a", slot="chat-a", created_at=1))
+    proj.apply(OpenedRecord(sid="sid-t", slot="chat-t", created_at=2))
+
+    # chat-t is being adopted under chat-a: edge t->a queued, not settled. chat-a (the
+    # target of the reverse adoption) is not the fenced slot, so the call reaches the
+    # loop guard rather than the fence.
+    _pending_adopt("chat-t", "chat-a")
+
+    with pytest.raises(sc.SessionControlError) as excinfo:
+        _run(sc.adopt_target(state, caller_session_key=_key(t), target="chat-a"))
+    assert excinfo.value.code == "would_cycle"
+    # Nothing was handed to the writer: the cycle-closing edge was never queued.
+    assert calls == []
+
+
+def test_a_longer_cycle_through_a_queued_edge_is_refused_with_no_fence_in_the_way(
+    tmp_path, monkeypatch
+):
+    """The overlay alone refuses a loop whose closing adoption fences no endpoint.
+
+    Settled ``chat-a -> chat-x`` and ``chat-y -> chat-t``; ``chat-t -> chat-a`` queued,
+    not settled. Adopting ``chat-x`` under ``chat-y`` (edge x->y) would close
+    x->y->t->a->x. Only ``chat-t`` is fenced by the pending append, and neither endpoint
+    of this adoption is ``chat-t``, so no fence catches the call -- the loop guard, reading
+    the settled parents AND the queued t->a edge, is the only thing that can refuse it, and
+    it must.
+    """
+    calls = _emitted(monkeypatch)
+    state = _make_state(tmp_path)
+    _live(state, _slot(state, "chat-a"), "sid-a")
+    _live(state, _slot(state, "chat-x"), "sid-x")
+    _live(state, _slot(state, "chat-y"), "sid-y")
+    _live(state, _slot(state, "chat-t"), "sid-t")
+    _hold(state, "chat-a", "chat-x", sid="sid-a")
+    _hold(state, "chat-y", "chat-t", sid="sid-y")
+
+    _pending_adopt("chat-t", "chat-a")
+
+    x = state.get_or_create_slot("chat-x")
+    with pytest.raises(sc.SessionControlError) as excinfo:
+        _run(
+            sc.adopt_target(state, caller_session_key=_key(_slot(state, "chat-y")), target="chat-x")
+        )
+    assert excinfo.value.code == "would_cycle"
+    assert calls == []
+    assert x is not None
+
+
+def test_a_queued_edge_does_not_hide_a_slots_settled_ancestry(tmp_path, monkeypatch):
+    """A pending edge is ADDED to a slot's settled parent, never substituted for it.
+
+    Settled ``chat-z -> chat-x``, ``chat-x -> chat-b``, ``chat-b -> chat-y``; a slow
+    ``chat-x -> chat-a`` adoption is queued. Adopting ``chat-y`` under ``chat-z`` (edge
+    y->z) would close y->z->x->b->y, which stays durable if the queued chat-x append then
+    fails after its retries while this one lands. Reading the queued x->a edge INSTEAD of
+    the settled x->b would hide chat-x's real ancestry and admit the adoption; reading it
+    in ADDITION keeps x->b in view, so the loop is seen and refused.
+    """
+    calls = _emitted(monkeypatch)
+    state = _make_state(tmp_path)
+    for name, sid in (
+        ("chat-z", "sid-z"),
+        ("chat-x", "sid-x"),
+        ("chat-b", "sid-b"),
+        ("chat-y", "sid-y"),
+        ("chat-a", "sid-a"),
+    ):
+        _live(state, _slot(state, name), sid)
+    _hold(state, "chat-z", "chat-x", sid="sid-z")
+    _hold(state, "chat-x", "chat-b", sid="sid-x")
+    _hold(state, "chat-b", "chat-y", sid="sid-b")
+
+    # chat-x is being adopted under chat-a: edge x->a queued, not settled. chat-x stays
+    # fenced, but neither endpoint of the adoption below is chat-x.
+    _pending_adopt("chat-x", "chat-a")
+
+    with pytest.raises(sc.SessionControlError) as excinfo:
+        _run(
+            sc.adopt_target(state, caller_session_key=_key(_slot(state, "chat-z")), target="chat-y")
+        )
+    assert excinfo.value.code == "would_cycle"
+    assert calls == []
+
+
+def test_a_release_is_refused_while_the_target_has_a_pending_append(tmp_path, monkeypatch):
+    """A release decided against a slot with a queued reparent is refused.
+
+    ``chat-c`` is being adopted under ``chat-p`` (edge c->p), queued and not settled.
+    A release of ``chat-c`` from its CURRENT parent ``chat-old`` decided in that window
+    reads a tree the writer is about to replace: the queued adoption moves ``chat-c``'s
+    parent, and committing a release under the old parent races it. ``chat-c`` is the
+    fenced slot, so the release is refused rather than decided against a stale tree.
+    """
+    calls = _emitted(monkeypatch)
+    state = _make_state(tmp_path)
+    old = _live(state, _slot(state, "chat-old"), "sid-old")
+    _live(state, _slot(state, "chat-c"), "sid-c")
+    _live(state, _slot(state, "chat-p"), "sid-p")
+    _hold(state, "chat-c", "chat-old", sid="sid-c")
+
+    # chat-c is being adopted under chat-p: edge c->p queued, not settled.
+    _pending_adopt("chat-c", "chat-p")
+
+    with pytest.raises(sc.SessionControlError) as excinfo:
+        _run(sc.release_target(state, caller_session_key=_key(old), target="chat-c"))
+    assert excinfo.value.code == "tree_write_pending"
+    assert calls == []
+
+
+def test_a_manager_can_adopt_a_second_child_while_the_first_is_in_flight(tmp_path, monkeypatch):
+    """Gaining a child does not fence a parent: parallel sibling adoptions are allowed.
+
+    ``chat-c1`` is being adopted under ``chat-mgr`` (edge c1->mgr), queued and not
+    settled. ``chat-mgr`` adopting a second child ``chat-c2`` forms no cycle -- a parent's
+    ancestry does not change by gaining a child -- so it must NOT be refused. This is the
+    case a new-parent fence would wrongly block.
+    """
+    calls = _emitted(monkeypatch)
+    state = _make_state(tmp_path)
+    mgr = _live(state, _slot(state, "chat-mgr"), "sid-mgr")
+    _live(state, _slot(state, "chat-c1"), "sid-c1")
+    _live(state, _slot(state, "chat-c2"), "sid-c2")
+    proj = stp.projection()
+    for slot, sid, created in (
+        ("chat-mgr", "sid-mgr", 1),
+        ("chat-c1", "sid-c1", 2),
+        ("chat-c2", "sid-c2", 3),
+    ):
+        proj.apply(OpenedRecord(sid=sid, slot=slot, created_at=created))
+
+    # chat-c1 under chat-mgr is in flight; chat-mgr is NOT fenced by it.
+    _pending_adopt("chat-c1", "chat-mgr")
+
+    result = _run(sc.adopt_target(state, caller_session_key=_key(mgr), target="chat-c2"))
+    assert result == {"target": "chat-c2", "parent": "chat-mgr", "previous_parent": ""}
+    assert [c["op"] for c in calls] == ["adopt"]

@@ -145,6 +145,9 @@ class TestEveryRejectOnTheseSurfacesIsSteered:
     MODULES = {
         "cli_chat.py": 2,
         "dashboard/handlers/hooks.py": 2,
+        "dashboard/handlers/hooks_scripts.py": 0,
+        "dashboard/handlers/hooks_webhook_intake.py": 0,
+        "dashboard/handlers/hooks_webhooks.py": 0,
         "apps/builtins/code_review_sage/sage_lib/review_pool.py": 1,
         "messaging/auto_title.py": 1,
     }
@@ -183,8 +186,12 @@ class TestEveryRejectOnTheseSurfacesIsSteered:
                 # The person said no: kiro-cli's wording is the truth, so this
                 # one stays bare -- "NOT a user action" would be a lie here.
                 assert not _steered(stmts, i)
-                audit = ast.unparse(stmts[i - 1])
-                assert "_USER_DENY_CODE" in audit, audit
+                # The only thing allowed between the audit and the reject is the
+                # person's OWN `o` reply -- their words, not a host notice.
+                prev = ast.unparse(stmts[i - 1])
+                assert "_steer_user_reply" in prev and _STEER not in prev, prev
+                audit = ast.unparse(stmts[i - 2])
+                assert "_USER_DENY_CODE" in audit and "_USER_REPLY_CODE" in audit, audit
 
     def test_every_cli_host_deny_names_a_cause_and_a_reason(self):
         tree = _tree("cli_chat.py")
@@ -305,15 +312,15 @@ def _answer(provider, *, hooks, interactive=True, allowed=None, monkeypatch=None
     """Answer one request through the real ``_answer_permission``.
 
     *allowed* stands in for the person's keystroke (the prompt itself is
-    pinned in ``test_cli.py``); None leaves the prompt unreached.
+    pinned in ``test_cli_chat_permission.py``); None leaves the prompt unreached.
     """
     if allowed is not None:
         monkeypatch.setattr(cli_chat, "_can_prompt", lambda _interactive: True)
 
         async def _prompt(_event):
-            return allowed
+            return cli_chat._PromptAnswer(allowed=allowed)
 
-        monkeypatch.setattr(cli_chat, "_prompt_allows", _prompt)
+        monkeypatch.setattr(cli_chat, "_prompt_answer", _prompt)
     gate = cli_chat._ToolGate(hooks=hooks, agent="cli-tester")
 
     async def _answered() -> None:

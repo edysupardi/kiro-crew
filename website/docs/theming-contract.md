@@ -44,7 +44,7 @@ streaming glow. So are the shipped gradient mechanisms — the appstore gradient
 art in `components/appstore/gradient.ts` (which reads as content, not chrome)
 and the session `'gradient'` color mode. The UX review lane
 (`.github/workflows/ux-review.yml` and its fork variant) applies this rule.
-Theme blocks in `index.css` also set a few non-color properties that are
+Theme blocks in `src/styles/design-tokens.css` and `src/styles/theme-palettes.css` also set a few non-color properties that are
 deliberately NOT on the allowlist: the font tokens (`--font-body`, `--mono`)
 and radii are injected as fixed defaults by `buildCustomThemeCss` (fonts are a
 pack-level L1 surface, not per-color-mode data), and the `--search-highlight*`
@@ -53,7 +53,7 @@ trio is an internal find-in-page surface not exposed to theme packs.
 **`buildCustomThemeCss` also fills the allowlisted colors a pack OMITS.** Fonts
 and radii are not the only thing it emits. Because `variables.json` requires only
 `--bg`, `--text` and `--accent`, a valid pack can leave ~50 tokens unset, and an
-unset token inherits from the bare `:root` in `index.css` — which carries the DARK
+unset token inherits from the bare `:root` in `src/styles/design-tokens.css` — which carries the DARK
 palette and has no light counterpart. A pack with a light `--bg` would therefore
 paint dark-mode surfaces under its own light palette. So the builder derives the
 gap from the pack's own palette: surfaces and borders as small steps from `--bg`
@@ -72,7 +72,7 @@ paints nothing visible there — it "works" in every other theme and ships invis
 in that one, with no gate failing. The rule for a new component: a `bg-card` box on
 `--bg` gets a `border-border`, a `ring-1 ring-border`, or a `shadow-*`, the way the
 settings cards already do. The one surface that deliberately stays borderless (the
-user bubble) is handled by a kiro-light-scoped hook in `index.css`, and
+user bubble) is handled by a kiro-light-scoped hook in `src/styles/chat-transcript.css`, and
 `src/test/kiroLightShellHooks.test.ts` pins that list; a new borderless card is a
 second hook there, not an unmarked exception. A Liquid Glass pane (`components/Glass.tsx`,
 below) is not one: the top bar's search trigger, readout capsule and Request a Feature
@@ -83,7 +83,7 @@ other side, so a code or output block that relies on the well being darker than 
 card gets the same `border-border` — and a `hover:bg-card` on a row that sits on
 the page is not a hover at all in this theme; hover states use `bg-bg-hover`.
 
-**Polarity-fixed variables are not roles.** A few `index.css` variables are read
+**Polarity-fixed variables are not roles.** A few `src/styles/liquid-glass.css` variables are read
 from `data-mode` (the polarity `useTheme` paints), not from the theme, and a pack
 cannot override them: `--glass-tint`, `--glass-band` (and its plain base
 `--glass-band-plain`),
@@ -147,7 +147,7 @@ two parsers differ by design (install-time is a denylist, runtime is a positive
 allowlist), which is exactly why the corpus pins both verdicts.
 
 `src/test/PhasedViewTheme.test.tsx` guards the other drift direction: it parses
-`index.css` for every custom property any theme block defines, and asserts a view
+`index.css` and its `src/styles/` partials for every custom property any theme block defines, and asserts a view
 references no token that does not exist. A `var(--nope, #16213e)` fallback would
 otherwise always win and silently ignore the active theme.
 
@@ -216,7 +216,7 @@ cannot shrink.
 | Tier | Surface |
 |---|---|
 | **L0 Color** | the 56 CSS vars (dark + light) |
-| **L1 Brand** | logo, favicon, wordmark, botName, fonts, scoped `overrides.css` |
+| **L1 Brand** | logo, favicon, welcome image, wordmark, botName, fonts, scoped `overrides.css` |
 | **L2 Experience** | sandboxed overlays, topbar, audio, persona |
 
 Out of contract: app structure/routing, functional-control behavior, security
@@ -249,10 +249,14 @@ packaged asset names:
 ```text
 branding/logo.svg       # left command-palette mark
 branding/favicon.svg    # browser-tab icon
+branding/welcome.svg    # brand mark on a new chat's welcome screen
 branding/wordmark.svg   # reserved brand artwork for supporting surfaces
 ```
 
-`logo` accepts `.svg` or `.png`; `favicon` accepts `.ico`, `.png`, or `.svg`.
+`logo` accepts `.svg` or `.png`; `favicon` accepts `.ico`, `.png`, or `.svg`;
+`welcome` accepts `.svg`, `.png`, `.webp`, or `.gif` (256 KB), and an animated
+WebP/GIF/SVG plays in place. The welcome screen shows `welcome`, else `logo`,
+else the stock ghost, in the 48px hero slot.
 The backend serves only validated files from the installed pack, and the label is
 trimmed to 48 printable characters. When an asset or label is absent, the shell
 falls back independently to its configured Kiro Crew branding. Compiled edition
@@ -320,10 +324,10 @@ rule aimed at anything else never reaches the document.
 
 | Class | Where it is applied |
 |---|---|
-| `topbar` | the header shell (`App.tsx`) |
+| `topbar` | the header shell (`shell/topbar/shellHeader.tsx`) |
 | `sidebar` | the conversation-list cards: the chat session list (`ChatSidebar.tsx`) and the Crew Members roster (`members/MembersPageRoster.tsx`), both via `LIST_SHELL_CLS` in `components/listShell.ts` |
 | `chat-container` | the chat scroll region (`pages/chat/TranscriptScrollShell.tsx`) |
-| `message-bubble` | a user or assistant turn (`chat/UserMessage.tsx`, `chat/AssistantMessage.tsx`) |
+| `message-bubble` | a user or assistant turn (`chat/UserMessage.tsx`, `chat/AssistantMessage.tsx`), and the pinned card that stands in for a user turn (`chat/PinnedPrompt.tsx`) |
 | `input-area` | the composer (`ChatInput.tsx`) |
 | `code-block` | a rendered fenced block (`CodeBlock.tsx`) |
 
@@ -526,8 +530,9 @@ npm run lint:theme-colors          # report raw literals in src/ (exit 0)
 node scripts/check-theme-colors.mjs --strict   # exit 1 if any (future ratchet)
 ```
 
-The checker excludes the five files where a raw literal is legitimate
-(`src/hooks/useTheme.tsx`, `src/components/themeEditor.tsx`, `src/index.css`,
+The checker excludes the files where a raw literal is legitimate
+(`src/hooks/useTheme.tsx`, `src/components/themeEditor.tsx`, `src/index.css` and
+the partials it imports from `src/styles/`,
 `src/lib/cssSanitize.ts`, `src/utils/sessionColors.ts`), plus tests, generated
 code, and type declarations. It is **advisory** (the existing tree has legitimate
 literals in themes, icons and palettes) and is **not** wired into the blocking CI

@@ -29,6 +29,7 @@ from kiro_crew.mcp_gateway.pool import (
     PoolKey,
     _DrainingBackend,
 )
+from kiro_crew.testing.wait import async_wait_until, await_until
 
 logger = logging.getLogger(__name__)
 
@@ -165,13 +166,15 @@ async def test_deadline_expiry_force_kills_draining() -> None:
     # Give time for deadline to pass
     await asyncio.sleep(0.01)
 
-    # Patch _broadcast_backend_gone to verify it's called
     backend._broadcast_backend_gone = AsyncMock()
 
     reaped = await pool.reap_draining()
     assert len(reaped) == 1
     assert reaped[0] is backend
     assert pool.draining_count == 0
+    backend._broadcast_backend_gone.assert_awaited_once_with(
+        "draining deadline expired (credential-rotation cutover)"
+    )
     # With refcount > 0, broadcast_backend_gone should have been called
     backend._broadcast_backend_gone.assert_called_once_with(
         "draining deadline expired (credential-rotation cutover)"
@@ -511,7 +514,7 @@ def _atomic_cred_write(cred: Path, data: bytes) -> None:
     os.replace(tmp, cred)
 
 
-def _resilient_cred_unlink(cred: Path) -> None:
+async def _resilient_cred_unlink(cred: Path) -> None:
     """Delete the credential, tolerating the transient Windows sharing violation.
 
     On Windows a file cannot be deleted while another handle holds it open
@@ -524,15 +527,16 @@ def _resilient_cred_unlink(cred: Path) -> None:
     EXISTS during the retries, so the watcher keeps reading the unchanged
     baseline and does not fire until the delete finally lands.
     """
-    deadline = time.monotonic() + 2.0
-    while True:
-        try:
-            cred.unlink()
-            return
-        except PermissionError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.01)
+
+    def _unlinked() -> bool:
+        cred.unlink()
+        return True
+
+    await async_wait_until(
+        _unlinked,
+        ignoring=(PermissionError,),
+        describe=lambda: f"{cred.name} is still held open by a digest read",
+    )
 
 
 class _ProbeBarrier:
@@ -716,7 +720,7 @@ async def test_credwatch_fires_on_content_change(tmp_path: Path) -> None:
     cred.write_bytes(b"secret-v2")
     st = cred.stat()
     os.utime(cred, (st.st_atime, st.st_mtime + 10.0))  # defeat coarse mtime gate
-    await asyncio.wait_for(fired.wait(), timeout=2.0)
+    await await_until(fired, what="the rotation firing")
     stop.set()
     await task
 
@@ -757,7 +761,7 @@ async def test_credwatch_fires_on_content_change_with_unchanged_mtime(tmp_path: 
     cred.write_bytes(b"secret-v2")
     os.utime(cred, (baseline_mtime, baseline_mtime))
 
-    await asyncio.wait_for(fired.wait(), timeout=2.0)
+    await await_until(fired, what="the rotation firing")
     stop.set()
     await task
 
@@ -846,7 +850,7 @@ async def test_credwatch_present_then_deleted_fires_revocation(tmp_path: Path) -
         )
     )
     await barrier.wait_for(1)  # present baseline captured
-    _resilient_cred_unlink(cred)  # revocation
+    await _resilient_cred_unlink(cred)  # revocation
     await barrier.wait_for(barrier.count + 3)  # 3 absent polls: detect + confirm no re-fire
     stop.set()
     await task
@@ -879,7 +883,7 @@ async def test_credwatch_delete_then_reappear_fires_twice(tmp_path: Path) -> Non
         )
     )
     await barrier.wait_for(1)  # present baseline
-    _resilient_cred_unlink(cred)  # -> absent (fire #1: revocation)
+    await _resilient_cred_unlink(cred)  # -> absent (fire #1: revocation)
     await barrier.wait_for(barrier.count + 2)  # 2 polls: detect deletion + stabilize
     _atomic_cred_write(cred, b"secret-v2")  # -> present (fire #2: new credential)
     await barrier.wait_for(barrier.count + 2)  # 2 polls: detect reappearance + confirm
@@ -989,7 +993,7 @@ async def test_credwatch_resilient_unlink_survives_sharing_violation(
     )
     await barrier.wait_for(1)  # present baseline
     with unlink_sharing_violation(match="cred", times=1):
-        _resilient_cred_unlink(cred)  # first delete faults, retry lands
+        await _resilient_cred_unlink(cred)  # first delete faults, retry lands
     assert not cred.exists()
     await barrier.wait_for(barrier.count + 3)  # 3 absent polls: detect + confirm no re-fire
     stop.set()

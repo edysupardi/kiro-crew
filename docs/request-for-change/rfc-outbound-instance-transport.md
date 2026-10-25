@@ -102,7 +102,7 @@ This RFC is small because it changes one layer and leaves four contracts alone.
 
 - **`proxy_request` stays the only way to talk to a peer.** Its callers
   (`api_instances_proxy` and `read_peer_slots`, both in
-  `src/kiro_crew/dashboard/handlers_instances.py`) are not touched.
+  `src/kiro_crew/dashboard/handlers_instances_peer.py`) are not touched.
 - **The peer's own token auth stays the authorisation boundary.** An outbound
   transport does not introduce a second way to be authorised to a dashboard; it
   changes only how the token is obtained.
@@ -325,7 +325,7 @@ nothing else.
 §3.1 extracts the seam the *gateway* branches on. The dashboard branches on the
 same string independently, and it does so with non-exhaustive conditionals whose
 final arm is `ssh`. `connectionTypeLabel` and `connectionTypeHint`
-(`website/src/pages/settings/RemoteCrewPanel.tsx`) end in the SSH label and the
+(`website/src/pages/settings/RemoteCrewPanelCrewRow.tsx`) end in the SSH label and the
 SSH hint; the card's target line reads `ssm_target` for an SSM-family method and
 `ssh_host` otherwise; and the diagnostics handoff passes a `transport` of `ssm`
 or `ssh` into `reportInstanceFailure`
@@ -454,7 +454,7 @@ writable through the same surface it constrains is not a control. The two files
 are already in different protection classes, and the asymmetry is what makes the
 placement work rather than a preference:
 `~/.kiro/crew/config.json` is listed in the write-protected home paths
-(`src/kiro_crew/security/paths.py`), so the agent's file-edit tool cannot modify
+(`src/kiro_crew/security/paths_lists.py`), so the agent's file-edit tool cannot modify
 it; `~/.kiro/crew/instances.json`, which holds the records and therefore
 `hub_url`, appears in no security path at all and is agent-writable by design —
 registering a crew is ordinary agent work. Putting `allowed_methods` and the hub
@@ -538,7 +538,7 @@ operator is never told a control covers nothing when it may well be active.
 
 The effective transport posture is that shape of fact, so it is registered as a
 control rather than written as prose: an entry in `_CONTROLS`
-(`src/kiro_crew/security_posture.py`) whose items are the methods
+(`src/kiro_crew/security_posture_controls.py`) whose items are the methods
 `allowed_methods` currently permits. `SecurityPanel` already states the dividing
 line this follows — every control whose posture is a count belongs in the
 registry, and the panel itself carries only qualitative descriptions.

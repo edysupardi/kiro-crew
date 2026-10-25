@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         MANAGED_BY_COMMAND,
         Any,
         AutoUpdateEffect,
+        Callable,
         GatewayOrchestrator,
         _remediation_command,
         _update_info,
@@ -48,7 +49,10 @@ if TYPE_CHECKING:
         logger,
         platform_compat,
         record_auto_update_effect,
+        redact_credentials,
+        redact_exfiltration_urls,
         redact_log_via_context,
+        resolve_restart_launcher,
         run_pre_exec_stops,
         shutdown_event,
         subprocess_executor,
@@ -546,7 +550,7 @@ def _publish_provider_update_state(self: GatewayOrchestrator, result: object) ->
     """Mirror a provider's verdict into the dashboard's authoritative status.
 
     The SSE snapshot renders the update badge from
-    ``dashboard/handlers/updates.py::_update_info["update_available"]``, which
+    ``dashboard/handlers/updates_verdict.py::_update_info["update_available"]``, which
     only the LEGACY check writes. A provider carries its own
     :class:`UpdateCheckResult`, so notifying without this leaves the badge
     reading a stale (usually null) value and the operator never sees that a
@@ -580,9 +584,38 @@ async def _check_for_updates_via_provider(self: GatewayOrchestrator, provider: o
     # ModuleNotFoundError and leave a closed-session gateway un-restarted
     # (found in review). The module stays off the boot path either way —
     # this method runs from the update timer, not from gateway start.
+    from kiro_crew.platform.wheel_apply import snapshot_memory_before_update, snapshot_refusal
     from kiro_crew.platform.wheel_engine import respawn_executable
 
     assert isinstance(provider, UpdateProvider)
+
+    async def _snapshot_memory_or_skip(result: Any) -> bool:
+        """A fresh copy of every memory store before ``provider.apply()``; False skips it.
+
+        The same copy-or-refuse step `kirocrew update` and the git auto-update take.
+        Nobody is watching this path, so a copy that did not land skips the update and
+        says so; it never applies blind and never exits the gateway. Retried on the
+        next check.
+        """
+        copied, failure = await asyncio.to_thread(snapshot_memory_before_update)
+        if not failure:
+            logger.info("Auto-update: pre-update memory snapshot, %d store(s) copied", copied)
+            return True
+        failure, _ = redact_exfiltration_urls(failure)
+        failure, _ = redact_credentials(failure)
+        failure = failure[:500]
+        logger.warning("Auto-update skipped: pre-update memory snapshot failed: %s", failure)
+        message = snapshot_refusal(failure)
+        self._notice_wheel_update_once(
+            f"snapshot_failed:provider:{result.remote_version or ''}",
+            "Kiro Crew update skipped",
+            message,
+        )
+        self._publish_provider_update_state(result)
+        if self.dashboard_state:
+            self.dashboard_state.push_update_progress("failed", message)
+            self.dashboard_state.push_refresh("update_available")
+        return False
 
     # Say who owns updates on every path, "already latest" included, so the
     # dashboard need not run its own check to learn it.
@@ -645,6 +678,8 @@ async def _check_for_updates_via_provider(self: GatewayOrchestrator, provider: o
             self._publish_provider_update_state(result)
             return
         try:
+            if not await _snapshot_memory_or_skip(result):
+                return
             logger.warning(
                 "Version compliance: running %s is below the policy minimum %s — "
                 "applying mandatory update via provider (overrides auto_update)",
@@ -677,6 +712,8 @@ async def _check_for_updates_via_provider(self: GatewayOrchestrator, provider: o
                 self._publish_provider_update_state(result)
                 return
             try:
+                if not await _snapshot_memory_or_skip(result):
+                    return
                 logger.info("Auto-update enabled — applying update via provider")
                 if self.dashboard_state:
                     self.dashboard_state.push_update_progress("pulling", "Downloading update…")
@@ -1174,7 +1211,7 @@ async def _check_for_updates_legacy(self: GatewayOrchestrator) -> None:
         elif info.get("error_code"):
             # A check that could not run is NOT "already on latest" — saying so
             # is the exact false reassurance the honesty pair in
-            # `handlers/updates.py` exists to prevent.
+            # `handlers/updates_check.py` exists to prevent.
             logger.info("Update check did not complete (%s)", info.get("error_code"))
         elif info.get("check_status") == CHECK_SUCCEEDED:
             print("👻 Already on latest version")
@@ -1189,3 +1226,81 @@ async def _check_for_updates_legacy(self: GatewayOrchestrator) -> None:
             )
     except Exception:
         logger.debug("Update check failed", exc_info=True)
+
+
+async def _restart_after_update_body(self: GatewayOrchestrator, respawn: Callable[[], str]) -> None:
+    """Save state and restart only after callback/refusal work is durable.
+
+    ``respawn`` is loaded before apply can replace the environment. If the
+    pre-fence drain cannot finish, retain it and retry the restart in five
+    minutes with admission reopened; never force through accepted work.
+
+    The interpreter is established BEFORE any of that. When it is missing, this
+    returns without saving, fencing or draining, because an exec that cannot
+    succeed must not be reached after every session has been closed.
+
+    Owns a missing bundle while it runs (``update_ownership``), so the
+    stale-asset watchdog does not race its teardown. A deferral while
+    callback work drains is owned for a while too, from the first deferral
+    on (a retry does not extend it), so the watchdog does not force the
+    restart it just put off.
+    """
+    logger.info("Update applied, preparing a callback-safe gateway restart")
+    self._pending_update_respawn = respawn
+    launcher = await asyncio.to_thread(resolve_restart_launcher)
+    exe = await asyncio.to_thread(respawn) if launcher is None else None
+    # Off-loop for the same reason as the two resolvers above: both predicates
+    # are metadata syscalls against a pathname this process does not control,
+    # and an interpreter on a stalled network mount would freeze every gateway
+    # task -- including the heartbeat -- rather than one restart.
+    usable = launcher is not None
+    if not usable and exe:
+        usable = await asyncio.to_thread(platform_compat.execv_target_available, exe)
+    if not usable:
+        # No usable interpreter: the apply pruned the tree this process was
+        # running from. RETURN BEFORE saving, fencing or draining. Reaching
+        # the exec with no interpreter closes every session first and then
+        # raises ENOENT. Admission itself does come back --
+        # ``_finish_auto_update_apply`` resumes it -- but the sessions
+        # ``close_all()`` tore down do not, and ``_pending_update_respawn``
+        # is cleared just before the exec, so nothing retries: what survives
+        # is a gateway with no sessions, running a different version from the
+        # install on disk. Deferring here keeps the sessions instead, and
+        # ``_pending_update_respawn`` stays set so
+        # ``_retry_pending_update_restart`` finishes the update once an
+        # operator repairs the install.
+        # Not a deferral the watchdog waits out: with the tree pruned the
+        # bundle is gone too, and its exit lets the supervisor relaunch
+        # through its own command, which a retry here cannot do. So one an
+        # earlier drain armed ends here too.
+        update_ownership.clear_restart_deferral()
+        self._update_apply_deferred = True
+        logger.error(
+            "Update applied but restart deferred: no usable interpreter. "
+            "Restore the interpreter and this retries itself -- the retry "
+            "re-resolves it, so no configuration change is needed."
+        )
+        if self.dashboard_state:
+            self.dashboard_state.push_update_progress(
+                "restarting",
+                "Update applied — restart needs a usable interpreter",
+            )
+        return
+    # ONE restart sequence per process: the dashboard's ``_restart_gateway``
+    # claims the same flag, and two sequences must never both drain sessions
+    # and race separate successors. A restart already under way owns the
+    # exec; this one stays pending and retries if that one is refused.
+    state = self.dashboard_state
+    if state is not None and getattr(state, "_gateway_restart_in_progress", False) is True:
+        self._update_apply_deferred = True
+        logger.info("A gateway restart is already in progress; the update restart waits")
+        return
+    if state is not None:
+        state._gateway_restart_in_progress = True
+    try:
+        # Through the class, not ``self``: the restart is also driven with a
+        # stand-in ``self`` that carries only the state it reads.
+        await GatewayOrchestrator._restart_after_update_claimed(self, launcher, exe)
+    finally:
+        if state is not None:
+            state._gateway_restart_in_progress = False

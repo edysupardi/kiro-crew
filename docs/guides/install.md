@@ -553,6 +553,8 @@ Linux, `.\make.ps1 <target>` on Windows.
 Override the Python interpreter with `make PY=python3.12 build`, or
 `.\make.ps1 build -Py C:\path\to\python.exe`.
 
+`make wheel`, `make backend-bin` and `make desktop` take `EDITION=oss` or `EDITION=enterprise`, stamped into the built package's `kiro_crew/edition.py`. Only `EDITION=` on the `make` command line counts; an exported shell `EDITION` is ignored, even under `make -e`. Without it, the value comes from the `KIROCREW_BUILD_EDITION` environment variable, and then defaults to `oss`. Both set to different values, or any other value (wildcards such as `%` included), fails the build before it starts. On Windows, set `KIROCREW_BUILD_EDITION` before `.\make.ps1`. See [platform-context](../system-specs/modules/platform-context.md#build-time-edition-constant).
+
 Both desktop targets run `packaging/build-desktop.sh` on every platform,
 including Windows, where `make.ps1` invokes it through the Git for Windows bash:
 the script already normalizes MSYS `uname` output and has a Windows PBS branch,
@@ -563,17 +565,32 @@ app" interstitial.
 
 ## First run
 
-After a source, one-line, wheel or Docker install, install Kiro CLI from
+After any install, the desktop app included, install Kiro CLI from
 <https://kiro.dev/cli/> and sign in for the default agent:
 
 ```bash
 kiro-cli login
 ```
 
-The desktop app bundles its own kiro-cli by default (`BUNDLE_KIRO_CLI=1` at
-build time). That copy is not on your shell `PATH`, so the **Set up Kiro** page
-serves the login command with the bundled binary's absolute path; run that
-command instead of a bare `kiro-cli login`.
+The desktop app does not carry its own kiro-cli: it detects the one you
+installed, and the **Set up Kiro** page shows the install and sign-in commands
+until it finds one. (A build made with `BUNDLE_KIRO_CLI=1` stages a copy inside
+the app; that copy is not on your shell `PATH`, so the page then serves the
+login command with the bundled binary's absolute path.) If you updated from a
+version that included kiro-cli and never installed your own, install it from
+<https://kiro.dev/cli/>; your sign-in carries over, since both copies read the
+same account store.
+
+The built-in KAS engine is an alternative that needs no Kiro CLI. It is in
+shadow testing: the switch is off by default on every platform and nothing turns
+it on for you. From a source install, `bash install.sh --kas` downloads the
+engine version this release pins; after any other install, `kirocrew kas
+install` does the same. The desktop app ships that engine inside the app
+(`BUNDLE_KAS=1` at build time), so there is nothing to download. To try the
+route, turn on **Run KAS on Kiro Crew's own engine** under Settings → Developer →
+Feature Previews (or `kirocrew config set agent.kas_bundle true`) and restart; you
+then sign in from the **Kiro sign-in** card on Settings → Agent Harness → KAS, and
+`kiro-cli login` is not used.
 
 Then start Kiro Crew:
 
@@ -774,7 +791,9 @@ On Linux this writes `/etc/systemd/system/kirocrew.service` (sudo is prompted
 for the unit file and the `systemctl` calls; the gateway itself runs as your own
 user, never under sudo). When you are already root — a minimal container or
 `root` login — no `sudo` binary is required. On macOS it writes a launchd plist
-and needs no sudo.
+and needs no sudo. That plist is a per-user LaunchAgent, so on a Mac the gateway
+starts when you log in, not at boot; see
+[The gateway does not start after a reboot until someone logs in](macos-troubleshooting.md#the-gateway-does-not-start-after-a-reboot-until-someone-logs-in).
 
 The gateway runs untrusted agent tools, so it must run as a **non-root** user:
 the installer sets `User=` to the account behind `sudo` (`$SUDO_USER`, else

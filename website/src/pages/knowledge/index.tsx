@@ -4,6 +4,7 @@ import { Search, BookOpen, Network, FolderSync, HelpCircle, FileText, X, Copy, S
 import { Btn, SearchInput, Badge, EmptyState, ContentSkeleton } from '../../components/ui'
 import Clickable from '../../components/Clickable'
 import Modal from '../../components/Modal'
+import { useConfirm } from '../../components/ConfirmDialog'
 import SimpleSelect from '../../components/SimpleSelect'
 import { knowledgeApi } from './api'
 import { useCopy, ITEM_TYPES, STATUSES, DEFAULT_STATUS_FILTER, ONBOARDING, FALLBACK_SUPPORTED_FORMATS, formatSupportedFormats } from './helpers'
@@ -98,6 +99,7 @@ function EntityAutocomplete({ query, onSelect }: { query: string; onSelect: (nam
 
 function BulkActions({ selectedIds, items, onDone }: { selectedIds: Set<string>; items: KnowledgeItem[]; onDone: () => void }) {
   const queryClient = useQueryClient()
+  const { confirm, confirmDialog } = useConfirm()
 
   const bulkArchiveMutation = useMutation({
     mutationFn: async (status: string) => {
@@ -166,9 +168,10 @@ function BulkActions({ selectedIds, items, onDone }: { selectedIds: Set<string>;
 
   return (
     <div className="flex items-center gap-2 px-3 py-2 bg-accent/5 border border-accent/20 rounded-lg mb-3">
+      {confirmDialog}
       <span className="text-[13px] text-text-strong font-medium">{selectedIds.size} {i18nT('pages.knowledge.index.selected')}</span>
       <Btn disabled={pending} onClick={() => bulkArchiveMutation.mutate('archived')}>{i18nT('pages.knowledge.index.archive')}</Btn>
-      <Btn disabled={pending} onClick={() => { if (confirm(`Delete ${selectedIds.size} items permanently?`)) bulkDeleteMutation.mutate() }}>{i18nT('pages.knowledge.index.delete')}</Btn>
+      <Btn disabled={pending} onClick={async () => { if (await confirm({ title: i18nT('pages.knowledge.index.delete_items_permanently', { count: selectedIds.size }), confirmLabel: i18nT('pages.knowledge.index.delete') })) bulkDeleteMutation.mutate() }}>{i18nT('pages.knowledge.index.delete')}</Btn>
       <Btn onClick={copySelected}><Copy size={12} /> {copied ? i18nT('pages.knowledge.index.copied') : i18nT('pages.knowledge.index.copy_content')}</Btn>
       <button onClick={onDone} className="ml-auto text-[12px] text-muted hover:text-text bg-transparent border-none cursor-pointer">{i18nT('pages.knowledge.index.clear')}</button>
     </div>

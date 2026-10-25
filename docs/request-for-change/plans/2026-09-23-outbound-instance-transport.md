@@ -80,7 +80,7 @@ exist, is what stops phase 3 from shipping a record that renders as SSH.
       `website/src/utils/remoteCrew.ts`, keyed by method, carrying the badge
       label key, the hint key and which addressing field the card should print
 - [ ] Replace `connectionTypeLabel` and `connectionTypeHint`
-      (`website/src/pages/settings/RemoteCrewPanel.tsx`) with lookups through it,
+      (`website/src/pages/settings/RemoteCrewPanelCrewRow.tsx`) with lookups through it,
       so an unmapped method renders visibly unmapped instead of inheriting the
       SSH label and the SSH hint
 - [ ] Replace the card's `ssm_target`-or-`ssh_host` target expression with the
@@ -121,7 +121,7 @@ exist, is what stops phase 3 from shipping a record that renders as SSH.
       empty, with validation in the new `outbound` arm only
 - [ ] Extend `CONNECTION_METHODS` to include `"outbound"`, and add the addressing
       fields to the immutability set in
-      `src/kiro_crew/dashboard/handlers_instances.py`
+      `src/kiro_crew/dashboard/handlers_instances_gate.py`
 - [ ] Confirm a registry file written before this change loads unchanged
       (round-trip test on a fixture record with no new fields)
 - [ ] Implement the frame codec: `REGISTER`, `HEARTBEAT`, `OPEN`, `DATA`,
@@ -194,7 +194,7 @@ to refuse, so these are in the same PR (RFC §5).
 `kirocrew doctor` is not the surface a review reads. The dashboard already renders
 a row per security control, so the effective posture is registered as one.
 
-- [ ] Add a control to `_CONTROLS` (`src/kiro_crew/security_posture.py`) whose
+- [ ] Add a control to `_CONTROLS` (`src/kiro_crew/security_posture_controls.py`) whose
       items are the `connection_method` values `allowed_methods` currently
       permits, with the enforcing module as its `source`
 - [ ] Report `count` as unresolved rather than permissive when the effective

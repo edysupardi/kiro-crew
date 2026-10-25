@@ -408,6 +408,13 @@ the CI workflows they mirror. A silent fallback to those charters reintroduces
 exactly the drift the script prevents, so exit 40 requires a visible WARNING and a
 fix to the extractor rather than a quiet degradation.
 
+The workflows come from the base commit, but the extractor is whichever copy ran,
+usually the installed skill. When the base changes a workflow and the extractor in
+one commit, an install from before it fails parity although the base's own copy
+parses fine. So on a parity failure the script compares itself with the base
+commit's copy: when they differ it still exits 40, but names the base copy and the
+command that runs it. Neither the charters nor an extractor fix is the remedy then.
+
 The charter budgets are hand-copied from CI and that copy is what drifted before —
 the skill claimed ≤2 BLOCKING long after CI moved to 5.
 `test_charter_budgets_match_the_ci_workflows` now pins the wording to
@@ -438,16 +445,13 @@ unread. `needs-a-decision` puts the question where it will be answered and files
 nothing. `test/test_deferred_disposition_ratchet.py` enforces that every surface
 offering the first also offers the second.
 
-## Why every concern must be answered, including advisory ones
+## Why a BLOCK is never left unanswered
 
-`Design Review 🟡 CONCERNS` and `UX Review 🟡 CONCERNS` post their concern *and* pass
-the check. The readiness rollup will therefore never force an answer, and nothing
-else in the loop nags. To a human maintainer a silently ignored concern reads as
-"the author never looked at it", regardless of how green the checks are.
-
-Design Review owns the long-term-reversibility lens. It is advisory and reds only on
-a genuine `BLOCK`, but an irreversible choice it flags needs a written justification
-a reviewer can read — which is why it is fix-or-justify rather than a raw Medium.
+A lane BLOCK reds the check and holds readiness, so the loop sees it. The risk is
+the answer: a BLOCK that is neither fixed nor answered with a disposition reads to a
+maintainer as "the author never looked at it". Design Review owns the
+long-term-reversibility lens; an irreversible choice it blocks needs a fix or a
+written justification a reviewer can read.
 
 ## Why the disposition comment is scoped twice
 
@@ -626,17 +630,6 @@ both silent abandonment and duplicate poll drivers. Monitor cycles are not serve
 rounds, so a wall-clock bound must accompany the cycle budget. The execution
 procedure owns those budgets rather than a second copy here.
 
-## Why a pinned reviewer fleet hides a whole-design CONCERNS
-
-`pr_status.py` exits `20` on an unanswered CONCERNS only for a lane whose verdict it
-collected, and it collects a verdict only for a lane the run names: `verdicts[name]`
-is written inside `only is None or name in only`. The loop pins `--reviewers gpt,opus`
-so a lane that never posted cannot pass silently, which means Design, First Principles
-and UX are never collected and their CONCERNS never moves the exit code. The
-`Whole-design punchlines` block is printed every cycle on purpose and changes no exit
-code, so it is the place a CONCERNS for those lanes shows up; treat one there as the
-stop the exit code did not give.
-
 ## Why a hold heard after arming goes into the live loop
 
 The loop's message is re-injected verbatim every cycle, so it, not the chat, is what a
@@ -646,6 +639,29 @@ merge does not come back. Rewriting the live loop's message in place with
 `monitor_update(message=...)` on the turn the hold is heard puts the hold where every
 later cycle reads it.
 
+## Why the poll loop is gated, with `judge=False`
+
+A gated tick reads the whole pull request (`probes/gh_pr.py`): its state, head,
+mergeability, review decision, every check, and the newest comments and reviews by a
+digest of each whole body. A tick whose reading matches the last one starts no turn.
+Any change starts one turn, and only one: a pull-request reading never raises the
+kernel wake that buys a follow-up tick. `judge=False` keeps that rule exact, since no
+judge call can hold a change back or time out into a turn.
+
+What the reading cannot see waits for the quiet floor, a turn after 10 quiet ticks
+(about 50 minutes at 300 s): main moving in this PR's files without a conflict
+(`green_age.py` exit 30), a lane that never posts, and a finding the turn that
+carried it left unanswered. A lane edits its verdict comment in place, so an old one
+falls out of the reading, but the lane's check run finishes with the edit and wakes
+the loop. Comments from the loop's own account are left out, so a posted disposition
+does not wake it again.
+
+A merge or close ends a gated dashboard loop with the bell notice and no turn; only
+a Slack or Discord loop gets one last turn. So the Report goes out on the converged
+turn, and the `Merged` step runs only where that last turn exists. The decision is
+recorded in the `rfc-gated-pr-poll-loops` RFC
+([#22440](https://github.com/kirodotdev/KiroCrew/pull/22440)).
+
 ## How the profile resolves, and what its JSON carries
 
 Most-specific-wins: repo-root `.prepare-pr.toml` → Kiro Crew markers (auto-loads
@@ -654,3 +670,32 @@ has `setup[]`, `gates[]`, `reviewers[]` (each
 `{name, model, model_tier, contract, rubric}`), `rule_files[]`, `single_commit`,
 `base_branch`, and `readiness{status_context, defer_label}`.
 
+
+## Why a red on-demand macOS run counts as a concern
+
+`macOS Tests (on demand)` is not a required check, so a red one does not block
+readiness by itself. #12925 merged over its own red shard 2 and reddened that shard
+on every open PR, so SKILL.md's *Review-ready* treats a red run on the current head
+as a concern to fix or to show red on main.
+
+## Why `pr_status.py` and `push_guard.py` load their owners by path
+
+Both entry points are split by responsibility, so neither grows past the repository's
+2,000-line cap, and each stays the one path its callers run and its tests patch. A
+skill's scripts are synced out of the package, so each owner module is loaded from
+the script's own directory by path, never imported: nothing lands on `sys.path` or in
+`sys.modules`, and no bytecode is written.
+
+- `pr_status.py` re-exports every name its owners define: `pr_status_issue_links.py`
+  reads a body's issue references, and `pr_status_verdict.py` classifies the check rows
+  and decides readiness. Every name a test replaces, and every reader of one, stays in
+  `pr_status.py`.
+- `push_guard.py` rebinds every function its owners define onto its own globals through
+  a local twin of `kiro_crew._facade_compose.rebind`, which differs from it in one
+  statement, reading `__type_params__` with a default. Its owners hold functions only:
+  `push_guard_index.py` (the shared index), `push_guard_record.py` (the build record),
+  `push_guard_history.py` (the history checks), `push_guard_squash.py` (`--squash`) and
+  `push_guard_commit.py` (`--commit`, `--amend`).
+
+New work goes to the owner whose docstring names it, and a new responsibility gets an
+owner of its own. Copy the whole `scripts/` directory, never one file.

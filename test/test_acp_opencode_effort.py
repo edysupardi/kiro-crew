@@ -1,8 +1,8 @@
 """opencode takes reasoning effort through its per-model ``effort`` config option.
 
 ``test/fixtures/acp_frames/opencode/effort-live.jsonl`` is one live ``opencode acp``
-1.18.30 session against a local OpenAI-compatible stub: a reasoning model offered
-low, medium and high, two writes that read back, a refused level the model does not
+1.19.1 session against a local OpenAI-compatible stub: a reasoning model offered
+low, medium, high and default, two writes that read back, a refused level the model does not
 offer, and a switch to a model with no variants and back. Every test here reads the
 capture rather than a hand-written option, so the membership rests on the harness's
 own frames.
@@ -65,7 +65,7 @@ def test_opencode_is_a_member_of_both_effort_sets_under_the_default_id() -> None
 def test_the_capture_shows_the_option_following_the_model() -> None:
     """The premise: variants on the reasoning model, no select at all on the plain one."""
     frames = _frames()
-    levels = ["low", "medium", "high"]
+    levels = ["low", "medium", "high", "default"]
     assert _effort(_options(frames[1])) == ("low", levels)
     assert _effort(_options(frames[2])) == ("high", levels)
     assert _effort(_options(frames[3])) == ("low", levels)
@@ -85,37 +85,62 @@ def test_a_reasoning_model_offers_the_control(tmp_path) -> None:
     provider = _provider(tmp_path, _options(_frames()[1]))
 
     assert provider.supports_effort() is True
+    # The captured select offers ``default`` too; it means "no override", not a level.
     assert provider.get_valid_effort_levels() == ["low", "medium", "high"]
     assert provider.accepts_effort_level("high") is True
+    assert provider.accepts_effort_level("default") is False
     # Not offered by this model, so hidden rather than folded onto a neighbour.
     assert provider.accepts_effort_level("max") is False
     assert provider.accepts_effort_level("xhigh") is False
+
+
+def test_a_pre_1_19_select_without_default_keeps_its_levels(tmp_path) -> None:
+    """opencode 1.18.30 offered low, medium and high only; that list is unchanged."""
+    options = _options(_frames()[1])
+    for option in options:
+        if option["id"] == "effort":
+            option["options"] = [o for o in option["options"] if o["value"] != "default"]
+    provider = _provider(tmp_path, options)
+
+    assert provider.get_valid_effort_levels() == ["low", "medium", "high"]
+
+
+def test_the_shared_runtime_handle_drops_default_too() -> None:
+    """``AcpSessionHandle`` reads the same captured select and answers the same levels."""
+    from types import SimpleNamespace
+
+    from kiro_crew.acp.session_handle_model_selection import get_valid_effort_levels
+
+    handle = SimpleNamespace(
+        _runtime=SimpleNamespace(acp_backend=ACP_BACKEND_OPENCODE),
+        _config_options=_options(_frames()[1]),
+    )
+
+    assert get_valid_effort_levels(handle) == ["low", "medium", "high"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("level", "written"),
+    [
+        pytest.param("default", [], id="a_default_pick_is_never_written"),
+        pytest.param("high", [("effort", "high")], id="the_level_is_written_under_effort"),
+        pytest.param("max", [], id="a_level_the_model_does_not_offer_is_not_written"),
+    ],
+)
+async def test_the_effort_write(tmp_path, level, written) -> None:
+    provider = _provider(tmp_path, _options(_frames()[1]))
+    provider._client.set_config_option = AsyncMock()
+
+    await provider._set_effort_config_option(level)
+
+    assert [c.args for c in provider._client.set_config_option.await_args_list] == written
 
 
 def test_a_model_without_variants_offers_no_control(tmp_path) -> None:
     provider = _provider(tmp_path, _options(_frames()[5]))
 
     assert provider.supports_effort() is False
-
-
-@pytest.mark.asyncio
-async def test_the_level_is_written_under_effort(tmp_path) -> None:
-    provider = _provider(tmp_path, _options(_frames()[1]))
-    provider._client.set_config_option = AsyncMock()
-
-    await provider._set_effort_config_option("high")
-
-    provider._client.set_config_option.assert_awaited_once_with("effort", "high")
-
-
-@pytest.mark.asyncio
-async def test_a_level_the_model_does_not_offer_is_not_written(tmp_path) -> None:
-    provider = _provider(tmp_path, _options(_frames()[1]))
-    provider._client.set_config_option = AsyncMock()
-
-    await provider._set_effort_config_option("max")
-
-    provider._client.set_config_option.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -165,4 +190,4 @@ async def test_a_live_set_model_follows_the_option_and_re_applies_the_level(tmp_
         ("effort", "high"),
     ]
     assert provider.supports_effort() is True
-    assert _effort(client._acp_config_options) == ("high", ["low", "medium", "high"])
+    assert _effort(client._acp_config_options) == ("high", ["low", "medium", "high", "default"])

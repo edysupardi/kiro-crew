@@ -159,8 +159,8 @@ def _spawn_effective_model(
     spawn path drives ``get_or_create``: the kwarg the spawn passes (explicit
     per-spawn *model*, else the subagent role pin — see ``_run_inner``, which
     forwards raw ``info.model`` including an explicit ``"auto"``), and, when no
-    kwarg is passed, ``session._session_model`` for *agent* (a crew's own pin,
-    else non-sentinel global; the factory resolves a named template's JSON pin).
+    kwarg is passed, ``session._session_model`` for *agent* (the session's own
+    ladder: crew pin, template pin, global, installed agent file).
     An explicit empty ``crew_agent`` retains the template namespace; a member
     claim retains that member's pin and bound template. Omitted claims keep the
     helper's crew-name inference. Reporting never prepares a capability runtime.
@@ -187,7 +187,9 @@ def _spawn_effective_model(
         if override is None:
             # No kwarg: get_or_create resolves the session chain and passes
             # its result (possibly None) as model_override.
-            override = _session_model(cfg, agent or None, crew_agent=claim)
+            override = _session_model(
+                cfg, agent or None, crew_agent=claim, backend_override=backend
+            )
         # A per-spawn backend is translated into ITS namespace, as the factory
         # does once the override wins the selection gate.
         namespace = None
@@ -203,20 +205,20 @@ def _spawn_effective_model(
 def _effort_channel(backend: str | None) -> str | None:
     """How *backend* receives a reasoning-effort level, or ``None`` if it takes none.
 
-    ``"cli_json"`` for the Kiro family (kiro-cli reads the level from its
-    workspace ``cli.json`` at spawn), ``"config_option"`` for a harness that takes
-    it as a live ``set_config_option`` push. Both answers are opt-in MEMBERSHIP in
-    the sets the provider itself gates on, never "not one of the others": a
-    harness in neither set never receives the level. ``None`` (no per-spawn
-    backend) is the gateway default, which the verdict has always described as
-    the Kiro family.
+    ``"cli_json"`` for a harness that reads the level from its workspace
+    ``cli.json`` at spawn (kiro-cli), ``"config_option"`` for a harness that takes
+    it as a live ``set_config_option`` push (KAS among them). Both answers are
+    opt-in MEMBERSHIP in the sets the provider itself gates on, never "not one of
+    the others": a harness in neither set never receives the level. ``None`` (no
+    per-spawn backend) is the gateway default, which the verdict has always
+    described as the Kiro family.
     """
     from kiro_crew.acp_backends import (
+        ACP_BACKENDS_EFFORT_OVERLAY,
         ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION,
-        ACP_BACKENDS_KIRO_SLASH_COMMANDS,
     )
 
-    if backend is None or backend in ACP_BACKENDS_KIRO_SLASH_COMMANDS:
+    if backend is None or backend in ACP_BACKENDS_EFFORT_OVERLAY:
         return "cli_json"
     if backend in ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION:
         return "config_option"
@@ -268,6 +270,20 @@ def effort_drop_reason(
     if not model_supports_effort(resolved):
         return f"model '{resolved}' does not support effort configuration"
     return ""
+
+
+#: Receipt text for a run whose sharing plan carries a model or effort (a
+#: per-call value, a ``subagent`` role pin, or a routed model) where the run
+#: would otherwise share its parent's runtime: the pin forces a runtime of its
+#: own. The size is the measured cost of one kiro-cli
+#: process plus its three managed MCP servers on macOS; it is a guide for the
+#: reader, not a limit anything enforces.
+PINNED_RUNTIME_NOTE = (
+    "a set model or effort (per call, a Subagent Model/Effort setting, or "
+    "routing) starts it in its own runtime (its own agent process and MCP "
+    "servers, about 0.55 GB of memory each); without one it would share the "
+    "parent chat's runtime"
+)
 
 
 def effort_applied_note(

@@ -179,6 +179,18 @@ async function pickVersion(label: string) {
   fireEvent.click(await screen.findByRole('option', { name: label }))
 }
 
+/** Answer the in-app ConfirmDialog. Re-query and require a CONNECTED button
+ *  inside waitFor: the dialog subtree re-renders, so a node held across ticks
+ *  goes stale and a click on it reaches nothing. */
+async function answerConfirm(confirmLabel: string, yes: boolean) {
+  await waitFor(() => {
+    const dialog = screen.getByRole('dialog')
+    const btn = within(dialog).getByRole('button', { name: yes ? confirmLabel : 'Cancel' })
+    expect(btn.isConnected).toBe(true)
+    fireEvent.click(btn)
+  }, { timeout: 3000 })
+}
+
 describe('ArtifactDetailPage — mutation paths', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -400,9 +412,8 @@ describe('ArtifactDetailPage — mutation paths', () => {
     await mount(mkArtifact({ version: 2 }))
     await pickVersion('v1')
     const revert = await screen.findByRole('button', { description: 'Revert to v1' })
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     fireEvent.click(revert)
-    expect(confirmSpy).toHaveBeenCalled()
+    await answerConfirm('Revert to v1', false)
     expect(vi.mocked(api).updateArtifact).not.toHaveBeenCalled()
   })
 
@@ -414,8 +425,7 @@ describe('ArtifactDetailPage — mutation paths', () => {
     await mount(mkArtifact({ version: 2 }))
     await pickVersion('v1')
     fireEvent.click(await screen.findByRole('button', { description: 'Revert to v1' }))
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
-    fireEvent.click(screen.getByRole('button', { description: 'Revert to v1' }))
+    await answerConfirm('Revert to v1', true)
     await waitFor(() => expect(screen.getByText('version gone')).toBeInTheDocument())
   })
 
@@ -895,7 +905,7 @@ describe('ArtifactDetailPage — mutation paths', () => {
       .mockResolvedValue({ key: 'slot-new', title: 'Artifact: CR Queue' })
     vi.mocked(api).chatSlotContext = vi.fn().mockResolvedValue({ ok: true })
     await mount(mkArtifact())
-    fireEvent.click(await screen.findByText('Ask agent to address'))
+    fireEvent.click(await screen.findByText('Draft a prompt in chat'))
     await waitFor(() => expect(vi.mocked(api).createChatSlot).toHaveBeenCalledTimes(1))
     // The prompt is STAGED, never auto-sent — the embedded composer picks it up.
     await waitFor(() =>
@@ -1358,7 +1368,7 @@ describe('stale context notice body', () => {
   })
 
   it('selects the stale key in the component, not only the shared one', () => {
-    const src = readFileSync(resolve(__dirname, '../pages/ArtifactDetailPage.tsx'), 'utf8')
+    const src = readFileSync(resolve(__dirname, '../pages/useArtifactDetailPageDocument.ts'), 'utf8')
     expect(src).toContain('chat_context_stale_not_attached')
     // CONTROL: the fresh key must survive too, or the non-refresh case now names the wrong body.
     expect(src).toContain('chat_context_not_attached')

@@ -22,6 +22,7 @@ import { useListDetailView } from '../hooks/useListDetailView'
 import { useAutoGrowTextarea } from '../hooks/useAutoGrowTextarea'
 import ListDetailBack from '../components/ListDetailBack'
 import { fmtDateFields } from '../i18n/format'
+import { useConfirm } from '../components/ConfirmDialog'
 // ── Types ──
 
 interface ChannelAgent {
@@ -671,7 +672,7 @@ export default function ChannelPage() {
     }).catch(e => fail('pages.channelPage.failed_to_load_channel', e))
   }, [activeId, fail])
 
-  // Channel WS events dispatched via existing useWebSocket in App.tsx
+  // Channel WS events dispatched via existing useWebSocket in shell/appShell.tsx
   // Listen for custom events on window
   useEffect(() => {
     const handler = (e: Event) => {
@@ -778,6 +779,8 @@ export default function ChannelPage() {
     }
   }
 
+  const { confirm, confirmDialog } = useConfirm()
+
   if (loading) return <div className="flex items-center justify-center h-full text-muted">{i18nT('pages.channelPage.loading_channels')}</div>
 
   const handleCreateChannel = async (topic: string, presetId: string) => {
@@ -852,7 +855,7 @@ export default function ChannelPage() {
                 {channel.agents.some(a => a.state === 'working' || a.state === 'tool_running') && <Badge variant="ok">●</Badge>}
               </Btn>
               <Btn onClick={async () => {
-                if (!confirm(i18nT('pages.channelPage.this_will_reset_conversation_history_for_all_age'))) return
+                if (!(await confirm({ title: i18nT('pages.channelPage.clear_all_context'), body: i18nT('pages.channelPage.this_will_reset_conversation_history_for_all_age'), confirmLabel: i18nT('pages.channelPage.clear_context_2') }))) return
                 try {
                   await api.channelClearContext(channel.id, 'all')
                   const res = await api.channelGet(channel.id)
@@ -862,7 +865,7 @@ export default function ChannelPage() {
                 <RotateCcw className="lucide-inline" /> {i18nT('pages.channelPage.clear_context_2')}
               </Btn>
               <Btn onClick={async () => {
-                if (!confirm(i18nT('pages.channelPage.close_this_channel_all_agents_will_be_dismissed'))) return
+                if (!(await confirm({ title: i18nT('pages.channelPage.close_channel'), body: i18nT('pages.channelPage.close_this_channel_all_agents_will_be_dismissed'), confirmLabel: i18nT('pages.channelPage.close') }))) return
                 // A refused close keeps the channel in the list: removing it
                 // would show the action as done under a notice saying it failed.
                 try { await api.channelClose(channel.id) } catch (e) { fail('pages.channelPage.failed_to_close_channel', e); return }
@@ -949,7 +952,7 @@ export default function ChannelPage() {
                       onDismiss={() => handleDismiss(agent.id)}
                       onListenChange={m => handleListenChange(agent.id, m)}
                       onClearContext={async () => {
-                        if (!confirm(i18nT('pages.channelPage.reset_role_s_llm_session_the_channel_s_shared_me', { role: agent.role }))) return
+                        if (!(await confirm({ title: i18nT('pages.channelPage.clear_context'), body: i18nT('pages.channelPage.reset_role_s_llm_session_the_channel_s_shared_me', { role: agent.role }), confirmLabel: i18nT('pages.channelPage.clear_context_2') }))) return
                         try {
                           await api.channelClearContext(channel.id, 'agent', agent.id)
                           const res = await api.channelGet(channel.id)
@@ -996,6 +999,7 @@ export default function ChannelPage() {
       )}
     </div>
       </div>
+      {confirmDialog}
     </>
   )
 }

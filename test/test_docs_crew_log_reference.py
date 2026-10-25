@@ -64,7 +64,7 @@ _JSON_BLOCK_RE = re.compile(r"^```json\n(.*?)\n```$", re.MULTILINE | re.DOTALL)
 
 #: The count the page's own prose claims. Pinned so adding a subsection without
 #: updating the page's opening line fails here rather than misleading a reader.
-EXPECTED_LIVE_TYPES = 41
+EXPECTED_LIVE_TYPES = 42
 
 #: The only two emitters that write a session entry. Kept as a literal rather than
 #: read from ``FIXED_SOURCES``, which holds the crew-side values too.
@@ -240,7 +240,9 @@ def _emitter_definers(package: Path) -> frozenset[str]:
         for path in package.glob("*.py")
         if re.search(r"^def on_[a-z_]+\(", path.read_text(encoding="utf-8"), re.MULTILINE)
     )
-    assert "emit.py" in definers, f"the emitter definitions were not found: {sorted(definers)}"
+    assert any(
+        name == "emit.py" or name.startswith("emit_") for name in definers
+    ), f"the emitter definitions were not found: {sorted(definers)}"
     return definers
 
 

@@ -1,6 +1,6 @@
 """Authorization is re-read across the Discord REST ladder's own waits.
 
-``discord/client.py``'s request ladder suspends itself in four places -- a
+``discord/client_rest.py``'s request ladder suspends itself in four places -- a
 pre-emptive bucket hold, a 429 back-off, a global hold, and the 5xx/connector
 back-off -- for up to tens of seconds. An operator who withdraws a destination
 during one of those waits expects the attempt that follows not to land, which
@@ -587,7 +587,11 @@ class TestCallerSuppliedDestination:
         """
         from kiro_crew.discord import transport_dispatch as td
 
-        source = Path(td.__file__).read_text(encoding="utf-8")
+        # The dispatcher is its facade and the owners it is composed from, read as one text.
+        source = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in sorted(Path(td.__file__).parent.glob("transport_dispatch*.py"))
+        )
         verbs = {"respond_interaction", "ack_component_interaction"}
         exempt_markers = ("Commands run in a direct message", "disabled by policy")
         sites: list[tuple[int, str, bool]] = []
@@ -982,7 +986,11 @@ class TestTransportPredicate:
         """
         import ast as _ast
 
-        client_src = (_REPO_ROOT / "src/kiro_crew/discord/client.py").read_text(encoding="utf-8")
+        # The client is its facade and the owners it is composed from, read as one text.
+        client_src = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in sorted((_REPO_ROOT / "src/kiro_crew/discord").glob("client*.py"))
+        )
         tree = _ast.parse(client_src)
         holders: list[str] = []
         for node in _ast.walk(tree):
@@ -1022,11 +1030,18 @@ class TestTransportPredicate:
         # through the one public method whose callers are checked below.
         assert funnel_callers == ["create_dm_channel", "remember_dm_recipient"], funnel_callers
 
-        for path in (
-            _REPO_ROOT / "src/kiro_crew/discord/transport.py",
-            _REPO_ROOT / "src/kiro_crew/discord/transport_dispatch.py",
+        discord = _REPO_ROOT / "src/kiro_crew/discord"
+        for path, src in (
+            (discord / "transport.py", (discord / "transport.py").read_text(encoding="utf-8")),
+            # The dispatcher is its facade and the owners it is composed from, read as one text.
+            (
+                discord / "transport_dispatch.py",
+                "\n".join(
+                    p.read_text(encoding="utf-8")
+                    for p in sorted(discord.glob("transport_dispatch*.py"))
+                ),
+            ),
         ):
-            src = path.read_text(encoding="utf-8")
             t = _ast.parse(src)
             parents: dict[_ast.AST, _ast.AST] = {}
             for node in _ast.walk(t):

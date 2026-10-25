@@ -110,6 +110,19 @@ CANONICAL: dict[str, dict] = {
         "tokens": 1000,
         "tokens_estimated": True,
     },
+    "context/measured": {
+        "turn": 3,
+        "turn_id": "e-01",
+        "breakdown": {
+            "schema": 1,
+            "categories": {"history": 4000, "toolSpecs": 2865},
+            "model_calls": 1,
+            "total_chars": 6865,
+            "compacted": True,
+            "history": {"user": 3990, "assistant": 5, "thinking": 5, "compaction_summary": 0},
+        },
+        "ttft": {"total_ms": 2870, "setup_ms": 59, "model_ms": 1534},
+    },
     "step/started": {"turn": 3, "step": 1},
     "step/completed": {"turn": 3, "step": 1, "ms": 900},
     "tool/called": {
@@ -294,6 +307,27 @@ CANONICAL: dict[str, dict] = {
         "mid": "m-7f3b",
     },
     "guide/started": {"guide_id": "g_0a1b2c3d4e5f"},
+    "dashboard/goal_recorded": {
+        "goals": [{"text": "Keep the docs current"}],
+        "milestones": [
+            {
+                "text": "Fixes proposed",
+                "target": "3",
+                "current": "4 fixes proposed",
+                "at": "2026-10-18T21:36:00+00:00",
+            }
+        ],
+    },
+    "dashboard/waiting_changed": {
+        "items": [
+            {
+                "kind": "options",
+                "text": "Open a PR for the docs fix?",
+                "options": ["Open the PR", "Not yet"],
+                "asked_at": "2026-10-18T18:40:00+00:00",
+            }
+        ]
+    },
     "guide/finished": {"guide_id": "g_0a1b2c3d4e5f", "status": "completed"},
     # A whole working set lost at once: of sixteen listed tabs none comes back, and
     # all sixteen stay in the reopen seed. ``kept`` counts the SET rather than this
@@ -379,7 +413,14 @@ def test_every_type_written_today_is_declared_and_nothing_else_is():
     # show has nothing to show anywhere else. No ``session/closed``, because the
     # gateway did not stop serving the session; no delete, because nothing was
     # deleted; and the restore's own warning goes to a gateway log that rotates away.
-    assert len(SESSION_ENTRY_TYPES) == 45
+    #
+    # The two past that are a crewmate's own record for its Dashboard page:
+    # ``dashboard/goal_recorded`` and ``dashboard/waiting_changed``, snapshots the gateway
+    # appends when the goal record or the "waiting on you" list changes.
+    #
+    # The one past those is ``context/measured``: the agent engine's own measurement of
+    # a turn's context, which the ``usage`` fold attaches to that turn's composition row.
+    assert len(SESSION_ENTRY_TYPES) == 48
     # Nine types the vocabulary owns that nothing writes. Declaring one would state
     # a shape no writer produces, and the first emitter to land would have to
     # satisfy a contract written without it. They pass through undeclared instead.
@@ -482,7 +523,7 @@ def test_only_a_vocabulary_the_writer_clamps_is_enforced():
 #: The append primitives in :mod:`kiro_crew.crew_log.emit` and its durable writer,
 #: each mapped to the index of the positional argument that names the entry type.
 #:
-#: Keyed on the CALLEE rather than on any type-shaped literal, because emit.py also
+#: Keyed on the CALLEE rather than on any type-shaped literal, because emit_turn.py also
 #: hands an entry type to helpers that append nothing -- ``_entry_line_fits`` is
 #: given ``"plan/updated"`` to measure a line -- and counting those would report a
 #: type as emitted at a site that never appends.
@@ -541,8 +582,8 @@ def _types_the_writers_append() -> dict[str, bool]:
         # one non-ignorable append is all it takes to stop a folding reader.
         skippable[entry_type] = skippable.get(entry_type, True) and ignorable
 
-    for module in (emit, writer_mod, store_mod):
-        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    for path in _writer_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 keywords = {item.arg: item.value for item in node.keywords if item.arg}
@@ -568,6 +609,15 @@ def _types_the_writers_append() -> dict[str, bool]:
     return skippable
 
 
+def _writer_files():
+    """The writers' source files: the emitter facade with its ``emit_*.py`` owners, its
+    durable writer, and the store facade with its ``store_*.py`` owners, where the
+    crash-repair closer lives."""
+    emit_files = sorted(Path(emit.__file__).parent.glob("emit*.py"))
+    store_files = sorted(Path(store_mod.__file__).parent.glob("store*.py"))
+    return [*emit_files, Path(writer_mod.__file__), *store_files]
+
+
 def _walk(fields):
     for field in fields:
         yield field
@@ -578,10 +628,7 @@ def _types_with_a_producing_site():
     # Read the writers rather than restating their list: a type is emitted when a
     # producing module names it. This holds the closed-enum rule to code that
     # exists, so wiring a resolver cannot quietly leave an unenforceable set behind.
-    sources = [
-        Path(module.__file__).read_text(encoding="utf-8")
-        for module in (emit, writer_mod, store_mod)
-    ]
+    sources = [path.read_text(encoding="utf-8") for path in _writer_files()]
     for spec_type in SESSION_ENTRY_TYPES:
         if any(f'"{spec_type}"' in text for text in sources):
             yield spec_type

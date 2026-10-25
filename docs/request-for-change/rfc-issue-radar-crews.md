@@ -256,7 +256,7 @@ active.
 
 **Labels as a cheap index, not as authority.** `_ISSUE_JQ` already projects
 `labels`, `body` and the comment **count** for every open issue
-(`_ISSUE_JQ` in `github_client.py`), so one list call answers both "is this in my scope" and
+(`_ISSUE_JQ` in `github_client_repo_reads.py`), so one list call answers both "is this in my scope" and
 "is anyone on it". `comments == 0` means definitively unclaimed with no timeline
 read at all. The asymmetry that makes divergence safe:
 
@@ -360,8 +360,8 @@ own usage shards (3,241 records over 10 days):
 | a busy real session today | 79 turns, 1,005 credits, 12.7/turn |
 
 Anything appended to `slot.messages` **accumulates**: a nudge is appended as a user
-message (`state.py`, `enqueue_or_run_prompt`), and so is a tool result
-(`dashboard/chat_runner.py`). A brief re-sent on all ~80 turns of a day is therefore
+message (`state_parts/chat_slot.py`, `enqueue_or_run_prompt`), and so is a tool result
+(`dashboard/chat_turn/tool_results.py`). A brief re-sent on all ~80 turns of a day is therefore
 present ~80 times, costing about 0.5·N² ≈ **3,200 credits/day/crew** — three times
 the entire real session above. Reading it from a file each turn is worse still: the
 tool result accumulates identically *and* costs an extra full-context round-trip.
@@ -406,7 +406,7 @@ upserts work-item state and appends one event together, so a phase cannot change
 without a logged reason. The allowlist entry must be the **full path**, never the
 `/api/apps/issue-radar` prefix: prefix-matching there would also admit the app's
 GitHub write routes to anything holding the internal secret
-(`_MIXED_INTERNAL_API_PATHS` in `dashboard/server.py`).
+(`_MIXED_INTERNAL_API_PATHS` in `dashboard/server_internal_paths.py`).
 
 ## 11. UI
 
@@ -488,7 +488,7 @@ which is also astronomically correct. Uniqueness is enforced server-side on crea
 All crews run allow-all-tools and unattended. What that means, and what is left:
 
 **Still enforced in code.** The PreToolUse hook path fires independently of
-`allowedTools` (the PreToolUse path in `dashboard/chat_runner.py` — `allowedTools` skips *approval*, not the
+`allowedTools` (the PreToolUse paths in `dashboard/chat_turn/tool_rows.py` and `tool_approval.py` — `allowedTools` skips *approval*, not the
 hook), so Kiro Crew's own policy still hard-refuses destructive commands,
 force-pushes to protected branches, and credential-file reads. Branch protection
 keeps crews off `main`. Every PR needs human approval before merge, so nothing
@@ -530,7 +530,7 @@ wait.
 
 **Nothing caps concurrency.** As measured for this RFC, chat slots and
 concurrent turns were uncapped; the nearest analogue, terminal sessions, caps at
-12 (`_MAX_SESSIONS` in `dashboard/handlers/terminal.py`). The cold-start ceiling is
+12 (`_MAX_SESSIONS` in `dashboard/handlers/terminal_session.py`). The cold-start ceiling is
 `new_cold_start_semaphore` in `session_allocation.py` — a `PrioritySemaphore` of
 4 background permits plus 1 foreground reserve — and host memory. Unattended
 app-owned turns are capped by `DashboardState.MAX_BACKGROUND_TURNS`. Add a
@@ -550,7 +550,7 @@ on that rehydrate.
 | `update_issue_comment` → `PATCH /repos/{o}/{r}/issues/comments/{id}` | **missing.** The only PATCHes are on `issues/{n}` and `pulls/{n}`, both state-only |
 | `id` and `updated_at` on normalized comment rows | **missing.** `_normalize_timeline_event` keeps only `kind`/`actor`/`created_at`/`body`, so the comment cannot be addressed for an edit |
 | `create_pull_request` | **missing** from this client. A parallel implementation exists in `auto_improvement/profiles/github_repo/pr_recipe.py` |
-| `/issue/comment` HTTP route | **missing.** `add_issue_comment` exists in `github_client.py`; only `/pull/comment` is routed |
+| `/issue/comment` HTTP route | **missing.** `add_issue_comment` exists in `github_client_writes.py`; only `/pull/comment` is routed |
 | everything else (list, timeline, labels, checks, reviews, merge, auto-merge, rerun) | present — 12 write functions |
 
 The marker's `v` needs one more read-side change. `_parse_crew_marker` already
@@ -622,7 +622,7 @@ as measured when this RFC was written; the cited symbol is the live source.
 | Dashboard approval wait | 7200s, hardcoded | `DashboardState.approval_timeout_for` |
 | Background approval wait (unreachable here) | 180s | `DashboardState._BACKGROUND_APPROVAL_TIMEOUT_SECS` |
 | Agent cold-start concurrency | 4 + 1 foreground reserve | `new_cold_start_semaphore` in `session_allocation.py` |
-| Terminal session cap (contrast) | 12 | `_MAX_SESSIONS` in `handlers/terminal.py` |
+| Terminal session cap (contrast) | 12 | `_MAX_SESSIONS` in `handlers/terminal_session.py` |
 | Idle cleanup threshold | 3 days | `api_chat_slots_cleanup` |
 | `auto_research` trust TTL | 24h | `auto_research/campaign/watchdog.py` |
 | Repository labels | 34 total; `crew: ` is the crew-writable set | `gh label list` |

@@ -30,14 +30,15 @@ import type {
   PullRequestStatusBatch,
 } from '../types'
 import {
+  findSourceForUrl,
   MAX_PULL_REQUEST_SOURCES,
+  sourceLinkKey,
   type PullRequestLink,
 } from '../utils/pullRequestLinks'
 import { sourceProviderMeta, sourceTabQualifier } from '../utils/sourceProviderMeta'
 import CopyBranchButton from './CopyBranchButton'
 import { PierrePatch } from '../pierre'
-import GithubLogo from './icons/GithubLogo'
-import GitlabLogo from './icons/GitlabLogo'
+import SourceProviderMark from './SourceProviderMark'
 import { timeAgo } from '../utils/timeAgo'
 import MarkdownRenderer from './MarkdownRenderer'
 import CommentThreads from './CommentThreads'
@@ -220,6 +221,31 @@ export function pullRequestMergeBlocker(source: PullRequestSource): PullRequestM
     }
   }
   if (source.mergeStateStatus === 'blocked') {
+    // GitHub reports `blocked` while required checks are still running, which
+    // the generic branch-protection copy cannot distinguish from a missing
+    // approval. Say checks are still running when any are, and lead with the
+    // failure when one has already failed, so a red check is never hidden
+    // behind "still running". Only GitHub gets this copy: GitLab reports a
+    // merge-gating running pipeline as `unstable`, so a GitLab `blocked` with
+    // jobs running is blocked by something else (approvals, open discussions)
+    // and keeps the generic copy, as does every other provider.
+    const checks = source.provider === 'github' ? source.checks || [] : []
+    const running = checks.filter(checkInFlight).length
+    const failed = checks.filter(check => check.bucket === 'failed').length
+    if (running > 0 && failed > 0) {
+      return {
+        tone: 'danger',
+        title: i18nT('components.pullRequestPanel.checks_failed_others_still_running'),
+        detail: i18nT('components.pullRequestPanel.checks_failed_still_running_detail', { failed, running, total: checks.length }),
+      }
+    }
+    if (running > 0) {
+      return {
+        tone: 'warn',
+        title: i18nT('components.pullRequestPanel.merge_blocked'),
+        detail: i18nT('components.pullRequestPanel.waiting_on_checks_detail'),
+      }
+    }
     return {
       tone: 'warn',
       title: i18nT('components.pullRequestPanel.merge_blocked'),
@@ -276,6 +302,13 @@ export function pullRequestCiSignal(
   if (checks.some(check => check.bucket === 'failed')) return 'failed'
   if (checks.some(check => check.bucket === 'pending')) return 'running'
   return 'passed'
+}
+
+/** Whether one check is still running: bucketed `pending` and not a manual
+ * gate. A GitLab required manual job is bucketed `pending` with status
+ * `MANUAL`; it waits on a person, so it is never "running". */
+export function checkInFlight(check: PullRequestCheck): boolean {
+  return check.bucket === 'pending' && (check.status || '').toUpperCase() !== 'MANUAL'
 }
 
 /** A merge field the provider actually answered, or undefined.
@@ -749,7 +782,7 @@ export function PullRequestActions({ source }: { source: PullRequestSource }) {
   )
 }
 
-function PullRequestBody({ source, tab, onAddToChat }: { source: PullRequestSource; tab: SourceTab; onAddToChat?: (text: string) => void }) {
+function PullRequestBody({ source, tab, onAddToChat, writesPaused = false }: { source: PullRequestSource; tab: SourceTab; onAddToChat?: (text: string) => void; writesPaused?: boolean }) {
   if (tab === 'description') {
     return source.description
       ? <div className="px-4 py-4 text-[13px]"><MarkdownRenderer content={source.description} /></div>
@@ -830,6 +863,7 @@ function PullRequestBody({ source, tab, onAddToChat }: { source: PullRequestSour
     <div className="p-3">
       <CommentThreads
         src={source}
+        writesPaused={writesPaused}
         // The panel owns what it says to the agent; the thread list only
         // reports which comment was picked.
         onAddToChat={onAddToChat && ((c) => onAddToChat(commentHandoff(c)))}
@@ -859,7 +893,7 @@ export default function PullRequestPanel({
   onAddToChat?: (text: string) => void
 }) {
   const cappedSources = sources.slice(0, MAX_PULL_REQUEST_SOURCES)
-  const selected = cappedSources.find(source => source.url === selectedUrl) || cappedSources[0]
+  const selected = findSourceForUrl(cappedSources, selectedUrl) || cappedSources[0]
   // A GitLab MR IID is unique only within its project, so tabs read as bare
   // `MR !1` and two projects sharing an IID become indistinguishable. When the
   // rendered tabs span more than one distinct project, qualify each tab label
@@ -881,9 +915,10 @@ export default function PullRequestPanel({
     if (selected && selected.url !== selectedUrl) (onReconcile || onSelect)(selected.url)
   }, [selected, selectedUrl, onSelect, onReconcile])
 
+  const selectedKey = selected ? sourceLinkKey(selected) : undefined
   useEffect(() => {
     setTab('changes')
-  }, [selected?.url])
+  }, [selectedKey])
 
   const queryKey = useMemo(
     () => ['pull-request-source', selected?.url] as const,
@@ -891,6 +926,15 @@ export default function PullRequestPanel({
   )
   const query = useQuery<PullRequestSource>({
     queryKey,
+    // Keep the composer mounted across revisions of this review, but never
+    // carry another review's payload into the newly selected one.
+    placeholderData: (previousData, previousQuery) => {
+      const previousUrl = previousQuery?.queryKey[1]
+      return selected && typeof previousUrl === 'string'
+        && findSourceForUrl([selected], previousUrl)
+        ? previousData
+        : undefined
+    },
     queryFn: () => {
       const force = forceRefreshRef.current
       forceRefreshRef.current = false
@@ -1057,11 +1101,16 @@ export default function PullRequestPanel({
       complete: checks.filter(check => check.bucket === 'passed' || check.bucket === 'skipped').length,
       failed: checks.filter(check => check.bucket === 'failed').length,
       pending: checks.filter(check => check.bucket === 'pending').length,
+      running: checks.filter(checkInFlight).length,
       total: checks.length,
     }
   }, [source?.checks])
   const checksUnavailable = checksPollingPaused
   const checksRunning = checkCounts.pending > 0 && !checksUnavailable
+  // A `complete/total` fraction counts a failed check as not complete, so it
+  // cannot say whether the rest are still running or one has failed; once a
+  // check has failed while others run, the tab counts both instead.
+  const checksFailedStillRunning = checksRunning && checkCounts.failed > 0 && checkCounts.running > 0
   const allChecksPassed = checkCounts.total > 0
     && checkCounts.failed === 0
     && checkCounts.pending === 0
@@ -1076,11 +1125,21 @@ export default function PullRequestPanel({
     // header badge it sits above. Field by field: see `selectedSourceStatus`.
     if (source) {
       merged[source.url] = selectedSourceStatus(source, cached[source.url])
+    } else if (query.error && selected) {
+      // The selected pull request's read failed outright (no payload loaded
+      // at all), which is what the error card above already tells the user.
+      // Falling through to `cached` here would keep a stale glyph — a green
+      // tick from the LAST successful load — contradicting that card, so the
+      // tab clears to neutral instead. A background revalidation failure on
+      // already-loaded data takes the `if (source)` branch above and keeps
+      // its last-known glyph, which is the separate, deliberate behavior the
+      // compact notice at `query.error && source` below exists for.
+      delete merged[selected.url]
     }
     return merged
-  }, [statusQuery.data, source])
+  }, [statusQuery.data, source, query.error, selected])
 
-  const allTabs: Array<{ id: SourceTab; label: string; count?: number; tone?: string }> = source ? [
+  const allTabs: Array<{ id: SourceTab; label: string; count?: number; countText?: string; tone?: string }> = source ? [
     { id: 'changes', label: i18nT('components.pullRequestPanel.changes'), count: source.files.length },
     { id: 'description', label: i18nT('components.pullRequestPanel.description') },
     { id: 'commits', label: i18nT('components.pullRequestPanel.commits'), count: source.commits.length },
@@ -1088,12 +1147,19 @@ export default function PullRequestPanel({
       id: 'checks',
       label: checksUnavailable
         ? i18nT('components.pullRequestPanel.checks_unavailable')
-        : checksRunning
-          ? i18nT('components.pullRequestPanel.checks_running')
-          : showAllChecksPassed
-            ? i18nT('components.pullRequestPanel.all_checks_passed')
-            : i18nT('components.pullRequestPanel.checks'),
+        : checksFailedStillRunning
+          ? i18nT('components.pullRequestPanel.checks')
+          : checksRunning
+            ? i18nT('components.pullRequestPanel.checks_running')
+            : showAllChecksPassed
+              ? i18nT('components.pullRequestPanel.all_checks_passed')
+              : i18nT('components.pullRequestPanel.checks'),
       count: checkCounts.total,
+      countText: checksFailedStillRunning
+        ? i18nT('components.pullRequestPanel.checks_count_running_failed', { running: checkCounts.running, failed: checkCounts.failed })
+        : checkCounts.total
+          ? `${checkCounts.complete}/${checkCounts.total}`
+          : undefined,
       tone: checkCounts.failed
         ? 'text-danger'
         : checksUnavailable || checksRunning
@@ -1135,16 +1201,7 @@ export default function PullRequestPanel({
             className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border-none cursor-pointer text-[12px] transition-colors ${item.url === selected?.url ? 'bg-bg-hover text-text' : 'bg-transparent text-muted hover:text-text hover:bg-bg-hover/60'}`}
             title={item.url}
           >
-            {itemMeta.logo === 'github'
-              ? <GithubLogo size={13} className="shrink-0" />
-              : itemMeta.logo === 'gitlab'
-                ? <GitlabLogo size={13} className="shrink-0" />
-                : itemMeta.icon
-                  ? <itemMeta.icon size={13} className="shrink-0" />
-                  // Explicit 13 to match its siblings: `lucide-inline` sizes at
-                  // `1em`, which is 12px in this tab strip, so the neutral glyph
-                  // rendered a pixel smaller than every branded one beside it.
-                  : <GitPullRequest size={13} className="lucide-inline shrink-0" />}
+            <SourceProviderMark provider={item.provider} size={13} />
             {/* No CSS truncation here: sourceTabQualifier shortens deep paths
                 to their minimal unique trailing suffix, so the discriminating
                 segment is always visible. The full url stays on the Btn's
@@ -1241,7 +1298,9 @@ export default function PullRequestPanel({
               <span><span className="text-ok">+{source.additions}</span> <span className="text-danger">-{source.deletions}</span></span>
               {source.updatedAt && <span>{i18nT('components.pullRequestPanel.updated')} {age(source.updatedAt)}</span>}
             </div>
-            <PullRequestActions key={source.url} source={source} />
+            {/* A placeholder payload belongs to an earlier revision, so its
+                merge-state writes would land on that revision's url. */}
+            {!query.isPlaceholderData && <PullRequestActions key={source.url} source={source} />}
           </div>
 
           {mergeBlocker && (
@@ -1293,13 +1352,15 @@ export default function PullRequestPanel({
                   <Check className="lucide-inline text-ok" />
                 ) : null}
                 {item.label}
-                {item.count !== undefined && <span className="text-muted">{item.id === 'checks' && checkCounts.total ? `${checkCounts.complete}/${item.count}` : item.count}</span>}
+                {item.countText !== undefined
+                  ? <span className="text-muted">{item.countText}</span>
+                  : item.count !== undefined && <span className="text-muted">{item.count}</span>}
               </Btn>
             ))}
           </div>
 
           <div id="pr-tabpanel" role="tabpanel" aria-labelledby={`pr-tab-${activeTab}`} className="flex-1 min-h-0 overflow-y-auto">
-            <PullRequestBody source={source} tab={activeTab} onAddToChat={onAddToChat} />
+            <PullRequestBody source={source} tab={activeTab} onAddToChat={onAddToChat} writesPaused={query.isPlaceholderData} />
           </div>
         </>
       )}

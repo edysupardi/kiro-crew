@@ -13,8 +13,9 @@ import { isChatPageSurface } from '../../utils/channelOrigin'
 import { mergePreservedPastes } from '../../utils/pasteTokens'
 import { findReport, parseErrorCode } from '../../utils/errorReport'
 import { errMessage } from '../../utils/thunkError'
+import { writePrefill } from '../../utils/navIntent'
 import type { HistoryDeleteRefusal } from '../../utils/historyDeleteRefusal'
-import type { ChatState } from './state'
+import { entryActivityOpen, type ChatState } from './state'
 import { filterMessages, safeKey } from './wire'
 import { enterActiveSlot, pushHistory } from './runState'
 import { parkActiveTranscript, setPagingCursor } from './slotCache'
@@ -41,8 +42,8 @@ const configuredDefaultMemoryMode = () =>
 
 export const createSlot = createAsyncThunk<
   ChatSlot,
-  { agent?: string; agent_kind?: 'member' | 'template'; appAgentOwner?: string; model?: string; mode?: string; memory_mode?: string; folder_id?: string | null; title?: string; color_index?: number | null; color_hex?: string | null; project?: string | null; activate?: boolean; sessionFolder?: boolean } | string | undefined,
-  { fulfilledMeta: { originActiveSlot: string | null; activate: boolean } }
+  { agent?: string; agent_kind?: 'member' | 'template'; appAgentOwner?: string; model?: string; mode?: string; memory_mode?: string; folder_id?: string | null; title?: string; color_index?: number | null; color_hex?: string | null; project?: string | null; activate?: boolean; sessionFolder?: boolean; defaultFolder?: boolean; prefill?: string; automatic?: boolean } | string | undefined,
+  { fulfilledMeta: { originActiveSlot: string | null; originActiveSlotMoves: number; originActiveSlotAutoMoves: number; activate: boolean; prefillStaged?: boolean; automatic?: boolean } }
 >(
   'chat/createSlot',
   async (opts, { getState, fulfillWithValue }) => {
@@ -69,22 +70,34 @@ export const createSlot = createAsyncThunk<
     // do so before the user is able to type into it. Defaults to true — every
     // existing caller keeps the create-and-focus behaviour.
     const activate = typeof opts === 'string' ? true : opts?.activate !== false
+    // `automatic` is the chat page's own create for an empty list. Its
+    // activation counts in `activeSlotAutoMoves`, like the page's auto-select,
+    // so a create or fork the user started meanwhile may still open.
+    const automatic = typeof opts === 'object' && opts.automatic === true
     // `sessionFolder: false` is for a purpose-built chat (an app's session, an
     // intake, a hand-off) that should keep the default project even when the
     // owner turned on a fresh folder per new chat. A carried project opts out
     // too: the server would otherwise make a folder the carry then replaces.
     const skipSessionFolder = !!project || (typeof opts !== 'string' && opts?.sessionFolder === false)
-    // Capture the active slot BEFORE the (potentially slow) create round-trip.
-    // The fulfilled reducer compares this against the active slot at resolution
-    // time: if the user switched to a different session while the create was
-    // pending (e.g. New Chat spun on "Creating" under memory pressure and they
-    // moved to another tab), the new slot must NOT hijack the view.
-    const originActiveSlot = (getState() as RootState).chat.activeSlot
+    // The person's default sidebar folder is OPT-IN: only the plain New entry
+    // points pass `defaultFolder: true`, so a create path that has not chosen
+    // it (an app's launch, a hand-off, a recreated slot) keeps today's unfiled
+    // placement instead of moving into another folder and its project. A
+    // folder or project named on the same call still wins over the default.
+    const useDefaultFolder = typeof opts === 'object' && opts.defaultFolder === true
+      && opts.folder_id === undefined && !project
+    // Capture the active slot and its move count BEFORE the (potentially slow)
+    // create round-trip. The fulfilled reducer checks both with `forkMayOpen`:
+    // if the user opened another session while the create was pending (e.g.
+    // New Chat spun on "Creating" under memory pressure and they moved to
+    // another tab), or went to one and came back, the new slot must NOT
+    // take the view.
+    const origin = captureForkOrigin(getState() as RootState)
     // An explicit Incognito/Temporary menu choice wins. All other dashboard chat
     // entry points resolve the persisted preference here, before the first turn
     // can read or write memory.
     const memory_mode = requestedMemoryMode || await configuredDefaultMemoryMode()
-    const slot = await api.createChatSlot(undefined, agent, model, mode, memory_mode, title, undefined, folderId || undefined, agentKind, skipSessionFolder, appAgentOwner)
+    const slot = await api.createChatSlot(undefined, agent, model, mode, memory_mode, title, undefined, folderId || undefined, agentKind, skipSessionFolder, appAgentOwner, useDefaultFolder)
     const dashState = (getState() as RootState).dashboard
     // An explicit color (e.g. carried from a slot being recreated on a
     // mode switch) wins; otherwise fall back to the default-color policy.
@@ -159,9 +172,18 @@ export const createSlot = createAsyncThunk<
     // scope) has already been awaited above.
     // Carry the origin slot in the action meta (fulfillWithValue) rather than on
     // the payload, so it can never leak into the persisted slot object. The
-    // fulfilled reducer reads action.meta.originActiveSlot to decide whether
-    // activating the new slot is safe.
-    return fulfillWithValue(slot, { originActiveSlot, activate })
+    // fulfilled reducer reads action.meta.originActiveSlot and the two move
+    // counts to decide whether activating the new slot is safe.
+    //
+    // `prefill` seeds the new session's composer. It is staged HERE, before the
+    // fulfilled action, because the composer's slot-restore effect reads
+    // `kirocrew_prefill` once, on the commit that activates the slot. A caller
+    // writing it after awaiting this thunk lands after that read and is never
+    // consumed. `prefillStaged` is false when storage refused the write, so the
+    // caller can fall back to another channel.
+    const prefill = typeof opts === 'string' ? undefined : opts?.prefill
+    const prefillStaged = !!prefill && writePrefill(slot.key, prefill)
+    return fulfillWithValue(slot, { originActiveSlot: origin.activeSlot, originActiveSlotMoves: origin.moves, originActiveSlotAutoMoves: origin.autoMoves, activate, prefillStaged, automatic })
   },
 )
 
@@ -184,6 +206,39 @@ export const resumeFromHistory = createAsyncThunk(
     return { ok: d.ok, key: d.key, surface: d.surface ?? d.mode, nextBefore: cursor ?? 0, messages: filterMessages(d.messages || []), hasMore: cursor !== null && (d.has_more || false), total: d.total || 0 }
   },
 )
+
+/** The action that lists a successful fork in the sidebar. Every fork path
+ *  dispatches this before activating the fork: the chat page clears an active
+ *  session its slot list lacks. `openCreatedSlot` uses it the same way for a
+ *  session another server route created. memory_mode is the parent's, echoed by the
+ *  server; without it the new tab would read as persistent until the next
+ *  slots refresh. */
+export function listForkedSlot(d: Pick<ChatSlot, 'key'> & Partial<Pick<ChatSlot, 'title' | 'messages' | 'folder_id' | 'memory_mode' | 'pinned'>>) {
+  return addSlotOptimistic({ key: d.key, title: d.title || d.key, messages: d.messages || 0, running: false, folder_id: d.folder_id, memory_mode: d.memory_mode, ...(d.pinned ? { pinned: true } : {}) })
+}
+
+/** Where the user stood when a fork or create started; see `forkMayOpen`. */
+export interface ForkOrigin { activeSlot: string | null; moves: number; autoMoves: number }
+
+export function captureForkOrigin(state: Pick<RootState, 'chat'>): ForkOrigin {
+  return { activeSlot: state.chat.activeSlot, moves: state.chat.activeSlotMoves ?? 0, autoMoves: state.chat.activeSlotAutoMoves ?? 0 }
+}
+
+/** Whether a fork or create that just resolved may open its new session.
+ *  Every fork caller and `createSlot` capture the origin when the request
+ *  starts and ask this before they switch: the request can take seconds, and
+ *  a session the user opened in that time is a choice the late response must
+ *  not undo. The move count also refuses a user who went to another session
+ *  and came back, since coming back is a choice too; an equal `activeSlot`
+ *  alone cannot tell that apart from never moving. A move the chat page made
+ *  on its own, after it lost the origin from its list, is not a choice, and
+ *  the new session still opens. The new session is listed in the sidebar
+ *  either way; only the switch, and what the caller does on opening it, is
+ *  skipped. */
+export function forkMayOpen(state: Pick<RootState, 'chat'>, origin: ForkOrigin): boolean {
+  if ((state.chat.activeSlotMoves ?? 0) !== origin.moves) return false
+  return state.chat.activeSlot === origin.activeSlot || (state.chat.activeSlotAutoMoves ?? 0) !== origin.autoMoves
+}
 
 export const forkSlot = createAsyncThunk(
   'chat/forkSlot',
@@ -212,11 +267,7 @@ export const forkSlot = createAsyncThunk(
       }
       throw e
     }
-    if (d.ok) {
-      // memory_mode is the parent's, echoed by the server; without it the new
-      // tab would read as persistent until the next slots refresh.
-      dispatch(addSlotOptimistic({ key: d.key, title: d.title || d.key, messages: d.messages || 0, running: false, folder_id: d.folder_id, memory_mode: d.memory_mode, ...(d.pinned ? { pinned: true } : {}) }))
-    }
+    if (d.ok) dispatch(listForkedSlot(d))
     return d
   },
 )
@@ -267,7 +318,9 @@ export const clearHistorySessions = createAsyncThunk<
   async (_, { getState, rejectWithValue }) => {
     let body: unknown
     try {
-      body = await api.clearSessions()
+      // `user_only`, the same flag `fetchHistory` lists with: Delete all removes
+      // only rows this pane could show, never hidden machine transcripts.
+      body = await api.clearSessions(true)
     } catch (e) {
       const errBody = (e as { body?: unknown } | null)?.body
       const code = parseErrorCode(typeof errBody === 'string' ? errBody : undefined) ?? ''
@@ -330,13 +383,13 @@ export function addLifecycleCases(builder: ActionReducerMapBuilder<ChatState>): 
       // would strand the "Creating…" spinner on forever.
       state.creatingSlot = false
       if (state.foregroundCreateId === action.meta.requestId) state.foregroundCreateId = null
-      // Switched-away guard: if the user moved to a different
-      // session while this create was pending (a slow "Creating…" under memory
-      // pressure), do NOT hijack the view. The new slot is registered by
-      // dashboardSlice on this same action; just leave the user where they are. Mirrors the
-      // guard switchSlot/refreshSlot/warmSlotCache already have. `send()`'s
-      // forceNew path and welcome-screen New Chat both leave activeSlot equal
-      // to the origin, so they still activate normally.
+      // Switched-away guard, the same rule forks follow (`forkMayOpen`): if
+      // the user opened another session while this create was pending (a slow
+      // "Creating…" under memory pressure), do NOT hijack the view, even when
+      // they have since come back to the origin. The new slot is registered by
+      // dashboardSlice on this same action; just leave the user where they
+      // are. `send()`'s forceNew path and welcome-screen New Chat both leave
+      // the user on the origin with no move, so they still activate normally.
       //
       // Conscious edge: a rapid double New Chat from the same slot makes both
       // creates capture the same origin; the first fulfilled activates its
@@ -347,15 +400,28 @@ export function addLifecycleCases(builder: ActionReducerMapBuilder<ChatState>): 
       // Caller asked for a background create (see `activate` above): the slot
       // is registered but focus stays put until the caller switches to it.
       if (action.meta.activate === false) return
-      const origin = action.meta.originActiveSlot ?? null
-      if (state.activeSlot !== origin) return
+      const origin = { activeSlot: action.meta.originActiveSlot ?? null, moves: action.meta.originActiveSlotMoves ?? 0, autoMoves: action.meta.originActiveSlotAutoMoves ?? 0 }
+      if (!forkMayOpen({ chat: state }, origin)) return
       if (state.activeSlot) {
         state.slotActivity[state.activeSlot] = { toolLog: state.toolLog, subagents: state.subagents, activityTab: state.activityTab, activityOpen: state.activityOpen }
         state.slotHistory = pushHistory(state.slotHistory, state.activeSlot)
         parkActiveTranscript(state)
       }
-      enterActiveSlot(state, action.payload.key)
+      enterActiveSlot(state, action.payload.key, action.meta.automatic === true)
       state.lastCreatedActivation = { slot: action.payload.key, requestId: action.meta.requestId }
+      // A default-folder create learns its folder only from this response, so
+      // no caller can open a collapsed default folder (or a collapsed
+      // ancestor) before the create, the way a folder "+" create does. The
+      // chat would then be active with its row hidden. Ask the sidebar to open
+      // the row's folder path. `openFoldersOnly`: the user asked for a chat,
+      // not a reveal, so their search and filters stay as they set them.
+      // Placed after the activation guards above, so a background or
+      // switched-away create never moves the sidebar.
+      const arg = action.meta.arg
+      if (typeof arg === 'object' && arg?.defaultFolder === true && action.payload.folder_id) {
+        state.revealNonce += 1
+        state.revealRequest = { kind: 'session', target: action.payload.key, nonce: state.revealNonce, openFoldersOnly: true, folderId: action.payload.folder_id }
+      }
       // The replay floor belongs to the slot that was streaming, not to this
       // one. `state.lastChunkSeq` is the ACTIVE slot's floor, and a brand-new
       // chat has no replay history at all — carrying the outgoing slot's floor
@@ -369,16 +435,25 @@ export function addLifecycleCases(builder: ActionReducerMapBuilder<ChatState>): 
       state.toolLog = []
       state.subagents = {}
       state.activityTab = 'changes'
-      // A brand-new chat starts with the side panel CLOSED, like every other
-      // slot-entry path (switchSlot / resumeFromHistory read `?? false` for a
-      // slot they have no cached bucket for). Without this the panel state of
-      // the chat being left leaked into the new one — and was not persisted
-      // under the new slot's key either, so a reload silently closed it again.
-      state.activityOpen = false
+      // A brand-new chat enters like every other slot-entry path (switchSlot /
+      // resumeFromHistory, which find no cached bucket for it): closed, or open
+      // with Keep side panel open. Without this the panel state of the chat
+      // being left leaked into the new one — and was not persisted under the new
+      // slot's key either, so a reload silently closed it again.
+      state.activityOpen = entryActivityOpen(state, true, undefined)
       state.slotRunning = false
       state.slotStopping = false
       state.slotState = 'idle'
       setPagingCursor(state, false, 0)
+      // A switch still loading the chat being left, such as a close landing
+      // made while this create was pending, no longer owns the pane. Retire
+      // it: its answer is now superseded (`supersededSwitch`) and cannot
+      // write this chat's view, and the new chat has nothing to load.
+      state.slotLoading = false
+      state.slotSwitchRequestId = null
+      state.slotSwitchTarget = null
+      state.slotSwitchOrigin = null
+      state.slotSwitchLatestRequestId = action.meta.requestId
     })
     .addCase(resumeFromHistory.pending, (state, action) => {
       // A new attempt supersedes whatever the previous one narrated, and its
@@ -449,7 +524,7 @@ export function addLifecycleCases(builder: ActionReducerMapBuilder<ChatState>): 
         // Legacy cached 'tools'/'nav'/'files' values fall back to 'changes'
         // (see switchSlot for why 'files' is no longer one of these tabs).
         state.activityTab = (cached?.activityTab && !['tools', 'nav', 'files'].includes(cached.activityTab as string)) ? cached.activityTab : 'changes'
-        state.activityOpen = cached?.activityOpen ?? false
+        state.activityOpen = entryActivityOpen(state, state.activeSlot !== action.payload.key, cached)
         // Same handover switchSlot performs: the floor is per-slot, so entering
         // a slot restores ITS parked floor (undefined when it has none) instead
         // of inheriting the one belonging to the slot being left. Without this a

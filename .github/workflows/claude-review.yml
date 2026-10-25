@@ -230,7 +230,7 @@ jobs:
       # secrets / OIDC, so the AWS role assumption can never succeed. Skip the
       # credential + review steps and let the gate pass; dependency bumps stay
       # covered by Semgrep, CodeQL, the nightly/release Dependency Audit and the build/tests.
-      - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         if: >-
           github.event.pull_request.head.repo.full_name == github.repository
           && (
@@ -289,7 +289,7 @@ jobs:
           && (
           github.actor != 'dependabot[bot]' && steps.human_override.outputs.active != 'true'
           )
-        uses: anthropics/claude-code-action@97c53473391bff1901034d4b454b5bac7ab7a029 # v1.0.239
+        uses: anthropics/claude-code-action@2dca132ff0e0c4094ce6048b422c6915a071210b # v1.0.247
         with:
           use_bedrock: "true"
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -315,6 +315,33 @@ jobs:
             Obtain the diff by reading this pre-fetched file:
             ${{ runner.temp }}/pr.diff
 
+      # The outbound scrub is `scripts/scope_redact.py`, staged from the BASE
+      # commit. A redactor taken from the change under review could
+      # rewrite the scrub of its own published output. Every model step after
+      # this one is read-only, so nothing can rewrite the staged copy.
+      - name: Stage the base-owned redactor
+        id: redactor
+        if: >-
+          github.event.pull_request.head.repo.full_name == github.repository
+          && (
+          always()
+          )
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -uo pipefail
+          dir="${RUNNER_TEMP:-/tmp}/scope-redact"
+          # Remove before creating: a symlink at this path would redirect the write.
+          rm -rf "$dir"
+          mkdir -p "$dir"
+          dest="$dir/scope_redact.py"
+          git show "$BASE_SHA:scripts/scope_redact.py" > "$dest" 2>/dev/null || true
+          if [ ! -s "$dest" ]; then
+            echo "::error::scripts/scope_redact.py is missing or empty on the base commit ($BASE_SHA). Refusing to publish text no base-owned scrubber could redact."
+            exit 1
+          fi
+          echo "redactor=$dest" >> "$GITHUB_OUTPUT"
+
       # Hand stage 1's candidates to stage 2 through a FILE rather than string
       # interpolation: model output must never be spliced into YAML or a shell
       # argument, and a file has no arg-length ceiling.
@@ -325,6 +352,7 @@ jobs:
           steps.discover.outcome == 'success'
           )
         env:
+          REDACTOR: ${{ steps.redactor.outputs.redactor }}
           EXEC_FILE: ${{ steps.discover.outputs.execution_file }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           MAX_CANDIDATE_BYTES: "200000"
@@ -343,7 +371,14 @@ jobs:
             fi
             printf '%s\n' "$out" > .review-candidates.md
           fi
-          perl -i -pe 's/\b(?:AKIA|ASIA)[A-Z2-7]{16}\b/[REDACTED-AWS-KEY-ID]/g; s{arn:aws\S*}{[REDACTED-ARN]}g; s/\b[0-9]{12}\b/[REDACTED-ACCT]/g; s/(?i)(aws_secret_access_key|aws_session_token|x-amz-security-token)\s*[:=]\s*\S+/$1=[REDACTED]/g' .review-candidates.md
+          # No redactor, or a scrub that fails, is a refusal: the file is removed so
+          # no later `always()` step can publish it raw.
+          if [ -z "${REDACTOR:-}" ] || [ ! -s "$REDACTOR" ] \
+            || ! python3 "$REDACTOR" --mode text .review-candidates.md; then
+            echo "::error::the base-owned redactor could not scrub .review-candidates.md. Refusing to publish it raw."
+            rm -f .review-candidates.md
+            exit 1
+          fi
           if ! grep -Fq "[OPUS-DISCOVERY] $HEAD" .review-candidates.md; then
             echo "::error::Discovery produced no [OPUS-DISCOVERY] marker for $HEAD, so its output cannot be trusted as a complete candidate list. Failing closed: validation against a truncated or empty list would emit a clean [OPUS-REVIEWED] verdict and pass the gate on a review that never happened."
             # PAYLOAD-FREE diagnostics for exactly this branch, printed AFTER the
@@ -449,7 +484,7 @@ jobs:
       # failed closed with no verdict and no way to tell a real hang from a
       # spent session. Each stage now starts on a fresh session, leaving the
       # job timeout as the only wall. Keep in sync with codex-review.yml.
-      - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         if: >-
           github.event.pull_request.head.repo.full_name == github.repository
           && (
@@ -472,7 +507,7 @@ jobs:
           && (
           github.actor != 'dependabot[bot]' && steps.human_override.outputs.active != 'true'
           )
-        uses: anthropics/claude-code-action@97c53473391bff1901034d4b454b5bac7ab7a029 # v1.0.239
+        uses: anthropics/claude-code-action@2dca132ff0e0c4094ce6048b422c6915a071210b # v1.0.247
         with:
           use_bedrock: "true"
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -504,7 +539,9 @@ jobs:
           always()
           )
         env:
+          REDACTOR: ${{ steps.redactor.outputs.redactor }}
           EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           : > claude-review-output.md
           if [ -n "$EXEC_FILE" ] && [ -f "$EXEC_FILE" ]; then
@@ -514,7 +551,38 @@ jobs:
             fi
             printf '%s\n' "$summary" > claude-review-output.md
           fi
-          perl -i -pe 's/\b(?:AKIA|ASIA)[A-Z2-7]{16}\b/[REDACTED-AWS-KEY-ID]/g; s{arn:aws\S*}{[REDACTED-ARN]}g; s/\b[0-9]{12}\b/[REDACTED-ACCT]/g; s/(?i)(aws_secret_access_key|aws_session_token|x-amz-security-token)\s*[:=]\s*\S+/$1=[REDACTED]/g' claude-review-output.md
+          # No redactor, or a scrub that fails, is a refusal: the file is removed so
+          # no later `always()` step can publish it raw.
+          if [ -z "${REDACTOR:-}" ] || [ ! -s "$REDACTOR" ] \
+            || ! python3 "$REDACTOR" --mode text claude-review-output.md; then
+            echo "::error::the base-owned redactor could not scrub claude-review-output.md. Refusing to publish it raw."
+            rm -f claude-review-output.md
+            exit 1
+          fi
+          # A BLOCK states a trigger and an observable wrong outcome, or it is a
+          # PASS. Dropped here, before the comment and the gate read the marker,
+          # so both and the local loop see the same verdict.
+          # --- block substantiation (copied into every lane; pinned by test_block_substantiation.py) ---
+          block_substantiated() {
+            local text
+            text="$(cat)"
+            grep -Eiq '^[[:space:]]*([-*][[:space:]]+)?(\*\*)?Trigger:(\*\*)?[[:space:]]*[^[:space:]*]' <<< "$text" \
+              && grep -Eiq '^[[:space:]]*([-*][[:space:]]+)?(\*\*)?Outcome:(\*\*)?[[:space:]]*[^[:space:]*]' <<< "$text"
+          }
+          drop_unsubstantiated_block_marker() {
+            local file="$1" head="$2" kept
+            grep -Fq "[BLOCK-MERGE] $head" "$file" || return 0
+            block_substantiated < "$file" && return 0
+            kept="$(mktemp)"
+            grep -Fv "[BLOCK-MERGE] $head" "$file" > "$kept" || true
+            cat "$kept" > "$file"
+            rm -f "$kept"
+            echo dropped
+          }
+          # --- end block substantiation ---
+          if [ -n "$(drop_unsubstantiated_block_marker claude-review-output.md "$HEAD")" ]; then
+            echo "::warning title=Unsubstantiated BLOCK::Opus 5.5 emitted [BLOCK-MERGE] for $HEAD without a Trigger: line and an Outcome: line, so the BLOCK is treated as PASS."
+          fi
 
       # Turn-budget exhaustion is its own outcome (#13296). A stage stopped at
       # --max-turns writes a `result` message with subtype `error_max_turns`
@@ -661,7 +729,7 @@ jobs:
             fi
             echo
             echo "False positive or not applicable? A repository writer can comment:"
-            echo "\`/ai-review override fable $HEAD: <one-sentence reason>\`"
+            echo "\`/ai-review override fable $HEAD false-positive: <reason, 20 to 500 characters>\`"
           } > /tmp/claude-summary.md
           # ONE publication primitive for every marker-comment write in this
           # lane; test_ai_review_workflows_comment_writes.py pins it byte-identical across all
@@ -1171,7 +1239,7 @@ jobs:
       # review text (same contract as codex-review.yml):
       #   - [OPUS-REVIEWED] <sha> — the review ran and produced a verdict for
       #     THIS commit. Absent => fail rather than silently pass.
-      #   - [BLOCK-MERGE] <sha>   — it additionally found a WHAT-BLOCKS issue.
+      #   - [BLOCK-MERGE] <sha>   — it additionally found a complete BLOCKING item.
       #     This is the ONLY thing that blocks the merge. There is deliberately
       #     no label-scanning backstop, so a label the model chooses can never
       #     override the contract.
@@ -1198,7 +1266,7 @@ jobs:
           && steps.post.outputs.retained_verdict_artifact != ''
           )
         # NEVER fatal. A lane's conclusion is read by pr-readiness.yml, and for
-        # the three advisory labels ANY non-success conclusion is reported as
+        # the three whole-design labels ANY non-success conclusion is reported as
         # `<label> (BLOCK)` -- a judged-wrong verdict. So a transport flake here,
         # or an `if-no-files-found: error` on a directory that did not survive,
         # would invent a verdict nobody reached. Retention is evidence ABOUT a
@@ -1278,7 +1346,7 @@ jobs:
             echo "::error::Opus 5.5 review flagged a blocking issue on $HEAD — see the posted review summary."
             exit 1
           fi
-          # Advisory coherence signal (never fails the build): a BLOCKING-labelled
+          # Coherence signal (never fails the build): a BLOCKING-labelled
           # finding without the marker means the model's label and its verdict
           # disagree. Worth tuning the prompt over; not worth blocking a merge.
           if grep -qE '^[[:space:]]*[-*]?[[:space:]]*(\*\*)?BLOCKING\b' claude-review-output.md; then

@@ -434,6 +434,25 @@ class TestAcpRuntimeLoadSession:
         assert handle.model == ""
 
     @pytest.mark.asyncio
+    async def test_load_session_does_not_bill_the_restored_ledger(self, monkeypatch):
+        """A resumed session's first cumulative cost carries its lifetime spend."""
+        rt, _, _ = _make_runtime()
+        rt._can_load_session = True
+
+        async def _fake_send(method, params, timeout=None):
+            if method == METHOD_SESSION_LOAD:
+                return {"modes": {"currentModeId": "kirocrew"}, "models": []}
+            return {}
+
+        monkeypatch.setattr(rt, "_send_and_await", _fake_send)
+        handle = await rt.load_session("/f.json", "sid-cost", agent="kirocrew")
+
+        handle.last_prompt_stats.apply_cost_cumulative(5.00)
+        assert handle.last_prompt_stats.cost_usd == 0.0
+        handle.last_prompt_stats.apply_cost_cumulative(5.04)
+        assert handle.last_prompt_stats.cost_usd == pytest.approx(0.04)
+
+    @pytest.mark.asyncio
     async def test_load_session_raises_when_capability_absent(self):
         rt, _, _ = _make_runtime()
         rt._can_load_session = False
@@ -718,7 +737,7 @@ class TestAcpRuntimeLoadSession:
         monkeypatch.setattr(rt, "_send_and_await", _fake_send)
         await rt.load_session("/k/sid.json", "sid", cwd="/w", agent="kirocrew")
 
-        # Mirror of AcpClient's kiro-branch load_params (client.py step 2).
+        # Mirror of AcpClient's kiro-branch load_params (client_start.py step 2).
         # Direct managed tools retain per-session caller attribution on resume;
         # the pooled case is covered by test_load_session_redeclares_pooled_stubs.
         servers = captured["mcpServers"]
@@ -952,6 +971,9 @@ class TestAcpRuntimeLoadSession:
 
         builders = {**_builders(rt_mod), **_builders(client_mod)}
         for owner in client_mod._CLIENT_OWNERS:
+            builders.update(_builders(sys.modules[owner]))
+        # runtime.py's owner modules (runtime_*.py) hold code that was its own.
+        for owner in rt_mod._RUNTIME_OWNERS:
             builders.update(_builders(sys.modules[owner]))
         # Exempt: builders whose session exists only to read the session/new
         # response and is terminated before any prompt. Such a session never

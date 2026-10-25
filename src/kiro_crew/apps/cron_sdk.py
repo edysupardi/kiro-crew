@@ -26,7 +26,7 @@ event loop.
   window and the whole gateway (chat, timers, heartbeats) stalls with it. Inline
   is not an option either — ``CronService._file_lock``'s structural guard
   rejects a store-lock acquisition on a thread with a live loop. On-loop sync
-  callers must use ``*_async``. No in-tree caller is affected; ``bridges.py``
+  callers must use ``*_async``. No in-tree caller is affected; ``bridges_crons.py``
   and ``hooks_integration.py`` use the async variants exclusively.
 * ``remove_all`` removes every owned job in ONE atomic
   ``CronService.remove_jobs_by_owner`` transaction (not a per-id loop, and not
@@ -233,7 +233,7 @@ class CronSDK:
 
         A rejected payload never lands in the cron service's in-memory state.
         Safe even if a future caller reaches a mutator without the upstream
-        ``bridges.py`` vetting; legitimate callers (which already vet and skip
+        ``bridges_crons.py`` vetting; legitimate callers (which already vet and skip
         bad entries) are unaffected. command/script are NOT executed here — at
         fire time the gateway routes them through the OS-level sandbox
         (``cron_script.run_command_sandboxed`` / ``run_script_sandboxed``). The
@@ -279,7 +279,7 @@ class CronSDK:
             # resolve_script_path rejects a missing or sensitive file, and any
             # path outside ~/.kiro/crew/crons/ or this app's own bundle, by
             # raising. Emit a SEL denied audit on that path too, mirroring
-            # bridges.py, so every denial is audited. `app_root` is what makes a
+            # bridges_crons.py, so every denial is audited. `app_root` is what makes a
             # bundle-relative spec ("job.py:run", the only spelling an app can
             # write without knowing the install location) resolve next to the
             # app instead of against the gateway process's CWD.
@@ -333,6 +333,7 @@ class CronSDK:
         approval_mode: str,
         timeout_secs: int,
         timeout: int,
+        strict_schedule: bool = False,
         folder_id: str = "",
         app_manifest_digest: str = "",
     ) -> dict[str, Any]:
@@ -402,6 +403,10 @@ class CronSDK:
         # no stamp, so their kwargs stay exactly what they were.
         if app_manifest_digest:
             kwargs["app_manifest_digest"] = app_manifest_digest
+        # Only when set, for the same reason: the manifest bridge is the one caller
+        # that asks for an exact start time.
+        if strict_schedule:
+            kwargs["strict_schedule"] = True
         return kwargs
 
     # ── Create ──
@@ -559,6 +564,7 @@ class CronSDK:
         approval_mode: str = "",
         timeout_secs: int = 0,
         timeout: int = 0,
+        strict_schedule: bool = False,
         folder_id: str = "",
         app_manifest_digest: str = "",
     ) -> Any:
@@ -600,6 +606,7 @@ class CronSDK:
                 enabled=enabled, timezone=timezone, skip_dates=skip_dates,
                 approval_mode=approval_mode, timeout_secs=timeout_secs,
                 timeout=timeout,
+                strict_schedule=strict_schedule,
                 folder_id=folder_id,
                 app_manifest_digest=app_manifest_digest,
             ),

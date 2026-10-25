@@ -553,7 +553,7 @@ def _flag_ports(cfg, tmp_path, mp):
 def _flag_client(cfg, tmp_path, mp):
     _mint_after_port(cfg, tmp_path, mp)
     mp.setattr(rt, "port_owner", _value(rt.OWNER_POD))
-    mp.setattr(rt, "loopback_urlopen", _raiser("windows-branch"))
+    mp.setattr(rt, "tcp_verified_urlopen", _raiser("windows-branch"))
     mp.setattr(rt, "pod_socket_path", _raiser("posix-branch"))
     return _mint(cfg, tmp_path, mp)
 
@@ -572,6 +572,9 @@ def _flag_boot(cfg, tmp_path, mp):
 
     mp.setattr(rt, "_boot_unguarded", _unguarded)
     mp.setattr(rt, "_refuse", _raiser("windows-branch"))
+    # The Windows branch claims a reservation before the body runs; without one it
+    # refuses on its own and the body's OSError is never raised.
+    rt.win_backend.runs.reserve(cfg, _POD)
     return _boot(cfg, tmp_path, mp)
 
 
@@ -1368,7 +1371,7 @@ def test_every_reexport_src_reads_on_the_runtime_is_named_for_type_checkers() ->
         for name in _names_read_through_rt(ast.parse(path.read_text(encoding="utf-8"))):
             read.setdefault(name, set()).add(path.name)
     reading_files = set().union(*read.values())
-    assert "cli.py" in reading_files and "worktree_ops.py" in reading_files, reading_files
+    assert "cli.py" in reading_files and "worktree_ops_pods.py" in reading_files, reading_files
     missing = sorted(name for name in read if name in rt._EXPORTS and name not in declared)
     assert missing == [], {name: sorted(read[name]) for name in missing}
 

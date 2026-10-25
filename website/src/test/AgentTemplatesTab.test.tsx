@@ -117,6 +117,13 @@ const openMore = () => {
   return screen.findAllByRole('menuitem')
 }
 
+/** The themed ConfirmDialog answers a dirty-guard ask: press its confirm button
+ *  (`yes`) or Cancel (`!yes`), by the action's label. */
+const answerConfirm = async (confirmLabel: string, yes: boolean) => {
+  const dialog = await screen.findByRole('dialog')
+  fireEvent.click(within(dialog).getByRole('button', { name: yes ? confirmLabel : 'Cancel' }))
+}
+
 beforeEach(() => {
   Object.values(mockApi).forEach(m => m.mockReset())
   mockDispatch.mockReset(); mockNavigate.mockReset(); mockCreateSlot.mockClear()
@@ -141,16 +148,16 @@ describe('AgentTemplatesTab roster', () => {
     renderTab()
     await screen.findByRole('option', { name: /^reviewer/ })
     const groups = screen.getAllByRole('group').map(g => g.getAttribute('aria-label'))
-    expect(groups).toEqual(['Mine', 'Crewmates with their own copy', 'From packages', 'Built-in'])
+    expect(groups).toEqual(['Mine', 'Mates with their own copy', 'From packages', 'Built-in'])
     expect(within(screen.getByRole('group', { name: 'Mine' })).getByRole('option', { name: /^reviewer/ })).toBeInTheDocument()
     // The own-copy group is glossed, and its row is described in the tab's
     // own word rather than the fork-written "private copy" sentence.
-    const overrides = screen.getByRole('group', { name: 'Crewmates with their own copy' })
-    expect(within(overrides).getByText(/One crewmate’s edited version/)).toBeInTheDocument()
-    expect(within(overrides).getByRole('option', { name: /^pr-bot/ })).toHaveTextContent('Crewmate pr-bot’s own copy of reviewer')
+    const overrides = screen.getByRole('group', { name: 'Mates with their own copy' })
+    expect(within(overrides).getByText(/One mate’s edited version/)).toBeInTheDocument()
+    expect(within(overrides).getByRole('option', { name: /^pr-bot/ })).toHaveTextContent('Mate pr-bot’s own copy of reviewer')
     // One fact, one phrase: the count badge uses the same own-copy term as
     // the group heading and the banner.
-    expect(within(screen.getByRole('group', { name: 'Mine' })).getByText('1 crewmate with its own copy')).toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: 'Mine' })).getByText('1 mate with its own copy')).toBeInTheDocument()
     expect(within(screen.getByRole('group', { name: 'From packages' })).getByRole('option', { name: /atlas/ })).toBeInTheDocument()
     // The first row is auto-selected and its detail read fires.
     await waitFor(() => expect(mockApi.agentDetail).toHaveBeenCalledWith('reviewer'))
@@ -164,11 +171,11 @@ describe('AgentTemplatesTab roster', () => {
     expect(within(row).getAllByRole('button')).toHaveLength(2)
     let items = await openMore()
     expect(items.map(i => i.textContent)).toEqual([
-      expect.stringContaining('Enroll as crewmate'), 'Duplicate', 'Delete',
+      expect.stringContaining('Enroll as mate'), 'Duplicate', 'Delete',
     ])
     // The enroll item says what enrolling starts. `pr-bot` runs this template
     // under its own name, so a crewmate NAMED reviewer can still be enrolled.
-    expect(items[0]).toHaveTextContent('Adds a crewmate with its own memory')
+    expect(items[0]).toHaveTextContent('Adds a mate with its own memory')
     expect(items[0]).not.toHaveAttribute('data-disabled')
     fireEvent.keyDown(items[0], { key: 'Escape' })
 
@@ -176,7 +183,7 @@ describe('AgentTemplatesTab roster', () => {
     await waitFor(() => expect(mockApi.agentDetail).toHaveBeenCalledWith('atlas'))
     items = await openMore()
     expect(items.map(i => i.textContent)).toEqual([
-      expect.stringContaining('Adds a crewmate with its own memory'), 'Duplicate to edit',
+      expect.stringContaining('Adds a mate with its own memory'), 'Duplicate to edit',
     ])
     fireEvent.keyDown(items[0], { key: 'Escape' })
     // The read-only banner carries the reason once and the remedy beside it;
@@ -213,7 +220,7 @@ describe('AgentTemplatesTab roster', () => {
     // The usage line names every holder kind the guard counts, up front, and
     // each is a drill-in to where that holder lives. One fact, one phrasing:
     // the line says "Runs 1 crewmate" exactly as the list badge does.
-    expect(screen.getAllByText(/Runs 1 crewmate/).length).toBeGreaterThanOrEqual(2)
+    expect(screen.getAllByText(/Runs 1 mate/).length).toBeGreaterThanOrEqual(2)
     expect(screen.queryByText(/Runs as/)).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '1 chat folder' }))
     expect(mockNavigate).toHaveBeenLastCalledWith('/chat')
@@ -222,7 +229,7 @@ describe('AgentTemplatesTab roster', () => {
     fireEvent.click(screen.getByRole('button', { name: '1 webhook' }))
     expect(mockNavigate).toHaveBeenLastCalledWith('/webhooks')
     const items = await openMore()
-    expect(items[0]).toHaveTextContent('Already enrolled as a crewmate.')
+    expect(items[0]).toHaveTextContent('Already enrolled as a mate.')
     expect(items[0]).toHaveAttribute('data-disabled')
     fireEvent.click(items.find(i => i.textContent === 'Delete')!)
     // The row already shows holders, so the "nothing points at it" confirm is
@@ -235,20 +242,20 @@ describe('AgentTemplatesTab roster', () => {
     // A private copy is named by the copy with its crew as a gloss, and links to
     // that crew's pane -- it is not a dead end.
     expect(within(dialog).getByText('pr-bot-copy')).toBeInTheDocument()
-    expect(within(dialog).getByText('crewmate pr-bot')).toBeInTheDocument()
+    expect(within(dialog).getByText('mate pr-bot')).toBeInTheDocument()
     fireEvent.click(within(dialog).getAllByRole('button', { name: /Open/ }).at(-1)!)
     expect(mockNavigate).toHaveBeenCalledWith('/members?member=pr-bot')
   })
 
-  it('says plainly when no crewmate runs a template', async () => {
+  it('says plainly when no mate runs a template', async () => {
     renderTab()
     await waitFor(() => expect(mockApi.agentDetail).toHaveBeenCalledWith('reviewer'))
     fireEvent.click(option('atlas'))
     await waitFor(() => expect(mockApi.agentDetail).toHaveBeenCalledWith('atlas'))
-    expect((await screen.findAllByText('No crewmate runs this')).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText('No mate runs this')).length).toBeGreaterThan(0)
   })
 
-  it('sends a private copy to its crewmate instead of offering Duplicate to edit', async () => {
+  it('sends a private copy to its mate instead of offering Duplicate to edit', async () => {
     renderTab()
     await waitFor(() => expect(mockApi.agentDetail).toHaveBeenCalledWith('reviewer'))
     fireEvent.click(option('pr-bot'))
@@ -256,9 +263,9 @@ describe('AgentTemplatesTab roster', () => {
     expect(screen.queryByRole('button', { name: /Duplicate to edit/ })).toBeNull()
     // Said as what it is, not as a template nobody enrolled -- in the list row
     // and again in the detail's usage line.
-    expect(screen.getAllByText('Crewmate pr-bot’s own copy of reviewer')).toHaveLength(2)
-    expect(screen.queryByText('No crewmate runs this')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: /Open crewmate/ }))
+    expect(screen.getAllByText('Mate pr-bot’s own copy of reviewer')).toHaveLength(2)
+    expect(screen.queryByText('No mate runs this')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /Open mate/ }))
     expect(mockNavigate).toHaveBeenCalledWith('/members?member=pr-bot')
     expect(mockLeave).toHaveBeenLastCalledWith(expect.any(Function), '/members?member=pr-bot')
   })
@@ -344,7 +351,7 @@ describe('AgentTemplatesTab editing', () => {
     await qc.invalidateQueries({ queryKey: ['agent-templates'] })
     await waitFor(() => expect(mockApi.agentDetail).toHaveBeenCalledTimes(2))
     expect(screen.getByRole('textbox', { name: 'Prompt' })).toHaveValue('still typing')
-    expect(screen.getByText(/Unsaved changes · affects 1 crewmate/)).toBeInTheDocument()
+    expect(screen.getByText(/Unsaved changes · affects 1 mate/)).toBeInTheDocument()
     // No restart control on Customize: the hint names the limit and points at
     // the remedy where it now lives (Apply & Restart on Connections) instead of
     // at a header button here.
@@ -358,11 +365,9 @@ describe('AgentTemplatesTab editing', () => {
     const prompt = await screen.findByRole('textbox', { name: 'Prompt' })
     await waitFor(() => expect(prompt).toHaveValue('prompt of reviewer'))
     fireEvent.change(prompt, { target: { value: 'changed' } })
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     fireEvent.click(option('atlas'))
-    expect(confirmSpy).toHaveBeenCalled()
+    await answerConfirm('Discard', false)
     expect(mockApi.agentDetail).not.toHaveBeenCalledWith('atlas')
-    confirmSpy.mockRestore()
   })
 
   it('reports a refused save inside the save bar, beside the Save button', async () => {
@@ -381,14 +386,15 @@ describe('AgentTemplatesTab editing', () => {
     expect(alert.closest('div')).toBe(saveBtn.closest('div'))
     // Discard asks first (one click must not erase a long edit for good), then
     // clears the error along with the draft. Declined, both stay.
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
-    fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
-    expect(confirm).toHaveBeenLastCalledWith('Discard unsaved changes?')
+    const saveBarDiscard = () => within(saveBtn.parentElement!).getByRole('button', { name: 'Discard' })
+    fireEvent.click(saveBarDiscard())
+    expect(await screen.findByRole('dialog')).toHaveTextContent('Discard unsaved changes?')
+    await answerConfirm('Discard', false)
     expect(screen.getByRole('alert')).toBeInTheDocument()
     expect(prompt).toHaveValue('x')
-    confirm.mockReturnValue(true)
-    fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
-    expect(screen.queryByRole('alert')).toBeNull()
+    fireEvent.click(saveBarDiscard())
+    await answerConfirm('Discard', true)
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
     expect(prompt).toHaveValue('prompt of reviewer')
   })
 
@@ -468,12 +474,11 @@ describe('AgentTemplatesTab actions', () => {
     fireEvent.change(prompt, { target: { value: 'dirty' } })
     const chat = screen.getByRole('button', { name: /Chat with this custom agent/ })
     expect(chat).toBeEnabled()
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     fireEvent.click(chat)
-    expect(confirmSpy).toHaveBeenCalled()
+    await answerConfirm('Discard', false)
     expect(mockCreateSlot).not.toHaveBeenCalled()
-    confirmSpy.mockReturnValue(true)
     fireEvent.click(chat)
+    await answerConfirm('Discard', true)
     await waitFor(() => expect(mockCreateSlot).toHaveBeenCalledWith({ agent: 'reviewer', agent_kind: 'template' }))
   })
 
@@ -485,15 +490,12 @@ describe('AgentTemplatesTab actions', () => {
       code: 'template_referenced',
       references: [{ kind: 'crew', id: 'pr-bot', label: 'pr-bot' }, { kind: 'schedule', id: 'job-1', label: 'nightly triage' }],
     }))
-    // The spy is shared across this file's tests; count from here.
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
-    confirm.mockClear()
     renderTab()
     await waitFor(() => expect(mockApi.agentDetail).toHaveBeenCalledWith('reviewer'))
     const items = await openMore()
     fireEvent.click(items.find(i => i.textContent === 'Delete')!)
+    await answerConfirm('Delete', true)
     const dialog = await screen.findByRole('dialog', { name: /Can’t delete reviewer yet/ })
-    expect(confirm).toHaveBeenCalledTimes(1)
     expect(within(dialog).getByText('nightly triage')).toBeInTheDocument()
     expect(within(dialog).getByText('pr-bot')).toBeInTheDocument()
     // The roster is untouched: the row is still listed.
@@ -581,11 +583,11 @@ describe('AgentTemplatesTab actions', () => {
     await waitFor(() => expect(prompt).toHaveValue('prompt of reviewer'))
     fireEvent.change(prompt, { target: { value: 'edited reviewer prompt' } })
     // New template is a row switch: the dirty guard asks first.
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     fireEvent.click(screen.getByRole('button', { name: /New custom agent/ }))
-    expect(screen.queryByRole('dialog')).toBeNull()
-    expect(confirmSpy).toHaveBeenCalled()
-    confirmSpy.mockReturnValue(true)
+    await answerConfirm('Discard', false)
+    expect(screen.queryByRole('dialog', { name: 'New custom agent' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /New custom agent/ }))
+    await answerConfirm('Discard', true)
     const CREATED = row({ name: 'fresh', filename: 'fresh.json' })
     mockApi.agentTemplateCreate.mockImplementation(async () => {
       mockApi.agentTemplates.mockResolvedValue({ templates: [MINE, CREATED, PKG, RUNTIME, COPY] })
@@ -715,13 +717,13 @@ describe('AgentTemplatesTab actions', () => {
     mockApi.agentTemplates.mockResolvedValue({ templates: [FREE, PKG, RUNTIME, COPY] })
     renderTab()
     await waitFor(() => expect(mockApi.agentDetail).toHaveBeenCalledWith('reviewer'))
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     mockApi.agentTemplateDelete.mockImplementation(async () => {
       mockApi.agentTemplates.mockResolvedValue({ templates: [PKG, RUNTIME, COPY] })
       return { ok: true }
     })
     const items = await openMore()
     fireEvent.click(items.find(i => i.textContent === 'Delete')!)
+    await answerConfirm('Delete', true)
     await waitFor(() => expect(mockApi.agentTemplateDelete).toHaveBeenCalledWith('reviewer'))
     // The list picks another row and the line rides over its detail, so it
     // names what went rather than reading as a verdict on the row on screen.
@@ -741,13 +743,13 @@ describe('AgentTemplatesTab actions', () => {
       await waitFor(() => expect(prompt).toHaveValue('prompt of reviewer'))
       fireEvent.change(prompt, { target: { value: 'dirty' } })
       expect(screen.queryByRole('listbox')).toBeNull()
-      vi.spyOn(window, 'confirm').mockReturnValue(true)
       mockApi.agentTemplateDelete.mockImplementation(async () => {
         mockApi.agentTemplates.mockResolvedValue({ templates: [PKG, RUNTIME, COPY] })
         return { ok: true }
       })
       const items = await openMore()
       fireEvent.click(items.find(i => i.textContent === 'Delete')!)
+      await answerConfirm('Delete', true)
       await waitFor(() => expect(mockApi.agentTemplateDelete).toHaveBeenCalledWith('reviewer'))
       // Back on the list, with the deleted template's draft gone -- not a
       // detail pane over a hidden list with nothing selected.
@@ -770,8 +772,8 @@ describe('AgentTemplatesTab actions', () => {
     fireEvent.change(prompt, { target: { value: 'dirty' } })
     await waitFor(() => expect(added.mock.calls.filter(c => c[0] === 'beforeunload').length).toBe(1))
     // Discard (confirmed) cleans the draft; the reload warning goes with it.
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
+    await answerConfirm('Discard', true)
     await waitFor(() => expect(removed.mock.calls.filter(c => c[0] === 'beforeunload').length).toBe(1))
     added.mockRestore(); removed.mockRestore()
   })
@@ -818,7 +820,7 @@ describe('AgentTemplatesTab — enrolling reaches the crew registry', () => {
     )
   }
 
-  it('shows the enrolled crewmate on the Crews roster', async () => {
+  it('shows the enrolled mate on the Crews roster', async () => {
     // Pre-write world first, post-write world after: only a second registry
     // read can reach the crewmate the enroll just created (#12740's idiom).
     mockApi.kirocrewAgents
@@ -833,6 +835,13 @@ describe('AgentTemplatesTab — enrolling reaches the crew registry', () => {
     const items = await openMore()
     fireEvent.click(items[0])
     await waitFor(() => expect(mockApi.createKirocrewAgent).toHaveBeenCalled())
+    // Enrolling defaults the crewmate to a name-seeded ICON, the same default
+    // the New-crewmate dialog applies — never the trait ghost a missing avatar
+    // falls back to on render (#18616). Headless create paths (CLI, raw API)
+    // are tracked separately for backend seeding.
+    expect(mockApi.createKirocrewAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'reviewer', avatar: expect.objectContaining({ kind: 'icon' }) }),
+    )
 
     await waitFor(() => expect(screen.getByTestId('crews-roster')).toHaveTextContent('reviewer'))
   })
@@ -979,7 +988,7 @@ describe('AgentTemplatesTab — the default custom agent bar (#18411)', () => {
     // Opens with the failed action, then names what still starts: the select
     // snaps back to it, so the sentence must not read as if reviewer had been
     // the default.
-    expect(err).toHaveTextContent(/^Couldn’t switch to reviewer: it’s a crewmate’s private copy\. New sessions still use kirocrew\.$/)
+    expect(err).toHaveTextContent(/^Couldn’t switch to reviewer: it’s a mate’s private copy\. New sessions still use kirocrew\.$/)
   })
 
   it('lets the reader put a refusal away, and keeps the read failure without a dismiss', async () => {
@@ -1128,6 +1137,6 @@ describe('AgentTemplatesTab — the default custom agent bar (#18411)', () => {
     renderTab()
     await waitFor(() => expect(trigger()).toHaveTextContent('kirocrew'))
     // The fixture roster carries a private copy, so the note shows.
-    expect(screen.getByText('Not offered here: crewmates’ own copies, scheduled-job-only agents, agents an app installed. Agents under “From packages” can be picked.')).toBeInTheDocument()
+    expect(screen.getByText('Not offered here: mates’ own copies, scheduled-job-only agents, agents an app installed. Agents under “From packages” can be picked.')).toBeInTheDocument()
   })
 })

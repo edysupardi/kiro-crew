@@ -280,6 +280,7 @@ def _work_new_item(item_id: str, stamp_ms: int) -> dict[str, Any]:
         "created_at": _work_iso(stamp_ms),
         "closed_at": None,
         "decided_at": None,
+        "pending_since": None,
         "events": [],
     }
 
@@ -433,7 +434,7 @@ def _work_step(state: dict[str, Any], entry: Entry) -> None:
                 item[name] = _work_field(name, data[name])
         # The committed stamps ride along: an item with a report or a close from
         # before the projection keeps them across a rebuild.
-        for name in ("last_report_at", "closed_at", "decided_at"):
+        for name in ("last_report_at", "closed_at", "decided_at", "pending_since"):
             if isinstance(data.get(name), str) and data[name]:
                 item[name] = _work_stamp(data[name], entry.time)
         # The baseline carries the board's lineage and goal too, whoever wrote it.
@@ -605,6 +606,15 @@ def _work_apply(item: dict[str, Any], data: Mapping[str, Any], stamp_ms: int) ->
             item["closed_at"] = _work_stamp(data.get("closed_at"), stamp_ms)
         elif action == "decide":
             item["decided_at"] = _work_stamp(data.get("decided_at"), stamp_ms)
+        elif action == "verdict":
+            # A pending verdict carries the stamp its run began at; any other verdict
+            # ends the run, so an absent field reads as cleared, not unchanged.
+            carried = data.get("pending_since")
+            running = item["verdict"] == "pending" and isinstance(carried, str) and bool(carried)
+            item["pending_since"] = _work_stamp(carried, stamp_ms) if running else None
+        elif action == "accept":
+            # A pending run belongs to the bar it measured; the new bar starts its own.
+            item["pending_since"] = None
     kind = _as_str(data.get("event_kind"))
     if not kind:
         return

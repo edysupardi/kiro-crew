@@ -93,7 +93,7 @@ retries) rather than an unregistered profile still holding an authorization
 (`consent_unwritable` is the 500 that reports the former). The share,
 library, and backup ledgers are account-keyed and are left alone: they describe
 the bucket, which still exists and still bills, and must render unchanged when
-the key is registered again. `test_aws_control_app.py::TestProfileUnregister`
+the key is registered again. `test_aws_control_app_profiles.py::TestProfileUnregister`
 pins the registry-only boundary, the default re-pick, and the grant sweep.
 
 AWS Control reaches AWS through deploy-engine helpers: account inspection uses
@@ -114,7 +114,7 @@ account target and S3 consent after confirmation and serializes creation so
 concurrent confirmations cannot create competing drives.
 `test_aws_control_app.py::TestDriveGuards.test_bootstrap_without_confirm_previews_and_creates_nothing`,
 `TestRound3Hardening.test_concurrent_bootstrap_confirms_create_exactly_one_drive`,
-and `TestBootstrapReauthorizes.test_consent_withdrawn_mid_create_refuses_and_creates_nothing`
+and `test_aws_control_app_profiles.py::TestBootstrapReauthorizes.test_consent_withdrawn_mid_create_refuses_and_creates_nothing`
 pin those guarantees.
 
 A created drive is ownership-checked before it becomes discoverable. The storage
@@ -129,7 +129,7 @@ Drive objects live beneath the `artifacts/`, `drive/`, and `backup/` prefixes.
 `storage.validate_key` rejects paths that could escape a section. Folder deletion
 uses a validated, slash-anchored prefix, so it cannot target an empty section,
 the bucket root, or a sibling with a common name prefix.
-`test_aws_control_routes.py::TestDriveFolderDelete.test_delete_rejects_an_empty_path`
+`test_aws_control_routes_folders_shares.py::TestDriveFolderDelete.test_delete_rejects_an_empty_path`
 and `test_aws_control_storage.py::TestDeletePrefix.test_deletes_every_object_and_returns_the_count`
 pin that guard.
 
@@ -279,6 +279,27 @@ a data home that cannot be resolved at all refuses the spawn
 (`SandboxCeilingUnsealable`) rather than launching the agent with the directory
 unmasked.
 
+### Storage composition and source ownership
+
+`backend.storage` is the storage engine's only import path and patch surface, and it keeps
+the object operations: the listings, `put_file` and `get_file`, copy and delete, folders
+and `delete_prefix`, `object_exists`, `head_object_meta`, `presign`, `usage` and
+`search_keys`, with `validate_key`. Three owners sit below it, lowest layer first:
+
+| Owner | Holds |
+|---|---|
+| `backend/storage_drive.py` | the bucket naming scheme and tags, `SECTION_PREFIXES` and `section_key`, `find_drive`, `_assert_owned_by` and `create_drive` |
+| `backend/storage_staging.py` | `STAGING_DIR_LEAF`, `staging_root`, `pinned_staging` and `get_object_head_bytes` |
+| `backend/storage_versions.py` | `validate_version_id`, the batched delete helpers, `DeleteObjectsPartialFailure`, `list_object_versions`, `PartialVersionDelete` and `delete_object_versions` |
+
+`storage` is a mirrored facade on the same terms as `routes`, so a patch of
+`storage._checked` or `storage.find_drive` reaches every reader, and the two
+partial-failure errors keep `storage` as their `__module__`. `storage.py` keeps
+`list_section` and `search_keys`, the two listings its row in
+`security_posture.NON_EGRESS_REDACTION_MODULES` covers, and the link-screen baseline
+declares `staging_root` as a site of `storage_staging.py`.
+`test/test_storage_owners_facade.py` pins the owners, the patch reach and the error homes.
+
 ## Publishing and sharing
 
 `routes._publish_gate` applies the shared fail-closed publish-governance decision
@@ -292,7 +313,7 @@ The share implementation is a presigned URL and a local metadata ledger only.
 URL cannot be revoked by this app before it expires; `shares.forget_share` only
 removes its ledger record. Backup objects are not shareable.
 `test_aws_control_app.py::TestBackupNotShareable.test_share_of_backup_section_is_refused_outright`
-and `test_aws_control_routes.py::TestSharesListForget.test_forget_removes_a_known_share`
+and `test_aws_control_routes_folders_shares.py::TestSharesListForget.test_forget_removes_a_known_share`
 pin those boundaries.
 
 The share ledger is CURRENT STATE, not an audit log: `shares._prune` drops every
@@ -330,7 +351,7 @@ so a throttle or a timeout is indistinguishable from a 404, which is correct whe
 refusing to mint and would mark live shares dead here. The ledger is read BEFORE
 the listing is taken, which is what makes an `observed_at` cutoff unnecessary: no
 row in hand can postdate the listing.
-`test_aws_control_routes.py::TestSharesListForget` pins the mark, the read order,
+`test_aws_control_routes_folders_shares.py::TestSharesListForget` pins the mark, the read order,
 the unmarked degradation, the logged reason, and the empty-ledger case that takes
 no listing at all.
 
@@ -449,7 +470,7 @@ traversal pinning is available. `backup._authorize_upload` requires the app to
 remain enabled, the S3 grant to still name the target account, and shutdown not
 to be in progress before upload. `backup.restore_download` stages an archive
 locally; it does not restore it into live gateway state.
-`test_aws_control_app.py::TestRound17Hardening.test_restore_refuses_a_symlinked_destination`
+`test_aws_control_app_hardening.py::TestRound17Hardening.test_restore_refuses_a_symlinked_destination`
 pins the staged restore safety boundary.
 
 Both runs build their archive and then decide whether to send it.
@@ -503,7 +524,7 @@ loses a backup it had.
 
 Two normalizations are part of the digest's definition, each measured against the real
 engine rather than assumed. `_VOLATILE_MANIFEST_FIELDS` drops `created_at` from
-`MANIFEST.json`, the one field `snapshot.py` rewrites on a rebuild of an unchanged tree;
+`MANIFEST.json`, the one field `snapshot_build.py` rewrites on a rebuild of an unchanged tree;
 the member's other fields stay, because `purpose`, `staging` and `version` are not
 derivable from the file set. The snapshot bundle's root directory carries a timestamp, so
 snapshots pass `volatile_root=True` while the sessions archive passes `False` -- its
@@ -768,13 +789,14 @@ over every version under such a key, because every version is billed. It is
 reported even when the sweep aborts on an untrustworthy listing, which is the case
 most likely to carry a large one.
 
-`test_aws_control_backup_retention.py` pins the keep-newest rule, the default-off
+The retention suite (`test_aws_control_backup_retention*.py`) pins the keep-newest
+rule, the default-off
 switch including an unconfigured install deleting nothing, every unusable stored
 value reading as off, the refusal to infer the count from `nightly` in either
 direction, a garbled count beside intact upload records still deleting nothing, the
 failure log naming the erased count in one direction and saying nothing was deleted in
 the other, the two off reasons staying distinguishable with their different audit
-outcomes, and `test_aws_control_routes.py` pins the enablement route: registration,
+outcomes, and `test_aws_control_routes_backup.py` pins the enablement route: registration,
 the write, `null` clearing it, a `bool` and a string and an out-of-range count all
 refused, a missing field refused rather than read as off, and a failed state write
 reporting the failure rather than the value. The retention suite also pins the writer
@@ -1167,7 +1189,7 @@ and any other caller holds it, because the exposure it prevents has no recovery.
 `_upload_lock` takes ONLY the sidecar file lock, deliberately not `_run_lock` --
 the same shape `_delete_under_the_retention_gate` composes, and for the same
 reason. `_run_lock` also serializes `last_runs`, which the dashboard's backup
-status read goes through (`routes.py`), so holding it across a PUT allowed up to
+status read goes through (`routes_parts/backups.py`), so holding it across a PUT allowed up to
 `_PUSH_TIMEOUT_SECS` stalled every account's status surface for one account's
 upload. The revocation guarantee does not need `_run_lock`: the setter
 (`set_sessions_layer_b` -> `_locked_state_update` -> `_state_lock`) takes this
@@ -1235,7 +1257,9 @@ torn state the read-once rule exists to prevent. Only the withdrawn direction
 refuses; a grant arriving mid-build leaves an archive without Layer B, which the
 next run picks up.
 
-`test_aws_control_backup.py::TestSessionsArchiveLayerBGate` pins both directions,
+`test_aws_control_backup_layer_b.py::TestSessionsArchiveLayerBGatePermission` and
+`test_aws_control_backup_layer_b_mid_build.py::TestSessionsArchiveLayerBGateMidBuild`
+pin both directions,
 that a permitted upload holds the setter's lock, that a scheduled withheld one holds
 it too, and that an owner-initiated withheld one does not, that
 no `config.json` key can grant it, that a grant does not cross accounts, and that
@@ -1318,7 +1342,7 @@ names, and length-bounded by `backup.sanitize_label`; the transfer is
 range-bounded through `storage.get_object_head_bytes`, since the object's size is
 another install's choice. The dashboard renders a foreign label in quotation marks
 beside the owning id so the self-asserted part is visibly self-asserted.
-`test_aws_control_backup.py::TestLabelIsDisplayOnly.test_a_published_label_cannot_make_a_foreign_archive_restorable`
+`test_aws_control_backup_ownership.py::TestLabelIsDisplayOnly.test_a_published_label_cannot_make_a_foreign_archive_restorable`
 pins that the gate never reads it.
 
 `backup.restore_download` refuses every archive it cannot PROVE is this install's
@@ -1653,10 +1677,10 @@ narrower than the owner-triggered route's gate, never wider.
 ### Backup composition and source ownership
 
 `backend.backup` is the backup engine's only import path and its only patch surface.
-`routes.py`, `hooks.py` and the engine's tests reach it as `backup.X`, private helpers
-included; only the composition-contract test imports a part directly. The rules it
-composes live in the private package `backend.backup_parts`, one owner per
-responsibility, lowest layer first:
+`routes_parts/backups.py`, `hooks.py` and the engine's tests reach it as `backup.X`,
+private helpers included; only the composition-contract test imports a part directly.
+The rules it composes live in the private package `backend.backup_parts`, one owner
+per responsibility, lowest layer first:
 
 | Owner | Holds |
 |---|---|
@@ -1671,21 +1695,26 @@ responsibility, lowest layer first:
 | `backup_parts/uploads.py` | `_authorize_upload`, `_refuse_upload`, `_authorize_recovery_read`, the teardown stop, and `_unchanged_baseline` |
 | `backup_parts/catalog.py` | `list_remote_backups`, `other_install_ids`, `_install_folders` and `read_remote_label` |
 | `backup_parts/retention.py` | the keep count and its writer, `_delete_under_the_retention_gate`, `_prune_remote_archives`, its audits and measurements |
+| `backup_parts/archive_inputs.py` | `_open_pinned_archive_fd`, the pinned staged archive both builders fingerprint and upload, and `_add_tree`, the screened walk of one session tree |
+| `backup_parts/conversations.py` | the terminal conversation export: the store lookup `_kiro_cli_conversation_db`, the scratch directory `_conversation_scratch_parent`, the table-scoped copy (`_copy_table`, `_redacted_row`) and `_export_cli_conversations` |
+| `backup_parts/restore.py` | the staged restore `restore_download`, its staging name `_staging_name`, and `_recover_recorded_version` |
 
 `backend/backup.py` keeps what those owners are composed into: both archive builders and
 every outbound archive and label PUT (`run_snapshot_backup`, `run_sessions_backup`,
-`_publish_label`), the terminal conversation export, the screened walk `_add_tree`, the
-staged restore with `_recover_recorded_version`, and the Job SDK runner
-`make_job_runner`. Two gates pin several of these to that file by path, so moving one
-is a change to the gate as well as to this spec: the link-screen baseline declares
-`_add_tree`, `_conversation_scratch_parent`, `_kiro_cli_conversation_db` and
-`restore_download` as sites of `backup.py`, and the redaction-sink registry names
-`backup.py` as the backup push boundary. The three owners whose text reaches the
-redaction call-site scan are registered as internal partitions behind that one boundary
-in `security_posture.NON_EGRESS_REDACTION_MODULES`, which adds no posture row:
-`egress_text` defines the sequence, `nightly` applies it to the failure text the status
-route serves (the scan matches its read of the outbound-redaction switch), and
-`retention` redacts its gate-side log lines and SEL audit text.
+`_publish_label`) and the Job SDK runner `make_job_runner`. Two gates pin constructs to
+a file by path, so moving one is a change to the gate as well as to this spec: the
+link-screen baseline declares `_add_tree` as a site of `backup_parts/archive_inputs.py`,
+`_conversation_scratch_parent` and `_kiro_cli_conversation_db` as sites of
+`backup_parts/conversations.py` and `restore_download` as a site of
+`backup_parts/restore.py`, and the redaction-sink registry names `backup.py` as the
+backup push boundary. The four owners whose text reaches the redaction call-site scan
+are registered as internal partitions behind that one boundary in
+`security_posture.NON_EGRESS_REDACTION_MODULES`, which adds no posture row:
+`egress_text` defines the sequence, `conversations` applies it to each exported
+conversation row, `nightly` applies it to the failure text the status route serves (the
+scan matches its read of the outbound-redaction switch), and `retention` redacts its
+gate-side log lines and SEL audit text. The conversation export's three errors keep
+`backup` as their `__module__`, which `test/test_backup_conversations_part.py` pins.
 
 A part imports only parts below it and never the facade, so the graph is acyclic and
 the facade is the one hop between a caller and an owner. `test_aws_control_backup_composition_contract.py`
@@ -1770,6 +1799,31 @@ art declared in `app.json` (`heroImage`, `heroImageDark`, `heroImageDetail`,
 `heroImageDetailDark`), authored in the same palette and restraint as the other
 builtins' art.
 
+### Drive page composition and ownership
+
+`website/src/apps/aws-control/DrivePage.tsx` is the drive page's only import path:
+`AwsControlPage.tsx`, `ConsoleView.tsx` and the specs import its panes from it, and it
+re-exports each pane from the owner that defines it. It keeps the page's own section
+map (`SECTION_TILES`, `SECTION_LABEL_ON_PAGE`), the Usage pane's `StorageMeter`, and
+the share ledger `AccessSection`, which reads that map. Owners never import the
+facade, and nothing outside the page but a spec imports an owner
+(`DrivePage.owners.test.tsx`).
+
+| Owner | Holds |
+|---|---|
+| `DrivePageControls.tsx` | what more than one pane draws: the `</>` CLI drawer (`CliDrawer`), the grid/list toggle and the per-section choice it persists (`ViewModeToggle`, `useViewMode`), and the inline confirm strip `TileConfirm` |
+| `DrivePageLibrary.tsx` | the Library pane (`LibrarySection`): the `artifacts/` listing, its cards and rows, removal, and the Add from Artifacts picker (`AddFromArtifactsDialog`) |
+| `useDrivePageFiles.ts` | the Files pane's state (`useDrivePageFiles`): the restored folder (`DRIVE_VIEW`), the paged listing, search, the upload, delete, folder, move, rename and download requests, drag and drop, and the menu-to-dialog focus hand-back |
+| `DrivePageFiles.tsx` | the Files pane (`DriveSectionView`): its toolbar, notices, breadcrumb, empty state and dialogs, around one view |
+| `DrivePageFilesViews.tsx` | the Files pane's three views: search hits, the folder grid and the folder table |
+| `DrivePageFileDialogs.tsx` | the preview (`PreviewDialog`), Move (`MoveDialog`) and share-link (`ShareDialog`) dialogs; the preview fetches its own URL or text and the share dialog mints the link |
+| `DrivePageBackup.tsx` | the Backup pane (`BackupSection`): one row per kind, both nightly switches, the install label, and the stored-archive list with restore |
+
+`DriveSectionView` calls `useDrivePageFiles` as its one hook and the Files pane's views
+call none, so the pane registers its hooks in one fixed order. New work for a
+responsibility in the table goes to its owner; work that belongs to none of them
+starts in the facade.
+
 ## HTTP surface
 
 `routes.register_routes` exposes owner-gated reads for accounts, available
@@ -1827,6 +1881,32 @@ refused, and SEL-audited. Account-targeted AWS operations additionally enforce
 live identity and service consent, and egress paths enforce publish governance.
 Library removal is deliberately outside that egress set: it sends no bytes out,
 so a profile that denies publishing can still empty a bucket it is paying for.
+
+### Routes composition and source ownership
+
+`backend.routes` is the routes' only import path and patch surface, and it keeps the
+registration table, `register_routes`. The handlers and what they share live in the
+private package `backend.routes_parts`, lowest layer first:
+
+| Owner | Holds |
+|---|---|
+| `routes_parts/common.py` | the surface's limits, the in-process locks (`_bootstrap_lock`, `_library_lock`, the per-key and per-section drive write locks), the error responses with `_safe_error`, the SEL audit, the `_guarded` and `_mutating` wrappers, the request plumbing (`_body`, `_account_target`, `_consent`, `_drive_bucket`, `_valid_section`), and `_reauthorize_in_lock` |
+| `routes_parts/accounts.py` | the account list, reconnect plans, profile registration and unregistration, `_handle_costs` and `_handle_iam_policy` |
+| `routes_parts/drive.py` | drive status and bootstrap, `_require_drive`, and list, download, preview (with `_redact_preview`) and search |
+| `routes_parts/drive_writes.py` | upload, delete, move, folder create and delete, share creation, and the share-ledger list and forget routes |
+| `routes_parts/library.py` | `_reconciled_remote_slugs` and the Library list, push and remove routes |
+| `routes_parts/backups.py` | `_account_jobs`, backup status and run, both nightly toggles, retention, Layer B, restore and the install label |
+
+`routes` is a mirrored facade (`kiro_crew._facade_mirror`): a read of a name is served by
+the owner that binds it, and a write through `routes` -- `monkeypatch.setattr`,
+`mock.patch.object` -- reaches every owner holding the name, so a patch of
+`routes.is_app_enabled` or `routes._require_drive` reaches every handler that reads it.
+A test patches `routes`, never an owner. An owner imports only owners listed before it
+and never the facade, and every owner logs through the logger named for
+`backend.routes`. `routes.py` stays the registered redaction sink for the HTTP surface;
+`routes_parts/common.py` (`_safe_error`) and `routes_parts/drive.py` (`_redact_preview`)
+are internal partitions behind it in `security_posture.NON_EGRESS_REDACTION_MODULES`.
+`test/test_routes_parts_facade.py` pins the owner order, the patch reach and the logger.
 
 ## Error surfaces
 
@@ -1891,7 +1971,7 @@ notice), and a costs 409 `aws_consent_required` is answered by the Cost Explorer
 ask, not a banner beside it. A reason the backend reports inside a 200 (the
 backup archive's `remoteError`) travels as the notice's message under the
 localised lead, so the hand-off carries the text AWS returned.
-`DrivePage.test.tsx::error surfaces reach the agent`,
+`DrivePage.errorSurfaces.test.tsx::error surfaces reach the agent`,
 `AwsControlPage.test.tsx::edge states`, and `ConsoleView.test.tsx` pin these.
 
 ## The crew bundle builder
@@ -2233,6 +2313,17 @@ the other's objects, but the turns the old task takes after the replacement's re
 in no committed generation. The loss is bounded by that window rather than total, and the
 deployment driver is expected to serialize stop before start; where it cannot, this is the
 residual.
+
+The cycle is `container/sidecar/backup.py`, the module the sidecar's entrypoint and the
+container suite import. It keeps the enumeration, the data phase and `run_cycle` -- the code
+that reads the names the suite patches on that module -- and three sibling owners hold the
+rest: `backup_record.py` (the plan and result records and their sample caps),
+`backup_durable.py` (snapshots, fingerprints, the lifetime state map, the reads through a
+snapshot's descriptor and the drain-window gate) and `backup_commit.py` (the authority phase,
+the transcript index and the incarnation fence). New work goes to the owner of its
+responsibility. The module forwards nothing: a patch of `backup.<name>` reaches only code that
+reads the name from `backup.py`, so a function that reads a patched name stays there or reads
+it as `backup.<name>` at call time, and `test/test_backup_sidecar_facade.py` pins that.
 
 ### The front layer
 

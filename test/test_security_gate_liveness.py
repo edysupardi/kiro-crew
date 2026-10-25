@@ -356,7 +356,154 @@ def _url_payload_command(n: int) -> str:
 #: ``_approved_oauth_authorization_endpoint`` and the facade export. The rationale
 #: lives in the security spec, not the package. An approved endpoint gets exactly
 #: the builtin set's exemption; no pattern, threshold or pass moved.
-_PACKAGE_LINE_BUDGET = 29_492
+#:
+#: Raised again, from 29,492, for the PEM private-key scan: a header that no END marker
+#: follows is matched without the full-block tail, which reads to the end of the text and
+#: made a text that repeats the header quadratic. 56 lines are the new ``pem_scan`` module
+#: (the spellings and the last-END-marker lookup) and 25 the choice between the two
+#: patterns in ``_credential_search``. No credential branch, match or pass moved.
+#:
+#: Raised again, from 29,573, for the one ``pinned-order`` entry in
+#: ``paths._CREW_SECRET_LEAVES``: the person's pinned-session order is fenced from
+#: agent file tools like ``tag-grants`` beside it.
+#:
+#: Raised again, from 29,574, for the write tier's reason-or-None spelling and the
+#: stall wording that names the stalled prefix and the cooldown left: a
+#: stall still refuses everywhere it did; only the words a refused agent reads moved.
+#: The prefix is named only while its cooldown is open, since most stall raises never
+#: charge it.
+#:
+#: Raised again, from 29,607, for the chat segment save: the link pass can hand
+#: back the addresses it replaced and the credential records take the per-delta
+#: ``defer_token_param``, so the save can check each value a streamed delta's
+#: redaction removed. No matcher moved. Seven more lines rewrite the blocked links
+#: longest first, so a blocked link that prefixes a longer one cannot leave the
+#: longer one's tail in the text.
+#:
+#: Raised again, from 29,623, for ``rm_floor``: the small seatbelt behind the two
+#: recursive-force rm rows (segments from the shared split, words from the shared
+#: ``_shell_tokens``, flags and an exact root/home target) and its gated branch at the
+#: end of ``is_denied``. No pattern moved.
+#:
+#: Raised again, from 29,751, for the split of ``__init__.py`` and ``shell_normalizer.py``
+#: under the 2,000-line cap. No rule, pattern or pass changed, and every moved definition
+#: keeps its syntax tree but one docstring's wording. The 458 lines are glue only:
+#: 205 are the eight new modules' docstrings and imports; 86 are
+#: ``shell_normalizer.py``'s re-imports of the names its callers import from it and the
+#: docstring naming its owners; 146 are the facade's ``_EXPORTS`` and
+#: ``TYPE_CHECKING`` rows for the moved names and the owner import at its foot; and
+#: 21 are the moved privates added to the frozen manifest.
+#:
+#: Raised again, from 30,209, for the argv floor's owner modules: ``argv_floor.py``
+#: is a mirror facade over ``argv_floor_self``, ``argv_floor_hosts``, ``argv_floor_ssh``
+#: and ``argv_floor_git``. The 462 lines are glue: the owners' docstrings, imports and
+#: logger, the facade's family map, owner list, install and two ``TYPE_CHECKING`` manifests.
+#: Every moved statement is unchanged; no rule, threshold or pass moved.
+#:
+#: Raised again, from 30,671, for the path floor's owner modules: ``paths.py`` is
+#: a mirror facade over ``paths_lists``, ``paths_resolver`` and ``paths_targets`` that
+#: keeps the gates. The 367 lines are glue: the owners' docstrings, imports and
+#: logger, the ``PathResolutionStalled.__module__`` restore, and the facade's owner
+#: imports, owner list, install and two ``TYPE_CHECKING`` manifests. Every moved
+#: statement is unchanged bar one docstring phrase in ``_home_targets_tier``; no rule,
+#: threshold or pass moved.
+#:
+#: Raised again, from 31,038, for the rule catalog, output redaction and egress owner
+#: modules: ``denied_rules.py``, ``redaction.py`` and ``exfil.py`` are mirror facades over
+#: ``denied_rules_catalog`` and ``denied_rules_tables``, ``redaction_patterns`` and
+#: ``redaction_entropy``, and ``exfil_url_rules``, ``exfil_oauth`` and ``exfil_bash``. The
+#: 471 lines are glue: the owners' docstrings, imports and logger; the facades' docstring
+#: paragraphs, glue comments, owner imports, owner list, install, class swap and ``__all__``; and
+#: their ``TYPE_CHECKING`` manifests (two each in ``redaction`` and ``exfil``, one in
+#: ``denied_rules``). Every moved statement is unchanged; no rule, threshold or pass changed.
+#:
+#: Raised again, from 31,509, for the stream redactor's AWS key-value anchor: a
+#: recognised AWS label holds its value past the 512 floor up to the JWT ceiling and
+#: fails closed beyond it, the way the Bearer anchor already does. 217 lines are the
+#: new ``stream_aws_anchor`` module (the label grammar read off the batch label rules,
+#: its linear finder, the multi-carrier discard and the glued-label back-off) and 139
+#: the ``feed`` call sites, including the cut that lands only at whitespace or the
+#: buffer start, and the check that keeps a key name ending another credential
+#: inside that credential. No credential branch moved.
+#:
+#: Raised again, from 31,865, for ``pass_compose.py``: the one composed pass that finds
+#: credential and outbound-URL spans on the same text and rewrites it once. It is new
+#: behaviour, not moved code, so no other file shrinks to pay for it, and it belongs in
+#: this package because egress code must reach the raw passes only through it.
+#:
+#: Raised by four, from 32,056, for the ``app-agent-launch`` entry on the file-tool write
+#: fence and its three-line comment: the empty directory an app agent's launch copy runs
+#: kiro-cli from, which the sandbox seals read-only too.
+#:
+#: Raised again, from 32,060, by 37 lines for ``exfil_url_rules._heavy_percent_encoding``
+#: and its manifest entry: words percent-encoded in a URL path (a Chinese headline) do not trip the heavy
+#: percent-encoding rule. It is new rule logic, not glue; nothing else moved.
+#:
+#: Raised by 14, from 32,097, for each harness's own permission files on the write
+#: tier: the leaf splice and the project-file matcher alias in ``paths_lists``; the
+#: leaves joining the override arm, and the resolved-root list it reads, in
+#: ``paths_targets``; and one ``or`` clause, its import and three ``TYPE_CHECKING``
+#: lines in ``paths``. The registry lives in ``agent_sdk``.
+#:
+#: Raised again, from 32,111, for the host-set snapshot on
+#: ``exfil.redact_exfiltration_urls_with_records`` and its two-tuple wrapper: one
+#: optional ``exempt_hosts`` keyword that REPLACES the live platform read and the
+#: scoped override when a caller supplies the set it keyed a cache on, so the display
+#: cache stores output computed under exactly the set its key names. Fourteen lines:
+#: the keyword on both signatures, a two-branch read and the docstrings saying why.
+#: No rule widened or narrowed; the default path is the live read.
+#:
+#: Raised again, from 32,125, for ``redaction._SRI_INTEGRITY_RE``: pass 3 skips a run
+#: that is the whole digest of a Subresource Integrity value (``sha256-<43>=``,
+#: ``sha384-<64>``, ``sha512-<86>==``), because a digest is random base64 and a window
+#: inside it clears every gate. The shape is closed: the lowercase algorithm name after
+#: a non-run character, exactly that algorithm's digest length, exactly its padding,
+#: and nothing glued after. One regex of three fixed-width alternatives, a helper that
+#: returns the digest spans, their comment, and the one clause beside the document-link
+#: exemption. No pass widened, no threshold moved, and the exfil URL scan is unchanged.
+#: Six more for its ``keep_sri_digests=False`` switch: a streamed segment whose delta
+#: boundary split an SRI value saves main's verdict on the digest, not the notice.
+#:
+#: Raised again, from 32,188, for the ``self-protection-skills-authority-retire`` floor,
+#: which denies the operator-only ``kirocrew skills authority-retire`` recovery
+#: through an agent shell: one argv matcher in ``argv_floor_self``, its facade
+#: manifest line, its rule id and reason in ``denied_rules_tables``, its ``deny_gate``
+#: registration, its facade export, and its name in the ungated-floor comment. No pass
+#: widened and no threshold moved.
+#:
+#: Raised again, from 32,206, for the shell-expansion IMDS gate (GHSA-x2m8-5ff9-f479).
+#: A spliced last octet like ``169.254.169.25$((2+2))`` evaded the literal
+#: ``169.254.169.254`` deny, so ``exfil`` resolves a statically-knowable octet before
+#: comparing: a tiny ``ast``-based integer evaluator (``_safe_arith``) reads only
+#: ``$((..))``/``$[..]`` built from int constants and ``+ - * / %``, size-bounded and
+#: running nothing, and ``_resolve_octet`` folds a literal-or-arithmetic octet to its
+#: value. Only a token resolving to exactly ``169.254.169.254`` refuses; an octet
+#: holding ``$VAR``, ``${..}``, ``$(..)`` or a backtick stays unresolved and is allowed
+#: (``169.254.169.$o`` in a loop is benign), so the gate adds no new over-block. This
+#: replaces an earlier presence-based attempt that was larger and over-blocked, so the
+#: package shrank here (prior head pinned 32,485).
+#:
+#: Raised by 9, from 32,438, for one ``_WRITE_PROTECTED_HOME_PATHS`` entry in
+#: ``paths_lists``: the Meetings app's per-meeting user notes tree, write-denied to
+#: the agent file tools and read-allowed so the dashboard can serve pasted images.
+#: Data, not rule logic: the matcher and every other entry are unchanged.
+#:
+#: Raised again for the ``rm_floor`` reads of a backtick body inside
+#: double quotes and of a redirection glued to an operand, and for the floor-error
+#: path naming ``rm`` as a word (``_names_rm_word``, on the raw text and with
+#: ``${X:-…}`` defaults resolved). One helper pair, two branches in the existing
+#: segment walk and one regex; no floor widened beyond ``rm`` itself. A live
+#: redirection is kept as ONE segment word -- its fd prefix (``2>``), a ``{fd}``,
+#: a two-character operator (``>>``) and an fd-dup (``2>&1``) all stay together --
+#: so the program-word scan can step over a leading redirection (and its separate
+#: target) the way it steps over a ``VAR=val`` assignment, using the shared
+#: ``shell_normalizer._push_token_redirection`` recognizer. A redirect before
+#: ``rm`` cannot hide the program word.
+#:
+#: Raised by 8, from 32,518, for one ``_WRITE_PROTECTED_HOME_PATHS`` entry in
+#: ``paths_lists``: the crewmate agent folder, write-denied to the agent file tools
+#: like ``~/.kiro/agents``. Data, not rule logic: the matcher is unchanged.
+_PACKAGE_LINE_BUDGET = 32_526
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         _cost_bucket,
         _dedicated_start_price_gb,
         _inherited_member_agent,
+        _parent_runs_remotely,
         _shared_start_price_gb,
         _spawn_memory_floor_and_cost,
         _startup_memory_reserve_gb,
@@ -113,6 +114,7 @@ class _GateMixin(ManagerComponent):
         target_member: str | None = None,
         delegation: dict[str, str] | None = None,
         backend: str | None = None,
+        label: str = "",
         _execution_context: dict | None = None,
         _parent_spawn_policy: "ParentSpawnPolicy | None" = None,
         _agent_check: "AgentCheck | None" = None,
@@ -517,6 +519,8 @@ class _GateMixin(ManagerComponent):
             # The drain re-enters ``spawn`` from this dict alone: a run that hit
             # the concurrency gate would otherwise start on the default backend.
             "backend": backend,
+            # Same reason: a queued row would otherwise start under its task text.
+            "label": label,
             "allowed_tools": allowed_tools,
             "bare": bare,
             "cwd": resolved_cwd,
@@ -663,6 +667,7 @@ class _GateMixin(ManagerComponent):
                 task=_redacted_task,
                 memory_mode=admitted_memory_mode,
                 agent=agent,
+                label=label,
                 app=app,
                 parent_session_key=parent_session_key,
                 queued=True,
@@ -830,6 +835,8 @@ class _GateMixin(ManagerComponent):
         # admission charges it until it settles. Without it, a parent waiting on
         # its own child at the floor could only end at the max wait.
         nested_shared = False
+        # A remote session's child: its engine reserve only, never the gateway floor.
+        remote_child = False
         settled = self._manager._learned_settled_gb
         # The fields the sharing decision reads, shared by the prediction's probe
         # and the row registered below so the two cannot describe different runs.
@@ -858,14 +865,19 @@ class _GateMixin(ManagerComponent):
                 else claim.get(agent_id, (None, False))
             )
         elif min_mem > 0:
+            # A remote session's child works in that workspace; only its engine runs
+            # here. So it is priced from its ``@remote`` bucket and owes the engine
+            # reserve, not ``spawn_min_memory_gb``; the 0 off-switch and posture gate
+            # still apply, and it is never priced shared (``_run_inner``).
+            remote_child = _parent_runs_remotely(parent_session_key)
             candidate_price = _dedicated_start_price_gb(
-                start_cost, settled, _cost_bucket(agent, execution)
+                start_cost, settled, _cost_bucket(agent, execution, remote=remote_child)
             )
             try:
                 plan = self._manager._sharing_plan(
                     SubagentInfo(task="", agent=agent, **run_fields), cfg=loaded_cfg
                 )
-                if plan.shared is True:
+                if plan.shared is True and not remote_child:
                     candidate_price = _shared_start_price_gb(candidate_price)
                     priced_shared = True
                     nested_shared = _is_child
@@ -876,7 +888,7 @@ class _GateMixin(ManagerComponent):
             # the next controller sample: this start at its own price, and each
             # row still warming at the price it was admitted at. Memory used by
             # work a run launches later is not priced here.
-            min_mem += _startup_memory_reserve_gb(
+            min_mem = (0.0 if remote_child else min_mem) + _startup_memory_reserve_gb(
                 agents_snapshot,
                 running_count=self._manager._running_count,
                 cost_gb=start_cost,
@@ -955,6 +967,7 @@ class _GateMixin(ManagerComponent):
                 price_gb=candidate_price,
                 nested=_is_child,
                 durable=_durable,
+                remote=remote_child,
             )
             if lane_held:
                 # No reading was taken and the bar is not what holds it.
@@ -1293,6 +1306,7 @@ class _GateMixin(ManagerComponent):
                 id=agent_id,
                 task=_redacted_task,
                 agent=agent,
+                label=label,
                 app=app,
                 parent_session_key=parent_session_key,
                 queued=True,
@@ -1374,6 +1388,7 @@ class _GateMixin(ManagerComponent):
                 task=_redacted_task,
                 memory_mode=_memory_mode,
                 agent=agent,
+                label=label,
                 app=app,
                 parent_session_key=parent_session_key,
                 queued=True,
@@ -1410,6 +1425,7 @@ class _GateMixin(ManagerComponent):
         info = SubagentInfo(
             task=_redacted_task,
             agent=agent,
+            label=label,
             app=app,
             approval_mode=approval_mode or "",
             silent=silent,
@@ -1561,8 +1577,12 @@ class _GateMixin(ManagerComponent):
             self._manager._admission.taskq_settle(info)
         else:
             # Registered and handed to a run (or to the approval prompt, which
-            # is part of starting): admitted -> starting. ``running`` is written
-            # by the run itself at its first stream event addressed to its session.
+            # is part of starting): admitted -> starting. A row the off-loop
+            # pump claimed is ``starting`` already (``claim_and_start`` took
+            # that write as its compare-and-set), and ``advance`` writes
+            # nothing for it; an inline claim writes it here. ``running`` is
+            # written by the run itself at its first stream event addressed to
+            # its session.
             self._manager._admission.taskq_mark(info, "starting")
             # Nested: a parent blocked in spawn_sub_agents yields its lane slot
             # for this child (taskq.waits, W3); an event-loop caller awaits the

@@ -8,8 +8,10 @@ const { createRendererRecovery, withSafeReload, hasSafeReload } = require("./ren
 const { createRendererExhaustedNotice } = require("./renderer-exhausted-notice");
 const { createHangRecovery } = require("./hang-recovery");
 const { armSplashHistoryClear, fileShellPageBasename } = require("./splash-history");
+const { armSwipeHistory, browserPanelUnderCursor } = require("./swipe-history");
 const { hideToTray, cancelPendingTrayHide, shouldKeepAppHidden } = require("./hide-to-tray");
 const { attachHtmlFullScreen } = require("./html-fullscreen");
+const { menuBarCanOverlap } = require("./fullscreen-top-reserve");
 const {
   watchFullScreenTransitions,
   repairStalledFullScreenExit,
@@ -310,6 +312,13 @@ function createWindowLifecycle(options) {
       isAlive: () => !win.isDestroyed() && !view.webContents.isDestroyed(),
       log: glog,
     });
+    // Mouse software such as Logitech's Options sends Back/Forward to macOS apps
+    // as swipes; the dashboard, or the browser panel under the cursor, takes each
+    // as a history step.
+    armSwipeHistory(win, view.webContents, {
+      isAlive: () => !win.isDestroyed() && !view.webContents.isDestroyed(),
+      panelUnderCursor: () => browserPanelUnderCursor(win, screen.getCursorScreenPoint()),
+    });
 
     // Teardown order is load-bearing: no command poller or CDP owner may outlive
     // the page it targets. Close the dashboard WebContents only after releasing
@@ -336,20 +345,28 @@ function createWindowLifecycle(options) {
     updateViewBounds();
     win.on("resize", updateViewBounds);
 
+    // `menuBarOverlap` tells the renderer whether to keep its menu-bar band
+    // clear: false when macOS already placed the fullscreen window below the
+    // menu bar (a notched built-in display).
     const sendFullScreen = () => {
       if (win.isDestroyed() || view.webContents.isDestroyed()) return;
-      view.webContents.send("fullscreen-changed", win.isFullScreen());
+      view.webContents.send("fullscreen-changed", win.isFullScreen(), {
+        menuBarOverlap: menuBarCanOverlap(win, screen),
+      });
     };
 
     // Fullscreen events can precede the window manager's final reflow. Keep the
     // immediate recompute (no flash where reflow is synchronous) and bounded
-    // deferred passes, including the late backstop slow Linux WMs need.
+    // deferred passes, including the late backstop slow Linux WMs need. Each
+    // pass re-sends the fullscreen state too, because the menu-bar verdict reads
+    // the window's position, which is only final once the reflow lands.
     let fullscreenSettleTimers = [];
     const scheduleFullscreenSettle = () => {
       for (const timer of fullscreenSettleTimers) clearTimeout(timer);
-      fullscreenSettleTimers = FULLSCREEN_SETTLE_MS.map(
-        (ms) => setTimeout(updateViewBounds, ms),
-      );
+      fullscreenSettleTimers = [
+        ...FULLSCREEN_SETTLE_MS.map((ms) => setTimeout(updateViewBounds, ms)),
+        ...FULLSCREEN_SETTLE_MS.map((ms) => setTimeout(sendFullScreen, ms)),
+      ];
     };
     win.on("closed", () => {
       for (const timer of fullscreenSettleTimers) clearTimeout(timer);

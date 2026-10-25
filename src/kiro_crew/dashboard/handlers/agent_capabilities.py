@@ -77,6 +77,15 @@ async def api_member_capabilities(request: web.Request) -> web.Response:
                 async with _get_config_lock():
                     result = await drained_to_thread(service.put, name, body)
                 request.app["state"].push_refresh("agents")
+                if result.get("mode") == "mate":
+                    # A crewmate that owns its file: its running workers mount
+                    # what it approves, so they are reloaded onto the new file
+                    # (``crewmate_worker_reload``; a busy one at its turn end).
+                    from kiro_crew.dashboard.crewmate_worker_reload import (
+                        schedule_reload_workers,
+                    )
+
+                    schedule_reload_workers(request.app["state"], name)
                 from kiro_crew.sel import sel
 
                 sel().log_api_access(
@@ -101,8 +110,9 @@ async def api_member_capabilities(request: web.Request) -> web.Response:
         return web.json_response(result)
     except CapabilityError as exc:
         if exc.file:
-            # The file's basename only, which Crew names itself: the pane points
-            # at the file a refusal is about. Literal bodies keep `code` visible
+            # A basename only, never a directory: the member's own agent file,
+            # or the project file that shadows it. The pane points at the file
+            # a refusal is about. Literal bodies keep `code` visible
             # to the error-code contract scan.
             return web.json_response(
                 {"error": exc.code, "code": exc.code, "file": exc.file},

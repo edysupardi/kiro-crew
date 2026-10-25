@@ -11,6 +11,21 @@ from typing import overload
 from kiro_crew.config.fields import _meta
 from kiro_crew.config.sections_tailnet import TailscaleConfig
 
+# The terminal apps the desktop shell can open in a project directory
+# (``dashboard.terminal.external_app``), by id. Must equal the ids of
+# ``TERMINALS`` in ``website/electron/external-terminal.js``, which maps each id
+# to its fixed install paths and pinned argv; test_external_terminal_gate.py
+# pins the two lists equal.
+EXTERNAL_TERMINAL_APPS: tuple[str, ...] = (
+    "alacritty",
+    "ghostty",
+    "gnome-terminal",
+    "kitty",
+    "konsole",
+    "wezterm",
+    "xfce4-terminal",
+)
+
 
 @dataclass
 class JiraAuthEntry:
@@ -171,8 +186,8 @@ class DashboardConfig:
     crewmate_threads: bool = field(
         default=False,
         metadata=_meta(
-            "Reply threads on crewmate chat messages",
-            "Let any message in a crewmate's chat carry its own reply thread, "
+            "Reply threads on mate chat messages",
+            "Let any message in a mate's chat carry its own reply thread, "
             "opened in the side panel while the main chat stays visible. Off by "
             "default: the thread routes answer not-found, no thread frame is sent, "
             "and the dashboard draws no Reply in thread control. Takes effect on "
@@ -182,11 +197,11 @@ class DashboardConfig:
     crewmates_in_agent_picker: bool = field(
         default=False,
         metadata=_meta(
-            "Crewmates in the chat agent picker",
-            "List crewmates in the chat composer's agent picker, beside the agent "
-            "templates, so a chat can be switched onto a crewmate (and its own "
+            "Mates in the chat agent picker",
+            "List mates in the chat composer's agent picker, beside the agent "
+            "templates, so a chat can be switched onto a mate (and its own "
             "workspace and memory) without opening it from the Crew page. Off by "
-            "default: the picker lists templates plus any crewmate no listed "
+            "default: the picker lists templates plus any mate no listed "
             "template already covers; the default agent stays even when covered, "
             "unless a template shares its name. Takes effect when the dashboard is "
             "reloaded; no gateway restart.",
@@ -568,6 +583,27 @@ class DashboardConfig:
             "itself is always created either way, so it is one click away.",
         ),
     )
+    side_panel_always_open: bool = field(
+        default=False,
+        metadata=_meta(
+            "Keep the side panel open",
+            "Open the chat's right side panel in every chat you open, new or "
+            "existing, and after a reload. Closing it hides it until you switch "
+            "chats. Each chat still remembers its own open or closed panel, and "
+            "turning this off brings that back. This setting does not apply on a "
+            "phone.",
+        ),
+    )
+    side_panel_pin_summary: bool = field(
+        default=False,
+        metadata=_meta(
+            "Pin Summary in the side panel",
+            "Show the session Summary as the first side panel tab, which cannot be "
+            "closed, and show it each time the panel opens. A panel opened for "
+            "something specific, such as a file, still shows that. Works only "
+            "while session summaries are on.",
+        ),
+    )
     # Default TRUE: the chip strip shipped unconditionally before this switch
     # existed, so a config that never mentions the key must render exactly what
     # it rendered before.
@@ -648,6 +684,24 @@ class DashboardConfig:
                         ),
                     },
                 },
+                # The choices are EXTERNAL_TERMINAL_APPS above, the desktop
+                # shell's launch allowlist. Unset by default, and any other
+                # value reads as unset where it is used.
+                "external_app": {
+                    "type": "string",
+                    "default": "",
+                    "enum": ["", *EXTERNAL_TERMINAL_APPS],
+                    "x-meta": {
+                        "label": "External terminal app",
+                        "help": (
+                            "Desktop app only, on the machine running the gateway: adds "
+                            '"Open in <your terminal app>" to the Files tab\'s Project '
+                            "actions menu, which opens this app in the project directory. "
+                            "Empty = no external terminal; the built-in terminal is "
+                            "unaffected either way."
+                        ),
+                    },
+                },
                 "completion": {
                     "type": "object",
                     "additionalProperties": True,
@@ -716,6 +770,20 @@ class DashboardConfig:
             "project. Empty = off; new chats use the default project.",
         ),
     )
+    # A folder ID, not a name or path, so renaming or moving the folder keeps it.
+    # Read at each create and ignored when the folder is gone, so a deleted or
+    # hand-edited value leaves new chats unfiled instead of refusing them.
+    default_session_folder: str = field(
+        default="",
+        metadata=_meta(
+            "Default Sidebar Folder for New Chats",
+            "ID of the sidebar folder that new dashboard chats are filed into when "
+            "they are started from New without choosing a folder. A chat started in "
+            "a specific folder still goes there, and every other create path, such "
+            "as apps, crons, channels and agents, keeps its own placement. Empty = "
+            "new chats are unfiled.",
+        ),
+    )
     theme_mode: str = field(
         default="",
         metadata=_meta(
@@ -782,6 +850,29 @@ class DashboardConfig:
             enum=["custom", "name", "created"],
         ),
     )
+    # Literal enum for the same reason as folder_sort; pinned equal to
+    # SESSION_SORT_MODES by test_config_patch.py::TestSessionSortRoundTrip.
+    session_sort: str = field(
+        default="date-desc",
+        metadata=_meta(
+            "Sidebar Session Order",
+            "How the chat sidebar orders sessions: 'date-desc' / 'date-asc' by last "
+            "activity, 'created-desc' / 'created-asc' by creation time, 'name-asc' / "
+            "'name-desc' by title, 'manual' in the order the user drags them into. A "
+            "view preference only; pinned sessions keep their own order. Stored here "
+            "(not only in the browser) so the choice follows the user across browsers "
+            "and the desktop app.",
+            enum=[
+                "date-desc",
+                "date-asc",
+                "created-desc",
+                "created-asc",
+                "name-asc",
+                "name-desc",
+                "manual",
+            ],
+        ),
+    )
     update_nudge: dict = field(
         default_factory=dict,
         metadata=_meta(
@@ -822,11 +913,11 @@ class DashboardConfig:
     crewmates_onboarded: bool = field(
         default=False,
         metadata=_meta(
-            "Crewmates Onboarded",
-            "Whether the user has finished or dismissed the first-run Meet CrewMates "
-            "flow (the four-step introduction that creates the first crewmate). "
+            "Mates Onboarded",
+            "Whether the user has finished or dismissed the first-run Meet Mates "
+            "flow (the four-step introduction that creates the first mate). "
             "Server-backed like the other first-run flags so a second machine does "
-            "not replay it. Also set when the flow is re-run from the Crewmates page.",
+            "not replay it. Also set when the flow is re-run from the Mates page.",
         ),
     )
     user_role: str = field(
@@ -980,6 +1071,26 @@ class DashboardConfig:
             "accepted without listing. Empty = Cloud-only (deny-by-default): a "
             "Jira issue URL is only recognized if its host matches an entry "
             "here. Suffixes and wildcards are not matched.",
+        ),
+    )
+    bitbucket_server_hosts: list[str] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Bitbucket Server Hosts",
+            "Exact hostnames (optionally host:port) of Bitbucket Server or "
+            "Bitbucket Data Center instances whose pull-request URLs the "
+            "Changes panel and session source links may read, read-only, over "
+            "the instance's REST API. Empty = none (deny-by-default): a "
+            "/projects/KEY/repos/SLUG/pull-requests/N URL is only fetched when "
+            "its host is an exact member of this list. Suffixes and wildcards "
+            "are not matched, and bitbucket.org is never a Bitbucket Server "
+            "host. A host that is also listed in gitlab_hosts, jira_hosts or "
+            "github_hosts is refused. The gateway sends an HTTP access token "
+            "only to the listed host it belongs to: the vault secret "
+            "BITBUCKET_SERVER_TOKEN serves a single listed host, and "
+            "BITBUCKET_SERVER_TOKEN_<HEX> (the host's hex encoding, as the "
+            "panel's setup message names it) serves one host of several. "
+            "Without a token the read is anonymous.",
         ),
     )
     jira_auth: list[JiraAuthEntry] = field(

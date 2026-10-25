@@ -75,13 +75,17 @@ class TestAcpClientToolAudit:
 
     @pytest.mark.asyncio
     async def test_swallows_sel_errors(self, monkeypatch):
+        reached = []
+
         def _boom():
+            reached.append(True)
             raise RuntimeError("SEL backend down")
 
         monkeypatch.setattr(acp_client, "sel", _boom)
         client = AcpClient(session_key="sk", audit_source="subagent")
         # A SEL failure must never break tool dispatch.
         await client._maybe_audit_tool_call(self._ev())
+        assert reached == [True]
 
     @pytest.mark.asyncio
     async def test_hung_backend_times_out_and_is_swallowed(self, monkeypatch):
@@ -228,10 +232,13 @@ class TestAcpClientZeroTools:
 
 
 class TestEffectiveSpecDeclaresZeroTools:
-    """``effective_spec_declares_zero_tools`` judges the projected view the harness
-    consumed through ``--agent`` when one exists, which needs no mirror, so a
-    native-routed backend can be checked; with none, it needs the authored spec to
-    declare an empty list both before the spawn and after start."""
+    """``effective_spec_declares_zero_tools`` judges, when a projection exists, both
+    the view the harness was launched with and the published alias file it loaded,
+    which needs no mirror, so a native-routed backend can be checked; with none, it
+    needs the authored spec to declare an empty list both before the spawn and after
+    start."""
+
+    _ALIAS = "kirocrew-view-abc"
 
     @staticmethod
     def _client_with_projection(specs, errors=None) -> AcpClient:
@@ -239,15 +246,59 @@ class TestEffectiveSpecDeclaresZeroTools:
 
         client = AcpClient(agent="kirocrew-knowledge")
         client._native_skill_projection = NativeSkillProjection(
-            {"kirocrew-knowledge": "kirocrew-view-abc"} if specs else {}, specs, errors or {}
+            {"kirocrew-knowledge": TestEffectiveSpecDeclaresZeroTools._ALIAS} if specs else {},
+            specs,
+            errors or {},
         )
         return client
 
+    @classmethod
+    def _publish(cls, spec: object) -> None:
+        """Write the alias file the harness loads, where the projection publishes it."""
+        from kiro_crew.acp import skill_projection
+
+        agents = skill_projection.kiro_agents_dir()
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / f"{cls._ALIAS}.json").write_text(json.dumps(spec), encoding="utf-8")
+
     def test_an_empty_projected_view_is_confirmed(self):
+        self._publish({"name": self._ALIAS, "tools": []})
         client = self._client_with_projection(
-            {"kirocrew-knowledge": {"name": "kirocrew-view-abc", "tools": []}},
+            {"kirocrew-knowledge": {"name": self._ALIAS, "tools": []}},
         )
         assert client.effective_spec_declares_zero_tools() is True
+
+    @pytest.mark.parametrize(
+        "published",
+        [{"tools": ["@another-server"]}, {"name": "x"}, {"tools": "none"}, ["tools"]],
+    )
+    def test_an_empty_view_whose_published_file_is_not_an_empty_list_is_not_confirmed(
+        self, published
+    ):
+        """The harness loads the published file, so a tool written to it after the
+        view was prepared refuses even though the view itself is still empty."""
+        self._publish(published)
+        client = self._client_with_projection(
+            {"kirocrew-knowledge": {"name": self._ALIAS, "tools": []}},
+        )
+        assert client.effective_spec_declares_zero_tools() is False
+        assert client.effective_spec_declares_zero_tools(authored_before_spawn=True) is False
+
+    def test_an_empty_view_whose_published_file_is_missing_is_not_confirmed(self):
+        client = self._client_with_projection(
+            {"kirocrew-knowledge": {"name": self._ALIAS, "tools": []}},
+        )
+        assert client.effective_spec_declares_zero_tools() is False
+
+    def test_an_empty_view_with_no_alias_for_the_agent_is_not_confirmed(self):
+        from kiro_crew.acp.skill_projection import NativeSkillProjection
+
+        self._publish({"name": self._ALIAS, "tools": []})
+        client = AcpClient(agent="kirocrew-knowledge")
+        client._native_skill_projection = NativeSkillProjection(
+            {}, {"kirocrew-knowledge": {"name": self._ALIAS, "tools": []}}
+        )
+        assert client.effective_spec_declares_zero_tools() is False
 
     def test_a_projected_view_carrying_a_tool_is_not_confirmed(self):
         client = self._client_with_projection(
@@ -339,6 +390,7 @@ class TestEffectiveSpecDeclaresZeroTools:
         assert client.effective_spec_declares_zero_tools(authored_before_spawn=True) is False
 
     def test_a_zero_tool_projected_view_ignores_the_authored_spec(self, monkeypatch):
+        self._publish({"name": self._ALIAS, "tools": []})
         client = self._client_with_projection({"kirocrew-knowledge": {"name": "v", "tools": []}})
         monkeypatch.setattr(
             acp_client, "agent_spec_snapshot", lambda *_a, **_k: {"tools": ["@builtin"]}
@@ -346,10 +398,10 @@ class TestEffectiveSpecDeclaresZeroTools:
         assert client.effective_spec_declares_zero_tools(authored_before_spawn=False) is True
         assert client.effective_spec_declares_zero_tools(authored_before_spawn=True) is True
 
-    def test_no_spec_file_is_read_when_a_projection_exists(self, tmp_path, monkeypatch):
-        """With a projection the answer rests on the captured view alone: a resolver
-        that raises and an authored spec carrying tools on disk leave a zero-tool
-        view confirmed."""
+    def test_the_authored_spec_is_not_read_when_a_projection_exists(self, tmp_path, monkeypatch):
+        """With a projection the answer rests on the captured view and the published
+        file: a resolver that raises and an authored spec carrying tools on disk
+        leave a zero-tool view whose published file is empty confirmed."""
         monkeypatch.setenv("KIROCREW_HOME", str(tmp_path / "home"))
         project_agents = tmp_path / "project" / ".kiro" / "agents"
         project_agents.mkdir(parents=True)
@@ -361,8 +413,9 @@ class TestEffectiveSpecDeclaresZeroTools:
             raise AssertionError("the confirmation re-read an authored spec")
 
         monkeypatch.setattr(acp_client, "agent_spec_snapshot", _boom)
+        self._publish({"name": self._ALIAS, "tools": []})
         client = self._client_with_projection(
-            {"kirocrew-knowledge": {"name": "kirocrew-view-abc", "tools": []}}
+            {"kirocrew-knowledge": {"name": self._ALIAS, "tools": []}}
         )
         assert client.effective_spec_declares_zero_tools() is True
         assert client.effective_spec_declares_zero_tools(authored_before_spawn=True) is True
@@ -620,16 +673,23 @@ class TestAcpClientToolHooks:
     @pytest.mark.asyncio
     async def test_noop_when_hook_store_uninitialized(self, monkeypatch):
         # get_global_hook_store() returns None before the dashboard registers it.
-        monkeypatch.setattr(acp_client, "get_global_hook_store", lambda: None)
+        looked_up = []
+        monkeypatch.setattr(
+            acp_client, "get_global_hook_store", lambda: looked_up.append(True) or None
+        )
         client = AcpClient(session_key="sk", audit_source="subagent")
         # Must not raise despite no store.
         await client._maybe_fire_pre_tool_hooks(self._call_ev())
         await client._maybe_fire_post_tool_hooks(self._result_ev())
+        assert looked_up == [True, True]
 
     @pytest.mark.asyncio
     async def test_swallows_hook_engine_errors(self, monkeypatch):
+        fired = []
+
         class _BoomStore:
             async def fire(self, event, **kw):
+                fired.append(event)
                 raise RuntimeError("hook engine down")
 
         monkeypatch.setattr(acp_client, "get_global_hook_store", lambda: _BoomStore())
@@ -639,6 +699,7 @@ class TestAcpClientToolHooks:
         # A hook-engine failure must never break tool dispatch.
         await client._maybe_fire_pre_tool_hooks(self._call_ev())
         await client._maybe_fire_post_tool_hooks(self._result_ev())
+        assert fired == ["PreToolUse", "PostToolUse"]
 
     @pytest.mark.asyncio
     async def test_read_prompt_response_update_fires_hooks(self, monkeypatch):

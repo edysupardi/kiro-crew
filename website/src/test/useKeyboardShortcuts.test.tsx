@@ -10,6 +10,7 @@ import { PANEL_TOGGLE_SHORTCUTS_KEY } from '../lib/panelToggleShortcuts'
 import { matchShortcutEvent, resolveShortcuts } from '../lib/shortcutRegistry'
 import { renderHookWithProviders, createTestStore, renderWithProviders } from './helpers'
 import { consumeComposerRelease } from '../pages/chat/composerFocus'
+import { escapeStoppedSpeech } from '../utils/speechStopKey'
 import { recordRouteNavigation, _resetRouteHistoryPositionForTest } from '../lib/routeHistoryPosition'
 import { NavigationLeaveGuardProvider, useRegisterNavigationLeaveGuard } from '../components/NavigationLeaveGuard'
 import chatReducer from '../store/chatSlice'
@@ -103,6 +104,26 @@ describe('useKeyboardShortcuts — toggle behavior', () => {
     setup({ enabled: false })
     fireEvent.keyDown(document, { code: 'KeyN', altKey: true, shiftKey: true })
     expect(onNewChat).not.toHaveBeenCalled()
+  })
+
+  // Holding the chord sends one keydown and then auto-repeat keydowns with
+  // `repeat: true`. Only the first is a press; the repeats are still claimed
+  // so the browser's own binding does not run.
+  it('a held Alt+Shift+N creates one session, not one per auto-repeat', () => {
+    setup()
+    fireEvent.keyDown(document, { code: 'KeyN', altKey: true, shiftKey: true })
+    const repeats = Array.from({ length: 5 }, () => new KeyboardEvent('keydown', { code: 'KeyN', altKey: true, shiftKey: true, repeat: true, bubbles: true, cancelable: true }))
+    for (const ev of repeats) document.dispatchEvent(ev)
+    expect(onNewChat).toHaveBeenCalledTimes(1)
+    expect(repeats.every(ev => ev.defaultPrevented)).toBe(true)
+  })
+
+  it('two separate Alt+Shift+N presses create two sessions', () => {
+    setup()
+    fireEvent.keyDown(document, { code: 'KeyN', altKey: true, shiftKey: true })
+    fireEvent.keyUp(document, { code: 'KeyN', altKey: true, shiftKey: true })
+    fireEvent.keyDown(document, { code: 'KeyN', altKey: true, shiftKey: true })
+    expect(onNewChat).toHaveBeenCalledTimes(2)
   })
 
   it('Alt+Shift+W closes the active session (handler matches, preventDefault called)', () => {
@@ -1563,6 +1584,31 @@ describe('useKeyboardShortcuts — stop speaking (Escape)', () => {
     pressEscape()
     window.removeEventListener('voice-stop', spy)
     expect(spy).toHaveBeenCalledTimes(1)
+  })
+
+  it('marks the Escape it spent on speech, and only that one (#22315)', () => {
+    // The composer's Escape-to-stop gate reads this mark so the press that
+    // silences read-back never also stops the running turn.
+    const seen: Event[] = []
+    const record = (e: Event) => { seen.push(e) }
+    document.addEventListener('keydown', record)
+    setup({ voicePlaying: true })
+    pressEscape()
+    document.removeEventListener('keydown', record)
+    expect(seen).toHaveLength(1)
+    expect(escapeStoppedSpeech(seen[0])).toBe(true)
+    expect(escapeStoppedSpeech(new KeyboardEvent('keydown', { key: 'Escape' }))).toBe(false)
+  })
+
+  it('does not mark an Escape when nothing is speaking', () => {
+    const seen: Event[] = []
+    const record = (e: Event) => { seen.push(e) }
+    document.addEventListener('keydown', record)
+    setup({ voicePlaying: false })
+    pressEscape()
+    document.removeEventListener('keydown', record)
+    expect(seen).toHaveLength(1)
+    expect(escapeStoppedSpeech(seen[0])).toBe(false)
   })
 
   it('does nothing on Escape when not speaking', () => {

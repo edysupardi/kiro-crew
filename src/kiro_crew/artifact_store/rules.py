@@ -43,7 +43,7 @@ ALLOWED_KINDS = frozenset(
         "svg",  # standalone svg
         "json",  # structured data
         "text",  # plain text
-        "image",  # generated image (source_path points to PNG/JPEG)
+        "image",  # raster image; create_image stores its bytes in an asset.<ext> sidecar
         "webapp",  # a deployed web application; rendered as an infra control card
         # A dynamic dashboard's LAYOUT package -- bound_to / model / view / theme
         # as JSON, never values. Validated on every write by
@@ -231,7 +231,7 @@ def normalize_tag(tag: str) -> str:
     spelling is the NFC form, so one label has one spelling however it was typed.
 
     This is the ONE tag rule: the store validates through it and the MCP
-    argument gate (``validation.py``) checks tag arguments through it, so the
+    argument gate (``validation_parts/artifact_schemas.py``) checks tag arguments through it, so the
     two cannot drift. The reason in the ``ValueError`` is plain English and is
     shown to the caller as-is.
     """

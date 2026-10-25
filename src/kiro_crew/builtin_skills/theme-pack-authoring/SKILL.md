@@ -88,8 +88,9 @@ REJECTED (install fails), so do not invent variables; the allowlist is
 `_THEME_CSS_VARS` in `kiro_crew/dashboard/theme_validate.py`.
 
 - To clone a built-in theme's palette, transcribe its block from
-  `website/src/index.css` (e.g. `[data-theme="kiro-dark"]`), keeping only
-  allowlisted vars.
+  `website/src/styles/theme-palettes.css` (e.g. `[data-theme="kiro-dark"]`;
+  the default `dark` / `light` blocks are in
+  `website/src/styles/design-tokens.css`), keeping only allowlisted vars.
 - `--accent-fg` and the four `--json-*` highlight colors (`--json-key`,
   `--json-str`, `--json-num`, `--json-bool`) are allowlisted — set them directly
   in `variables.json` like any other palette entry. No overrides.css workaround
@@ -177,7 +178,8 @@ not against the count of 6.
 
 Beyond `theme.json`, `variables.json`, `readme.md`, `styles/` and `LICENSE.txt`,
 the classifier also recognizes `branding/logo.{svg,png}`,
-`branding/favicon.{ico,png,svg}`, `branding/wordmark.{svg,png}` and
+`branding/favicon.{ico,png,svg}`, `branding/wordmark.{svg,png}`,
+`branding/welcome.{svg,png,webp,gif}` and
 `branding/preview.{png,webp}` and `loader/*.{png,webp,gif,svg}` (max 8) at
 level 1, and `persona.md`, `overlays/*.html`,
 `topbar/{dark,light}.html`, `audio/manifest.json` and `audio/*.{mp3,ogg,wav}` at

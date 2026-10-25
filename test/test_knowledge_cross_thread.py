@@ -1,7 +1,7 @@
 """Regression tests for KnowledgeStore sqlite access from worker threads.
 
 KnowledgeStore is created on one thread, but HybridRetriever.search()
-runs on mc-embed executor threads (dashboard/handlers/knowledge.py
+runs on mc-embed executor threads (dashboard/handlers/knowledge_agent_context.py
 search_for_context via run_in_embed_pool). A shared sqlite3 connection carries
 creating-thread affinity (check_same_thread=True default), so every
 worker-thread query would raise sqlite3.ProgrammingError -> HTTP 500 on
@@ -21,6 +21,7 @@ import pytest
 
 from kiro_crew.knowledge.retrieval import HybridRetriever
 from kiro_crew.knowledge.store import KnowledgeStore
+from kiro_crew.testing.wait import default_timeout
 
 # Lost-run ceilings for test_writes_from_two_threads_are_serialized.
 # Measured: the whole 8-write call phase took 0.277 s on Backend Tests
@@ -115,7 +116,7 @@ def test_worker_thread_query_does_not_raise(store):
     with ThreadPoolExecutor(max_workers=2) as pool:
         # Before the fix this raised sqlite3.ProgrammingError
         # ("SQLite objects created in a thread can only be used in that same thread").
-        assert pool.submit(query).result(timeout=10) == 1
+        assert pool.submit(query).result(timeout=default_timeout()) == 1
 
 
 def test_hybrid_retriever_search_from_executor_thread(store):
@@ -128,7 +129,7 @@ def test_hybrid_retriever_search_from_executor_thread(store):
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="mc-embed-test") as pool:
         results = pool.submit(
             _on_worker, lambda: retriever.search("gateway restart", 5), store
-        ).result(timeout=10)
+        ).result(timeout=default_timeout())
 
     assert any(r["id"] == "gateway-restart-guide" for r in results)
 

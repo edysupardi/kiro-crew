@@ -17,7 +17,7 @@ class TestSlotProbeWrapsSharedRestoreBody:
     llm_helpers.probe_fallback_restore — only the slot pick-gen/heal/clear
     logic lives locally. These tests pin the delegation and the slot-specific
     hooks it hands over; the probe mechanics themselves are pinned in
-    test_llm_helpers.py and the end-to-end behavior in
+    test_llm_helpers_fallback_restore.py and the end-to-end behavior in
     TestRunChatModelFallback (test_dashboard_chat.py)."""
 
     @staticmethod
@@ -96,6 +96,7 @@ class TestSlotProbeWrapsSharedRestoreBody:
         ) as probe:
             await chat_runner._probe_fallback_restore_for_slot(slot, MagicMock())
         probe.assert_not_awaited()
+        assert (slot.model, slot._fallback_primary_model) == ("", "primary-m")
 
     def test_sticky_clear_drops_marker_and_slot_fields(self):
         from kiro_crew.dashboard import chat_runner

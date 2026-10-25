@@ -90,8 +90,8 @@ _MAX_TEXT_INJECT = _LIMITS.max_text_inject
 
 #: Mimetype prefixes Slack uses for voice memos. ``video/webm`` is NOT a
 #: mistake: Slack ships voice clips with a video container mimetype, and the
-#: transcription path in ``slack/events.py`` has always relied on that. Defined
-#: HERE (not in events.py) because this module sits below it in the import
+#: transcription path in ``slack/events_voice.py`` has always relied on that. Defined
+#: HERE (not in events_voice.py) because this module sits below it in the import
 #: graph, so both the transcriber and the ingestion adapter can share ONE
 #: definition. A single definition keeps them in sync, so a transcribed voice
 #: memo is not also rejected as unsupported video.
@@ -114,7 +114,7 @@ VOICE_MEMO_FAILED = "[Audio attachment — transcription failed]"
 #: Pinned here beside the failure notes above for the same reason they are —
 #: byte-identical to the notes ``transcribe_audio_attachments`` emits for the
 #: other channels (pinned both ways by ``test_slack_backports.py``), not
-#: copies left to drift. ``slack/events.py`` consumes both; ``TOO_LONG`` is a
+#: copies left to drift. ``slack/events_voice.py`` consumes both; ``TOO_LONG`` is a
 #: template whose ``{minutes}`` the consumer fills from the active cap.
 VOICE_MEMO_TOO_LONG = "[Audio attachment — exceeds the {minutes}-minute transcription limit]"
 VOICE_MEMO_DURATION_UNVERIFIED = "[Audio attachment — duration could not be verified]"
@@ -228,6 +228,7 @@ async def extract_outbound_with_audit(
     *,
     within_root: str,
     audit_caller: str,
+    scratch_root: str = "",
 ) -> tuple[str, list[OutboundFile], str]:
     """Extract local image refs for upload, writing the mandatory SEL audit.
 
@@ -244,7 +245,7 @@ async def extract_outbound_with_audit(
     """
     try:
         result = await extract_local_refs_off_loop(
-            text, within_root=within_root, limits=UPLOAD_LIMITS
+            text, within_root=within_root, limits=UPLOAD_LIMITS, scratch_root=scratch_root
         )
     except Exception:
         logger.warning("slack: outbound file extraction failed", exc_info=True)
@@ -441,4 +442,22 @@ async def process_slack_files(
     # Rejection notes ride along as prompt text, matching the previous behaviour
     # of inlining size and validation failures for the model to see.
     paths = [*result.image_paths, *result.file_paths]
-    return paths, [*result.text_blocks, *result.rejections]
+    locations = [image_location_note(p) for p in result.image_paths]
+    return paths, [*result.text_blocks, *locations, *result.rejections]
+
+
+def image_location_note(path: str) -> str:
+    """Tell the agent where an inlined Slack image is saved.
+
+    ``build_prompt_blocks`` replaces an inlined image's path with
+    ``[image: <name>]``, so the model sees the picture but not where the file
+    is, and its file tools cannot open the original. This note names the folder
+    and the file SEPARATELY: a whole path ending in an image suffix would be
+    rewritten to the marker again, while a folder alone matches no image path.
+    Slack only; other channels and the dashboard keep their prompt unchanged.
+    """
+    folder, name = os.path.split(path)
+    return (
+        f"[Image {name} is saved in the folder {folder}{os.sep} until this turn ends; "
+        "join the two to open the original file]"
+    )

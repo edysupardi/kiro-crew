@@ -9,17 +9,78 @@ for the helper, not the stdlib call, even in code you believe only runs on POSIX
 import alone is enough to break a Windows install, and the failure lands at import time
 in a module a Windows user cannot avoid.
 
-`platform_compat` is the import and patch surface for every helper below. Two families
-are defined in their own modules and forwarded from it: the cross-process file locks
-(`file_lock`, `flock_exclusive`, `acquire_lock` / `release_lock`, `try_acquire_lock`,
-`open_lock_file`, `open_create_or_existing`, `probe_file_persistence`) in
-`platform_lock_compat`, and the owner-only access helpers (`current_user_sid`,
-`process_owner_sid`, `local_user_id`, the two writability checks, `restrict_to_owner` /
-`restrict_dir_to_owner`, `make_owner_only_dir`) in `platform_owner_compat`. Import and
-patch them as `platform_compat.<name>`: a patch there lands on the owner. The owners read
-the platform flag, the lock modules, the clock, `ctypes`, the Win32 struct layouts and
-two shared constants from `platform_compat` when they run, so a patch of one of those
-there reaches them too.
+`platform_compat` is the import and patch surface for every helper below; each of them
+is defined in an owner module beside it. Import and patch every one as
+`platform_compat.<name>`, and put new code for a family in the module that owns it.
+
+- The cross-process file locks (`file_lock`, `flock_exclusive`, `acquire_lock` /
+  `release_lock`, `try_acquire_lock`, `open_lock_file`, `open_create_or_existing`,
+  `probe_file_persistence`) live in `platform_lock_compat`, and the owner-only access
+  helpers (`current_user_sid`, `process_owner_sid`, `local_user_id`, the two writability
+  checks, `restrict_to_owner` / `restrict_dir_to_owner`, `make_owner_only_dir`) in
+  `platform_owner_compat`. The facade forwards each of their names to that one owner, so
+  a patch there lands on the owner. Those two read the platform flag, the lock modules,
+  the clock, `ctypes`, the Win32 struct layouts and two shared constants from
+  `platform_compat` when they run, so a patch of one of those there reaches them too.
+- The rest is carved into `platform_compat_<role>` modules, each importing only the ones
+  listed before it:
+  - `platform_compat_native`: the platform flags, the signal and process-creation
+    constants, the Win32 struct layouts and the query-only process handle;
+  - `platform_compat_proctable`: the kernel's process table read directly (macOS
+    `libproc` and `sysctl`, Linux `/proc`): a pid's parent, state, argv, environment,
+    CPU time and footprint, its children and group members, and who holds a file or
+    its `flock`;
+  - `platform_compat_runtime`: the UTF-8 environment and console, the re-exec and exit
+    seams, the process alarm and the boot and awake clocks, the open-file limit,
+    `strftime`, interpreter discovery and the launcher hops, the desktop bundle's
+    interpreter, the isolated argv a Python child is spawned with, and Windows on Arm;
+  - `platform_compat_links`: links and junctions, the first linked ancestor of a path,
+    the extended-length prefix folded off a path before a containment comparison, the
+    pinned directory that acts on its entries through its descriptor, and the opens that
+    never follow a link at the final name;
+  - `platform_compat_files`: permission changes that never raise, a tree removal that
+    defeats Windows read-only files, the no-replace rename and directory publication, a
+    path's mount identity, the log-tail and lock-sweep opens, owner access restored to
+    every directory of a copied tree, the macOS TCC folders a home-rooted walk prunes,
+    and the remote-volume, executable-file and read-only checks;
+  - `platform_compat_trust`: system binaries resolved only from fixed directories, the
+    environment allowlist, the Windows Known Folders and short names, whether another
+    account can write a path, and launching the file manager or a default app;
+  - `platform_compat_liveness`: whether a pid is alive, a zombie or a thread-group
+    leader, its process group and its thread count, answered without a signal that
+    acts on it;
+  - `platform_compat_identity`: who a process is: its parent, image, command line and
+    argv match, start identity and start time, owning user, Linux namespaces and
+    cgroups, and macOS sandbox;
+  - `platform_compat_ports`: which process is behind a TCP endpoint: the peer of a
+    loopback connection and the listeners on a port;
+  - `platform_compat_descendants`: a process's descendants, walked from one snapshot of
+    the parent map, with the bounds that keep a Windows Toolhelp snapshot finite;
+  - `platform_compat_winproc`: exact Windows process handles, asyncio's handle
+    duplicated for a tree anchor, the handles of a tree's descendants, closing a
+    handle, and the Job object and main-thread resume a suspended child is bounded and
+    started with;
+  - `platform_compat_wintree`: the Windows process trees the gateway owns: the cleanup
+    reservation, the owned spawn and its capture, the pending check, terminating an
+    exact handle and the drains that retire a tree;
+  - `platform_compat_kill`: ending processes: a pid, a group or a tree, the pinned
+    variants, kill-and-reap and terminate-and-reap. It holds every public kill or reap
+    helper and every call to `os.killpg`, `kill_pid` or `kill_process_tree` (pinned
+    or not) in the family, the signal-0 group probe `pgroup_exists` included, because
+    `test/test_kill_chokepoint_ratchet.py` exempts that one file;
+  - `platform_compat_metrics`: resident and peak memory, heap trimming and the malloc
+    arena cap, open descriptors, CPU time, process-subtree samples, and the host's
+    memory, CPU load and memory pressure.
+
+  No carved module imports the facade. The facade installs `kiro_crew._facade_mirror`,
+  so a write through it (`monkeypatch.setattr`, `mock.patch`) lands on every carved
+  module that binds the same object, as it landed on the one module before the carve.
+  Each of them that logs does so as `kiro_crew.platform_compat`.
+
+The Cross-Platform Portability gate excludes `platform_compat.py` and the
+`platform_compat_*.py` owners by name: they hold the POSIX primitives this layer exists
+to name, so the gate's rules do not apply to them. (Its `src/kiro_crew/**/*.py` pathspec
+also matches no module directly under `src/kiro_crew/`; see #21019.)
 
 This is the contract. The Windows install and runtime story a user follows is
 [windows-install.md](../../guides/windows-install.md).
@@ -69,6 +130,7 @@ produces exactly those silent failures, which is why the helper is named per cal
 | Spawn isolation | `start_new_session=IS_POSIX` + `creationflags=CREATE_NEW_PROCESS_GROUP` | bare `start_new_session=True` |
 | Spawn a console helper from the windowless gateway | `creationflags=_SUBPROCESS_NO_WINDOW` (`CREATE_NO_WINDOW` on Windows, `0` on POSIX) | no flag (each helper flashes a console window) |
 | Walk a tree without leaving it | skip entries where `lstat_is_name_surrogate(info)` is true (Windows junctions and other name-surrogate reparse points); remove a tree in a sweep with `rmtree_force(path)` | `S_ISDIR` alone on an `lstat` result (it reports a junction as a plain directory and walks into the target) |
+| Tell two mounts of one directory apart (a bind mount shares its source's device and inode) | `mount_identity(path, dir_fd=)` -> `(mount id, device major, device minor, inode)` through `statx(STATX_MNT_ID)`, following symlinks and `/proc` magic links; with `dir_fd` and an empty path it names the descriptor. `None` off Linux, before Linux 5.8, or on any failure. Reached through `syscall()` where glibc has no `statx` wrapper, as `rename_noreplace` is | `os.stat` alone, which reports a bind and its source as one directory |
 | Remove a tree git produced (a clone, a `--local` clone, a directory with a `.git`) | `rmtree_force(path)` from a thread, or `_rmtree_force_settled(path)` where a cancelled caller must not leave the delete running (`registry_pipeline`). It clears the read-only bit on a file Windows refuses to unlink and retries once, never raises, and returns whether the path is gone, so a caller that restores something into the same path checks the answer. A tree that survives (a file another process holds open) is set aside, not collided with: `_restore_moved_aside` renames it to a `.partial-*` sibling before the restore | `shutil.rmtree(path, ignore_errors=True)` (git writes `.git/objects/pack/*` read-only; Windows refuses the unlink, `ignore_errors` swallows it, and the tree stays on disk while the caller reports success). Keep `ignore_errors=True` only where the tree holds nothing git wrote: a copy that drops `.git` (`manager._COPY_IGNORE`), a scratch or staging directory, or a linked worktree whose `.git` is a file. `test/test_git_tree_removal_windows.py` pins every site that removes a git tree |
 | Resolve a path for a containment check | `resolve(strict=True)`, handling `FileNotFoundError` on its own and failing closed on any other error | non-strict `Path.resolve()` (on Windows it collapses a self-pointing reparse point lexically without raising, so the loop passes as contained) |
 | Wait on a subprocess PIPE with a deadline | a daemon reader thread feeding a `queue.Queue`, consumed with a bounded `get` (`testing/harness.py`'s `_StdoutPump`) | `selectors.DefaultSelector()` on the pipe (select()-based on Windows, which accepts SOCKETS only, so registering a pipe RAISES there) |
@@ -101,7 +163,7 @@ produces exactly those silent failures, which is why the helper is named per cal
 | Process RSS (live) / peak RSS / CPU | `proc_rss_bytes()` / `proc_peak_rss_bytes()` / `proc_cpu_seconds()` | `resource.getrusage` (`ru_maxrss` is a high-water mark, never a live reading, and its unit is KiB on Linux but bytes on macOS). The peak on Linux is NOT `ru_maxrss`: `execve` seeds it with the pre-exec image's peak, so a gateway started from a large parent would report that parent's number for life; Linux reads its own `/proc/self/status` `VmHWM` instead, monotonic across reads (the kernel folds live RSS into `hiwater_rss` lazily, so raw consecutive readings can dip a few hundred KiB), and an unreadable `/proc` is the documented 0, never the inherited figure. `pdf_extract_child` carries the same `VmHWM` parser rather than importing this module (its imports stay minimal under a capped address space) |
 | Another process's macOS memory footprint | `proc_phys_footprint_bytes_for_pid(pid)` | `proc_pid_rusage(pid, RUSAGE_INFO_V2)` -> `ri_phys_footprint` through `libproc` (no subprocess, no entitlement for a same-uid pid); `None` off macOS or when unreadable. This is the figure jetsam acts on and Activity Monitor's "Memory" column shows: it counts compressed and swapped pages, which `ps` RSS omits, so an idle process that has grown can read a small fraction of its real cost through `ps` (16x measured). `acp/runtime_process_tree` measures each pid of a macOS tree by it, with `ps` RSS as the per-pid fallback, so the runtime ceilings and the Sessions panel read it there |
 | A deadline that survives a host suspend and needs no thread or GIL | `arm_process_alarm(seconds)` (`0` cancels), guarded by `process_alarm_available()`: the kernel's `setitimer(ITIMER_REAL)`, which Linux runs on `CLOCK_MONOTONIC` and macOS on the absolute mach timebase, so a pending deadline keeps its remaining time across a sleep instead of firing on resume; pair it with `faulthandler.register(SIGALRM, ...)` for a GIL-free stack dump, released with `faulthandler.unregister` and registered afresh on every arm (a repeat `register` reinstalls nothing while faulthandler believes it still holds the signal, so a temporary owner that handed `SIGALRM` back with `SIG_DFL` would otherwise leave the next alarm to end the process without a dump). `False` on Windows, which has no such timer — the caller falls back to a mechanism it names for that platform (the loop watchdog uses faulthandler's timer thread there). The timer belongs to the process image that armed it and to no successor: `execve` preserves `ITIMER_REAL` while it resets a caught `SIGALRM` to its default disposition, so `reexec_launcher` / `reexec_python_module` cancel it immediately before `os.execv`, and the gateway entrypoint clears any deadline that still arrived (`loop_watchdog.disarm_inherited_alarm`, only while `SIGALRM` is at its default disposition) | `faulthandler.dump_traceback_later` as a standing deadline (its wait is `CLOCK_REALTIME`-based on every macOS build and on any Linux build without `sem_clockwait`, so a suspend longer than the budget fires it on resume); `signal.setitimer` / `signal.SIGALRM` reached directly (neither exists on Windows); a bare repeat `faulthandler.register` as a way to re-install the handler; an `os.execv` outside the two reexec seams while a deadline is pending (the successor is ended by a signal it never armed) |
-| Now on the suspend-inclusive clock (dating a process start, or measuring a sleep) | `boottime_now()`: `CLOCK_BOOTTIME` on Linux (it counts time the host spent suspended, as `/proc/uptime` and the `starttime` field of `/proc/<pid>/stat` do), `time.time()` on macOS (the clock libproc dates process starts on; it can step, so the liveness oracle pairs it with `acp/liveness.steady_now`), `None` where neither exists — a caller reads `None` as "cannot say", never as a time. The liveness oracle stamps a tool dispatch on it, and the loop watchdog compares its advance against `time.monotonic()` across one poll to name a resume | `time.monotonic()` against a `/proc` process age (`CLOCK_MONOTONIC` stands still through a suspend, so a boot-clock age minus a monotonic stamp places a live child before its own dispatch); `time.clock_gettime(time.CLOCK_BOOTTIME)` outside the compatibility layer (absent on macOS and Windows); importing the reader from `kiro_crew.acp` in application code (the agent-SDK boundary gate refuses the edge) |
+| Now on the suspend-inclusive clock (dating a process start, or measuring a sleep) | `boottime_now()`: `CLOCK_BOOTTIME` on Linux (it counts time the host spent suspended, as `/proc/uptime` and the `starttime` field of `/proc/<pid>/stat` do), `time.time()` on macOS (the clock libproc dates process starts on; it can step, so the liveness oracle pairs it with `acp/liveness_proc.steady_now`), `None` where neither exists — a caller reads `None` as "cannot say", never as a time. The liveness oracle stamps a tool dispatch on it, and the loop watchdog compares its advance against `time.monotonic()` across one poll to name a resume | `time.monotonic()` against a `/proc` process age (`CLOCK_MONOTONIC` stands still through a suspend, so a boot-clock age minus a monotonic stamp places a live child before its own dispatch); `time.clock_gettime(time.CLOCK_BOOTTIME)` outside the compatibility layer (absent on macOS and Windows); importing the reader from `kiro_crew.acp` in application code (the agent-SDK boundary gate refuses the edge) |
 | Now on a clock a host suspend does not advance (how long a loop has been silent) | `awake_now()`: `time.monotonic()` on Linux (`CLOCK_MONOTONIC`) and macOS (the mach timebase); on Windows, whose `time.monotonic()` counts a sleep, the unbiased interrupt time (`QueryUnbiasedInterruptTime`), falling back to `time.monotonic()` only if that call fails. The loop watchdog's silence and the gateway heartbeat's lag read it, so a resume does not read as a stall | `time.monotonic()` for a silence that must not count a Windows sleep (it counts one there, so a resume reads as the whole sleep without a beat) |
 | Available host memory | `host_available_mib()` (0 = unknown, never 0 = no memory) | `/proc/meminfo` directly (Linux-only, so the bound built on it silently vanishes on macOS and Windows) |
 | macOS kernel memory pressure | `memory_pressure_level()`: `kern.memorystatus_vm_pressure_level` through `sysctlbyname` on the cached `_darwin_sysctl_handle()`, in-process (built once under a lock, both prototypes declared before the handle is published, so a concurrent first call never reads None). It answers `MEMORY_PRESSURE_NORMAL` (1), `MEMORY_PRESSURE_WARN` (2) or `MEMORY_PRESSURE_CRITICAL` (4): XNU's `NOTE_MEMORYSTATUS_PRESSURE_*`, the same values as libdispatch's `DISPATCH_MEMORYPRESSURE_*`, with the kernel's internal "urgent" level reported as WARN. `memory_pressure_name(level)` renders it. `None` off macOS and on any failure (no libc, a failed call, a wrong-size answer, an unknown value), and a caller fails open on `None`. The level is the kernel's lagging verdict (subagent.md, *macOS: the kernel memory-pressure hold*): use it as a backstop beside a figure, never as one | a `sysctl` subprocess (the app sandbox can deny the spawn, and callers run on the event loop); a fresh `CDLL` per read; treating the level as a measure of free memory, or a NORMAL reading as proof the host has room |
@@ -161,8 +223,7 @@ interpreters only where removing the user site cannot remove the child target.
 This contract does not apply to user-authored cron scripts, project test commands, or
 other workloads whose documented environment may include `--user` packages. The
 explicit inventory in `test/test_internal_python_isolation.py` names the internal
-boundaries. It includes resident runtime workers such as
-`piper_runtime.PiperRuntime._start`; their module launches follow the same unforced
+boundaries; any resident runtime worker's module launch follows the same unforced
 parent-policy decision. Adding one requires routing it through the helper and adding it
 to that inventory, so a later spawn cannot silently return to the user-site-dependent
 behavior.
@@ -424,7 +485,7 @@ rejected newly opened handles are closed before returning the proven subset.
 This covers an **already observed, handle-pinned** chain. An intermediary that died
 before it was ever observed/pinned remains unverifiable; a single numeric snapshot
 is not enough to recover that chain. The deterministic and self-owned native
-regressions are in `test/test_platform_compat.py`, `TestProcessDescendants`.
+regressions are in `test/test_platform_compat_process_tree.py`, `TestProcessDescendants`.
 
 ## Windows session-tree teardown
 
@@ -611,7 +672,7 @@ handle that cannot be waited on while its exit code reads `STILL_ACTIVE`. So doe
 other error. Real-process regressions force both interleavings:
 `test/test_runtime_cleanup_windows.py::test_a_member_exiting_inside_the_terminate_window_reads_as_exited`
 and `test/test_runtime_cleanup_windows.py::test_a_member_refused_before_its_object_signals_reads_as_exited`;
-`test/test_platform_compat.py::TestTerminateRefusedOnAnExitingMember` pins each
+`test/test_platform_compat_windows_tree.py::TestTerminateRefusedOnAnExitingMember` pins each
 branch on a virtual clock. `pod._windows_job.retire_identity` meets the same refusal
 when it ends a pod publisher, and judges it by its own bounded retirement wait.
 
@@ -642,7 +703,7 @@ helper and its configuration are unchanged.
 The Task Scheduler backend uses these primitives with `pod._windows_run` durable
 run identities and publisher retirement. Job emptiness alone is not reclamation
 authority. Before attempting `/Run`, a failed start may cancel only its exact
-unclaimed reservation under the supervisor's claim lock. The durable `cancelled`
+unclaimed reservation under the claim lock. The durable `cancelled`
 state refuses admission and survives task/wrapper/result cleanup errors; the next
 `start` retries that cleanup before reserving a new generation. The claim lock
 covers cancellation through receipt deletion. Claimed, malformed or changed-run
@@ -650,6 +711,35 @@ records and unexpected HOME/PID/handoff evidence refuse rollback. A failed or
 raised `/Run` never grants cancellation, even if no publisher has claimed yet.
 If cancellation itself cannot be persisted, the ordinary reservation remains
 unresolved rather than being inferred safe on a later invocation.
+
+The scheduled `pod _run` producer claims its reservation as its first act,
+before the checkout, venv and dist checks, so the record (`preparing`) names it
+by pid plus creation time. A producer whose own claim is refused writes nothing.
+On every exit of a claimed boot the producer, not the task wrapper, writes
+`.winresult`; the wrapper writes no sidecar. A boot that refuses without
+spawning a gateway then publishes a `finished` receipt with its exit code,
+under the claim lock and only over its own unchanged `preparing` record. An
+escaped exception or an unproven Job drain withholds that receipt and leaves
+`preparing`. `finished` certifies that no gateway was spawned; it does not
+cover a descendant of a process started before any lifetime Job existed (the
+child-viability probe), the same residual the ready path accepts.
+
+`stop` retires an unspawned (`preparing` or `finished`) generation only after
+proving its producer gone. It opens the producer by pid and creation identity
+(a recycled pid reads as gone and is never signalled) and refuses to retire its
+own pid. A `preparing` producer is only waited for, never terminated: `stop`
+refuses at its deadline. A `finished` producer is given the whole stop budget
+through `wait_identity` to exit on its own, because the boot's failure audit is
+written after the receipt, and is terminated only if it outlives that budget.
+After the wait, `stop` re-reads the record and refuses unless the generation and
+publisher are unchanged and the state is still unspawned. Then `/End` stops any
+wrapper still unwinding. A supervised-pid record or handoff marker refuses, as
+does a HOME under a `preparing` producer; an evidence path that cannot be
+inspected counts as present. Only then is `retired` published, as a
+compare-and-swap under the claim lock. `finish` consumes `drained` or `retired`
+only once HOME is gone, so a HOME cleanup failure stays retryable. A `reserved`
+record nobody claimed, and a `preparing` record whose dead producer left a HOME,
+still need the manual retirement in `pod/README.md`.
 Native tests exercise owner-only access, descendant containment,
 nested resource jobs and breakaway refusal; injected failures run on all hosts.
 

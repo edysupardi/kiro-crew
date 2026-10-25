@@ -23,6 +23,7 @@ from typing import Any
 from kiro_crew import mcp_core
 from kiro_crew.context import RECALL_ROLES
 from kiro_crew.history import ConversationLog, TranscriptBusy, TranscriptWithheld
+from kiro_crew.history_search import split_title_scope
 from kiro_crew.validation import (
     GET_CHAT_SESSION_SCHEMA,
     LIST_SESSIONS_SCHEMA,
@@ -155,6 +156,26 @@ def schemas() -> list[dict[str, Any]]:
     ]
 
 
+#: Seconds a search waits for the gateway to split its Chinese runs. The first
+#: Chinese query on a host also loads the dictionary there (about 0.15 s).
+_SEGMENT_TIMEOUT_SECS = 2.0
+
+
+def gateway_cjk_words(runs: list[str]) -> list[Any] | None:
+    """The gateway's dictionary split of *runs*, or ``None`` on any failure.
+
+    :func:`kiro_crew.mcp_core.run_mcp_core_server` registers this as the process's
+    segmenter, so a core process never loads the dictionary itself (about 45 MB
+    each). Every answer is validated by the search parse before it becomes a
+    needle, and ``None`` keeps today's character path for the query.
+    """
+    answer = mcp_core._post("/api/search/segment", {"runs": runs}, timeout=_SEGMENT_TIMEOUT_SECS)
+    if not isinstance(answer, dict) or answer.get("ok") is not True:
+        return None
+    words = answer.get("words")
+    return words if isinstance(words, list) else None
+
+
 def search_chat_history(name: str, args: dict[str, Any]) -> str:
     args = validate_tool_args(args, SEARCH_CHAT_HISTORY_SCHEMA)
     session_key, refusal = mcp_core.require_strict_session_key(
@@ -188,6 +209,10 @@ def search_chat_history(name: str, args: dict[str, Any]) -> str:
     # the first page could otherwise starve a caller whose real matches rank
     # lower, returning "no results" while hits exist.
     ranked: list[dict] = cl.search_sessions(query, limit=mcp_core._SEARCH_HISTORY_SCAN)
+    # A leading ``title:`` term only picks which titles qualify; the transcript
+    # was searched for the text after it, so the excerpt looks for that text too.
+    scope = split_title_scope(query)
+    snippet_query = query if scope is None else scope.rest
 
     results: list[dict] = []
     for meta in ranked:
@@ -221,7 +246,7 @@ def search_chat_history(name: str, args: dict[str, Any]) -> str:
             rows_for_snippet = cl.derive_messages(key)
         except TranscriptWithheld:
             continue
-        snippet = mcp_core._extract_history_snippet(rows_for_snippet, query)
+        snippet = mcp_core._extract_history_snippet(rows_for_snippet, snippet_query)
         results.append(
             {
                 "session_key": key,

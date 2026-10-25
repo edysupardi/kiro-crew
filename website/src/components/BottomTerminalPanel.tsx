@@ -23,7 +23,7 @@ import { openPopout as openTerminalPopout, isPopoutOpen as isTerminalPopoutOpen,
 import {
   useBottomTerminal, useTerminalHydratePending, addTab, removeTab, hasTab, setActiveTab, setTabsOrder,
   renameTab, capTerminalName,
-  closeBottomTerminal, setBottomTerminalHeight, setBottomTerminalWidth,
+  openBottomTerminal, closeBottomTerminal, setBottomTerminalHeight, setBottomTerminalWidth,
   toggleTerminalPosition, MAX_TERMINALS, MIN_WIDTH, MAX_VH, MAX_VW,
   setTerminalCloseFailed, useTerminalCloseFailed,
   type TermTab,
@@ -160,6 +160,12 @@ function TabChip({ tab, active, closing = false, hintId, closeActions, onSelect,
               if (!closing) onSelect()
             }
           }}
+          // Chromium on Windows enters middle-click autoscroll on the
+          // middle-button MOUSEDOWN when the target sits in a scroll container
+          // (the tab strip is overflow-x-auto), and then `auxclick` never fires,
+          // so the close below never runs. Not while renaming: the field inside
+          // this chip must keep its own middle-button behaviour.
+          onMouseDownCapture={(e) => { if (e.button === 1 && !editing) e.preventDefault() }}
           onAuxClick={(e) => {
             if (e.button === 1 && !closing && !editing) {
               e.preventDefault()
@@ -636,7 +642,13 @@ export function TerminalDetachedBar() {
         </button>
         <button
           className="h-6 px-2 rounded-md text-[12px] text-muted hover:text-text hover:bg-bg-hover transition-colors bg-transparent border-none cursor-pointer"
-          onClick={() => bringBackTerminalPopout()}
+          onClick={() => {
+            bringBackTerminalPopout()
+            // `open` is per window. "Return" means re-dock HERE, so this window
+            // opens its own panel. Every other main window yields its flag on
+            // the bring-back message (terminalPopout.ts), so one dock comes back.
+            openBottomTerminal()
+          }}
         >
           {i18nT('pages.terminalPopoutFrame.return')}
         </button>

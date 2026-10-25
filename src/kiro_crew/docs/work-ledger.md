@@ -181,6 +181,19 @@ closing. What covers a worker that crashed or went silent is the item's own
 those also cover a worker whose process died with its session still open, which
 no wake ever did.
 
+**A report the harness never delivered is not silence.** When a worker's
+`work_report` or `work_brief` call fails before it reaches the ledger (KAS
+answers a tool name it cannot resolve with `Tool "work_report" is not
+available.` and never calls the server), the gateway sees the failed call in
+the worker's own turn and records it beside the item. The item then reads
+`report_undelivered: {tool, at}` on `work_ledger_read` (full and compact) and on
+the Crew board ("couldn't send its report", or "couldn't read its brief" for a
+failed `work_brief`), the conductor's watch is pulled forward, and the wake it
+delivers names the item with `reason=report_undelivered`. The flag is not a
+ledger write: the next `work_brief` or `work_report` call that gets through
+clears it. A conductor that sees it checks the worker's session and pull request
+and tells you what it finds, rather than calling the worker stalled.
+
 Reports belong at real milestones, not on a timer.
 `summary` is capped at 500 characters.
 A longer one is **cut to the cap, not refused**: the stored value carries a note
@@ -203,7 +216,10 @@ ready-to-evaluate batch — runs the acceptance evaluator against the item's own
 condition, and records the answer with `work_ledger_record` as a `verdict`:
 
 - `pass` / `fail` — final for that cycle.
-- `pending` — the condition is not true yet; keep waiting.
+- `pending` — the condition is not true yet; keep waiting, for at most 24 hours on
+  end. Past that the item reads `pending_overdue`, and the conductor asks you, the
+  way it reports a `refused` one: keep waiting, which starts a fresh 24 hours, or
+  drop the item. A `human_approval` bar is never overdue: it waits for your answer.
 - `refused` — the evaluator will not answer the condition as written, and no
   amount of waiting changes that. A **draft** pull request whose checks have not
   finished lands here, because a draft is the author's own "not ready" and a

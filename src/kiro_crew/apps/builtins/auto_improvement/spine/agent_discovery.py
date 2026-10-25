@@ -84,6 +84,8 @@ _LOW_VALUE_MARKERS = (
     "/routes.py",
     "/mcp_server.py",
     "/bridges.py",
+    "/bridges_",
+    "/apps/routes_",
     "/manifest",
 )
 # High-value substrings — pure logic likely to hold a unit-testable defect. Ranked first.

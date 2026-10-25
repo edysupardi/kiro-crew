@@ -17,7 +17,7 @@ import { memo } from 'react'
 import { Bot, Loader2, CheckCircle2, AlertCircle, Clock, Square, Hand } from 'lucide-react'
 import { SidePanelGlyph } from '../../components/SidePanelGlyph'
 import { useAppSelector, useAppDispatch } from '../../store'
-import { openActivityToTab, selectSubagent, switchSlot, isAwaitingSpawnApproval } from '../../store/chatSlice'
+import { openActivityToTab, selectSubagent, switchSlot, isActiveSubagent, isAwaitingSpawnApproval, isSpawnApprovalGone, isSpawnApprovalRetired } from '../../store/chatSlice'
 import { sanitizeLlmOutput } from '../../utils/sanitize'
 import type { ChatMessage, SubagentActivity } from '../../types'
 import { SPAWN_LAUNCH_MARKER } from './types'
@@ -148,13 +148,17 @@ function tally(agents: (SubagentActivity | undefined)[]) {
   let running = 0, awaiting = 0, done = 0, failed = 0, stopped = 0, unknown = 0, neverStarted = 0, neverStartedPressure = 0
   for (const a of agents) {
     if (!a) { unknown++; continue }
+    if (isSpawnApprovalRetired(a)) { unknown++; continue }
     // A run parked on an unanswered spawn approval launched no process, so it
     // is not running — it used to be counted here, which is what made this card
     // claim "1 agent running" for a wave that was in fact blocked on the user
     // (#7318). A `'pending'` entry with no approval_id keeps the old treatment:
     // it is active but not attributable to an approval.
     if (isAwaitingSpawnApproval(a)) awaiting++
-    else if (a.status === 'running' || a.status === 'tool' || a.status === 'pending') running++
+    // Its approval proved gone: decided or expired unseen, so it is not owed to
+    // the user and liveness is not yet known. Outcome unknown, like a dropped id.
+    else if (isSpawnApprovalGone(a)) unknown++
+    else if (isActiveSubagent(a)) running++
     else if (a.status === 'done') done++
     else if (a.status === 'error') {
       failed++
@@ -173,18 +177,9 @@ function tally(agents: (SubagentActivity | undefined)[]) {
 const SubagentRunCard = memo(function SubagentRunCard({
   launch,
   slot,
-  onOpenPanel,
 }: {
   launch: SpawnRunLaunch
   slot: string
-  /** How the HOST opens its Subagents view. The chat page leaves it unset and
-   *  the card drives the chat store (`switchSlot` + `openActivityToTab`), which
-   *  is that page's panel. A host whose panel is not the chat store's — the
-   *  Members page, where `chat.activeSlot` is never the member slot and the
-   *  side panel is its own tab model — passes its opener, so the click lands on
-   *  THIS page's panel instead of silently switching the chat page's active
-   *  slot and opening nothing here (#21138). */
-  onOpenPanel?: () => void
 }) {
   useLanguageGeneration() // memo() bails out of the provider-level repaint; subscribe directly
   const dispatch = useAppDispatch()
@@ -262,18 +257,10 @@ const SubagentRunCard = memo(function SubagentRunCard({
     // reads "No subagents running" — the card's own label promising otherwise.
     // Safe inside split view: the auto-enter effect is gated on splitMode being
     // off, so switching does not reseed or leave the grid.
+    if (slot && slot !== activeSlot) dispatch(switchSlot({ key: slot, announceOnMissing: true }))
     // Deep-link to the first agent of THIS wave so the panel lands on the
     // transcript the card refers to, not whatever was last selected.
     const first = launch.ids.find(id => subagents[id])
-    // A host with its own panel: select the wave's agent in the store (its
-    // Subagents view reads the same selection) and let the host reveal it.
-    // Never `switchSlot` here -- the host's active slot is not the chat store's.
-    if (onOpenPanel) {
-      if (first) dispatch(selectSubagent(first))
-      onOpenPanel()
-      return
-    }
-    if (slot && slot !== activeSlot) dispatch(switchSlot({ key: slot, announceOnMissing: true }))
     if (first) dispatch(selectSubagent(first))
     dispatch(openActivityToTab('subagents'))
   }

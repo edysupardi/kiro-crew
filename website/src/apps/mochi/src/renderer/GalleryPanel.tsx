@@ -39,6 +39,7 @@ import { SpriteImporter, type SpritePackDraft, type SpritePrefillInput } from '.
 import { ColorCustomizerPanel } from './ColorCustomizer'
 import { api } from '../mochiApi'
 import { i18nT } from '../../../../i18n/t'
+import { useConfirm } from '../../../../components/ConfirmDialog'
 import { moodLabel, stateLabel } from '../../i18nKeys'
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -599,6 +600,7 @@ function DetailPanel({ detail, isActive, onClose, onApply, onExport, onEdit, onD
 // ── Main Gallery Panel ─────────────────────────────────────────────────────
 
 export const GalleryPanel: React.FC = () => {
+  const { confirm, confirmDialog } = useConfirm()
   const [packs, setPacks] = useState<PackMeta[]>([])
   const [activePackId, setActivePackId] = useState<string>('')
   const [selectedPackId, setSelectedPackId] = useState<string | null>(null)
@@ -785,7 +787,11 @@ export const GalleryPanel: React.FC = () => {
 
   const handleDelete = useCallback(async () => {
     if (!detail) return
-    if (!confirm(i18nT('apps.mochi.gallery.delete_confirm', { name: detail.meta.name }))) return
+    if (!(await confirm({
+      title: i18nT('apps.mochi.gallery.delete_confirm', { name: detail.meta.name }),
+      confirmLabel: i18nT('apps.mochi.gallery.delete'),
+      danger: true,
+    }))) return
     try {
       const result = await api.galleryDelete(detail.meta.id)
       if (result && !result.ok) {
@@ -798,7 +804,7 @@ export const GalleryPanel: React.FC = () => {
     } catch (err: unknown) {
       setError((err as Error)?.message || i18nT('apps.mochi.errors.delete'))
     }
-  }, [detail, fetchPacks])
+  }, [detail, fetchPacks, confirm])
 
   const handleImportBundle = useCallback(async () => {
     try {
@@ -959,6 +965,7 @@ export const GalleryPanel: React.FC = () => {
 
         />
       )}
+      {confirmDialog}
     </div>
   )
 }

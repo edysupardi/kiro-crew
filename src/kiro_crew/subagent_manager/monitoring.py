@@ -363,7 +363,7 @@ class OrphanStallMonitor(ManagerComponent):
         arrived while a pass was running.
 
         A request landing mid-sweep is a run that just parked and wrote a NEW
-        ``retry_at`` (``run.py``'s dependency park), while the pass in flight
+        ``retry_at`` (``run_yields.py``'s dependency park), while the pass in flight
         arms from the deadline it has already read. Without the extra pass that
         scope's instant is armed by nobody and every waiter behind it waits for
         the 60s reaper sweep. Coalescing here, in the SAME task, because the
@@ -1082,7 +1082,9 @@ class OrphanStallMonitor(ManagerComponent):
             return  # never sampled (e.g. finished before the first reaper sweep)
         try:
             append_cost_sample(
-                _cost_bucket(info.agent, info.execution_context),
+                _cost_bucket(
+                    info.agent, info.execution_context, remote=bool(info._remote_workspace)
+                ),
                 info.peak_rss_gb,
                 info.peak_cpu_cores,
                 shared=bool(info._session_sharing),

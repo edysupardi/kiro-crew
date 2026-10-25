@@ -4,7 +4,7 @@
  *  (./rows) and its one `actions` object; the row's memo compares both. */
 import { useRef, useEffect, memo, useMemo, useContext } from 'react'
 import { motion } from 'framer-motion'
-import { X, Pin, VolumeX, EyeOff, VenetianMask, MoreVertical, CornerDownRight, GitFork, Loader, Loader2, Bot, ExternalLink, Workflow, TriangleAlert, Goal, MessageCircleQuestionMark, ShieldCheck, Hourglass } from 'lucide-react'
+import { X, Pin, VolumeX, EyeOff, VenetianMask, MoreVertical, CornerDownRight, GitFork, Loader, Loader2, Bot, ExternalLink, Workflow, TriangleAlert, Goal, MessageCircleQuestionMark, ShieldCheck, Hourglass, GripVertical, Moon } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { shallowEqual } from 'react-redux'
 import { useAppDispatch, useAppSelector } from '../../store'
@@ -38,8 +38,11 @@ import { deriveAutomationStatus, MONITOR_STATUS_KEYS } from '../../monitoring/au
 import MonitorRadar from '../../components/MonitorRadar'
 import { i18nT } from '../../i18n/t'
 import { uiLocation } from '../../uiLocations/uiLocation'
-import { agentOrDefaultLabel } from '../../utils/agentLabel'
+import { agentOrDefaultLabel, withMemorySource } from '../../utils/agentLabel'
+import { isUntitledSession, sessionDisplayTitle } from '../../utils/sessionDisplayTitle'
+import { sessionMemoryTag } from '../../lib/agentMemorySource'
 import { sameRowView, type SessionRowView } from './rows'
+import { memberThreadTitle } from '../../lib/memberThreadTitle'
 import { CrewOfflineContext } from './CrewGroups'
 import { useSlotTitleGenerating } from '../../hooks/slotTitleGeneration'
 import { DisclosureChevron, isOpenInTabModifierClick } from './chrome'
@@ -200,6 +203,8 @@ interface SessionRowActions {
    *  the browser's `dragend` lands on a detached node. */
   onNativeDragEnd: () => void
   onPinnedKeyboardReorder: (key: string, container: string, delta: -1 | 1, row: HTMLElement) => void
+  /** Alt+Arrow on an UNPINNED row: the manual order's move, as a drop makes it. */
+  onManualKeyboardReorder: (key: string, container: string, delta: -1 | 1, row: HTMLElement) => void
   /** Go where a row whose session belongs to another page lives
    *  (`view.opensElsewhere`): click and Enter land here instead of `switchSlot`. */
   openElsewhere: (path: string) => void
@@ -227,8 +232,8 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
   const {
     slot: s, showDivider, scope, navScope, holdContainer, isActive, isOut, isPinned, isUnread, isRunning,
     recent, subagentCount, subagentApprovalCount, digitBadge,
-    isRenaming, renamingHere, renameValue, revealFlash, pinnedOrderIndex, pinnedReorderEnabled, rowAnimEnabled,
-    opensElsewhere, peerId, peerName,
+    isRenaming, renamingHere, renameValue, revealFlash, pinnedOrderIndex, drawnOrderIndex, pinnedReorderEnabled, rowAnimEnabled,
+    rowMotionHeld, opensElsewhere, peerId, peerName,
   } = view
   const conductor = view.conductor
   // An ADOPTED remote-crew row (a local slot that mirrors a peer session) has a ✕
@@ -268,11 +273,12 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
       : i18nT('pages.chatSidebar.release_locally_hint_generic'))
     : conductor && conductor.childCount > 0 ? i18nT('pages.chatSidebar.close_keeps_children_hint') : undefined
   const {
-    connected, mode, isMobile, colorMode, defaultAgent, installedAgents, tagById, paletteColors, boost, boostFor,
-    recentTintCount, dragInFlight, activeDraggedKey, activeDraggedPinnedIndex, guideOnRowControl,
+    connected, mode, isMobile, colorMode, defaultAgent, installedAgents, memoryRows, tagById, paletteColors, boost, boostFor,
+    recentTintCount, dragInFlight, activeDraggedKey, activeDraggedPinnedIndex, activeDraggedDrawnIndex, manualSort,
+    guideOnRowControl,
   } = view.shell
   const {
-    onNativeDragStart, onNativeDragEnd, onPinnedKeyboardReorder,
+    onNativeDragStart, onNativeDragEnd, onPinnedKeyboardReorder, onManualKeyboardReorder,
     renameInputRef, onRenameStart, onRenameChange, onRenameCommit, onRenameCancel, onAutoTitle,
     onDuplicate, onCloseSession, onMenuCloseAutoFocus, onSelectSlot, onOpenSlotInNewTab, onOpenSource, onOpenPeerSession,
     openElsewhere, toggleConductor,
@@ -299,6 +305,16 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
   // same reason: this sidebar does not own the slot's lifecycle. They differ only
   // in what a click does (open a window vs. navigate), which the handlers below decide.
   const foreignRow = !!peerId || onOpenElsewhere != null
+  // A crewmate's own DM thread is named after the crewmate, never after a generated
+  // topic (`memberThreadTitle`). Local rows only: a peer's roster is not ours.
+  const memberTitle = peerId ? null : memberThreadTitle(s, installedAgents)
+  // An untitled row reads "Untitled session", never its key (#22049); the key
+  // stays in the tooltip, where it tells untitled rows apart.
+  const shownTitle = memberTitle ?? sessionDisplayTitle(s)
+  // The tooltip keeps a topic stored before the thread was named after the crewmate.
+  const tooltipTitle = memberTitle !== null && s.title && s.title !== s.key && s.title !== memberTitle
+    ? `${memberTitle}: ${s.title}`
+    : memberTitle ?? (isUntitledSession(s) ? `${shownTitle} · ${s.key}` : shownTitle)
   // Inside a crew group the header already names the machine, so the row
   // drops its own crew chip.
   const inCrewGroup = scope.startsWith('crew:')
@@ -440,6 +456,12 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
     const nativeDragInFlight = useRef(false)
     useEffect(() => () => { if (nativeDragInFlight.current) onNativeDragEnd?.() }, [onNativeDragEnd])
     const reorderContainer = scope === 'flat' ? 'flat' : (s.folder_id || 'root')
+    // Shown on the rows a drag can place in the manual order.
+    const manualHandle = manualSort && !isPinned && dndRow && pinnedReorderEnabled
+    // Alt+ArrowUp/Down moves a pinned row in every sort, and an unpinned row
+    // only under Manual: in another sort the chord stays the page's (the
+    // transcript's turn step), and a keystroke never switches the sort.
+    const keyboardMovable = dndRow && pinnedReorderEnabled && (isPinned || manualSort)
     const agentName = s.agent || defaultAgent || ''
     // What the row SHOWS, kept separate from `agentName` on purpose. That value
     // is a resolution KEY — it feeds the source tint lookup, the divergence
@@ -456,7 +478,18 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
     // The row's own empty-state placeholder is preserved: with no agent AND no
     // default there is nothing to mark, and the literal 'default' the helper
     // degrades to would be a boot-window claim rather than a label.
-    const agentDisplay = agentName ? agentOrDefaultLabel(s.agent, defaultAgent) : ''
+    //
+    // A crewmate and a custom agent of one name read alike, so a row whose agent
+    // has such a pair in the picker also says which memory it runs on (#19472).
+    // Local rows only: `memoryRows` is THIS machine's catalog, and a peer's row
+    // or a row whose turns run on another crew resolves its agent there.
+    const memoryTag = agentName && !peerId && !crewOf(s)
+      ? sessionMemoryTag(s.agent, s.agent_kind, defaultAgent, memoryRows)
+      : null
+    // A crewmate's own thread is named by the title below, so the chip does not
+    // print the same name a second time; the line keeps its height and the
+    // Members-page chip.
+    const agentDisplay = agentName && memberTitle === null ? withMemorySource(agentOrDefaultLabel(s.agent, defaultAgent, s.agent_kind), memoryTag) : ''
     // A DIVERGENCE, not a status: the row is advertising `agentName` while a
     // different agent answers the session — usually an app agent that was
     // removed, or one whose registration has not landed yet. Shown because the
@@ -999,7 +1032,13 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
       closeNeutral: releaseLocally,
     }), [rowKey, mode, onRenameStart, onAutoTitle, scope, rowTitle, onOpenSlotInNewTab, closeReachHint, releaseLocally, closeReachLabel])
     const rowActions = useMemo(() => (void langGen, !renamingHere && !foreignRow ? (isMobile ? (
-      <div className="absolute top-1/2 -translate-y-1/2 right-1.5 flex items-center gap-0.5">
+      // In flow, not absolute: the phone ⋮ is always drawn, so the content
+      // column must end before it. Absolutely placed, the column ran to the
+      // row's own pr-3 and a long title painted under the button and its 44px
+      // `mc-touch-hit` area. `-mr-1.5` keeps the button 6px from the row's
+      // edge, where `right-1.5` put it; `ml-3` (12px) covers the 11px the hit
+      // area grows past the 22px button toward the text.
+      <div className="shrink-0 self-center ml-3 -mr-1.5 flex items-center gap-0.5">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button type="button" className="mc-touch-hit text-muted/50 active:text-text p-1 cursor-pointer bg-transparent border-none" aria-label={i18nT('pages.chatSidebar.more_options')} onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}><MoreVertical size={14} /></button>
@@ -1041,10 +1080,13 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
       </ContextMenuContent>
     ) : null), [foreignRow, onMenuCloseAutoFocus, rowMenuProps, langGen])
     return (
+      // A drop target in its own order: a pinned row takes pinned drags (the
+      // pinned order), an unpinned row unpinned ones (the manual order, in any
+      // sort). The collision layer keeps each to its own container.
       <DndDroppable
-        id={`pinned-session:${scope}:${rowIdentity}`}
-        data={{ type: 'pinned-session', key: s.key, container: reorderContainer }}
-        disabled={!dndRow || !pinnedReorderEnabled || !isPinned || isRenaming}
+        id={`${isPinned ? 'pinned-session' : 'manual-session'}:${scope}:${rowIdentity}`}
+        data={{ type: isPinned ? 'pinned-session' : 'manual-session', key: s.key, container: reorderContainer }}
+        disabled={!dndRow || !pinnedReorderEnabled || isRenaming}
       >
         {({ setNodeRef: setPinnedDropRef, isOver: isPinnedDropOver }) => (
       <motion.div ref={setPinnedDropRef} layout={rowAnimEnabled ? 'position' : false} layoutId={rowAnimEnabled ? `slot-${layoutScope}-${rowIdentity}` : undefined}
@@ -1057,13 +1099,16 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
           ...(conductor.depth > 0 ? { 'data-testid': 'conductor-nested-row' } : {}),
           ...(conductor.anchorOnly ? { 'data-conductor-anchor': 'true' } : {}),
         } : {})}
-        initial={rowAnimEnabled ? { opacity: 0, x: -12 } : false}
+        initial={rowAnimEnabled && !rowMotionHeld ? { opacity: 0, x: -12 } : false}
         // The anchor's dimming belongs HERE and not in a class: Motion writes its
         // animation target to the element's own style, so an inline `opacity: 1` from
         // this target outranks any opacity utility on the same row and the anchor paints
         // at full strength. One source of truth, and the property a person actually sees.
         animate={{ opacity: conductor?.anchorOnly ? 0.55 : 1, x: 0 }}
-        transition={{ layout: { type: 'spring', stiffness: 500, damping: 35 }, opacity: { duration: 0.2 }, x: { duration: 0.2 } }}>
+        // While the first population settles the layout transition is instant, not
+        // the projection off: Framer reads `layout`/`layoutId` once, at mount, but
+        // reads `transition` on every layout change, so the same rows spring later.
+        transition={{ layout: rowMotionHeld ? { type: false } : { type: 'spring', stiffness: 500, damping: 35 }, opacity: { duration: 0.2 }, x: { duration: 0.2 } }}>
         {/* Both dnd ids are ORIGIN-QUALIFIED (`rowIdentity`, not `s.key`): a peer
             row's disabled droppable/draggable still registers its id with dnd-kit,
             so a peer key that collided with a local one would register twice and
@@ -1114,14 +1159,17 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
           data-session-container={holdContainer}
           aria-current={isActive ? 'true' : undefined}
           aria-disabled={!connected}
-          aria-keyshortcuts={dndRow && pinnedReorderEnabled && isPinned ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
+          aria-keyshortcuts={keyboardMovable ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
           onKeyDown={e => {
-            if (dndRow && pinnedReorderEnabled && isPinned && e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey
+            if (keyboardMovable && e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey
               && (e.key === 'ArrowUp' || e.key === 'ArrowDown')
               && (e.target as HTMLElement) === e.currentTarget) {
               e.preventDefault()
               e.stopPropagation()
-              onPinnedKeyboardReorder(s.key, reorderContainer, e.key === 'ArrowUp' ? -1 : 1, e.currentTarget)
+              // A pinned row moves in the pinned order; an unpinned one in the
+              // manual order, exactly as dropping it one row along would.
+              const reorder = isPinned ? onPinnedKeyboardReorder : onManualKeyboardReorder
+              reorder(s.key, reorderContainer, e.key === 'ArrowUp' ? -1 : 1, e.currentTarget)
               return
             }
             // ArrowUp/ArrowDown rove focus through the rows of THIS list (see
@@ -1236,9 +1284,9 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
           }}>
           {isPinnedDropOver && activeDraggedKey !== null && activeDraggedKey !== s.key && (
             <span
-              data-testid="pinned-session-insertion"
+              data-testid={isPinned ? 'pinned-session-insertion' : 'manual-session-insertion'}
               aria-hidden="true"
-              className={`absolute left-3 right-3 h-0.5 rounded-full bg-accent pointer-events-none z-20 ${activeDraggedPinnedIndex < pinnedOrderIndex ? '-bottom-[1px]' : '-top-[1px]'}`}
+              className={`absolute left-3 right-3 h-0.5 rounded-full bg-accent pointer-events-none z-20 ${(isPinned ? activeDraggedPinnedIndex < pinnedOrderIndex : activeDraggedDrawnIndex < drawnOrderIndex) ? '-bottom-[1px]' : '-top-[1px]'}`}
             />
           )}
           {/* Held-modifier digit badge: while the chat-jump modifier is down,
@@ -1319,7 +1367,11 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
                 *  every sidebar commit for a crossfade that fires only on the
                 *  rare agent switch, and the repo's animation invariant is
                 *  framer-only (no new CSS @keyframes). */}
-              <span key={agentName || 'empty'} title={agentDisplay || undefined} className={`truncate shrink-0 ${resolvedSlotTags.length > 0 || agentDiverged ? 'max-w-[50%]' : ''}`}>{agentDisplay || '\u00A0'}</span>
+              {/* A crewmate's own thread has no agent chip (its title is the name), so the
+                *  line starts at the Members-page chip with no placeholder gap before it. */}
+              {memberTitle === null && (
+                <span key={agentName || 'empty'} title={agentDisplay || undefined} className={`truncate shrink-0 ${resolvedSlotTags.length > 0 || agentDiverged ? 'max-w-[50%]' : ''}`}>{agentDisplay || '\u00A0'}</span>
+              )}
               {/* WHY this card is sitting above its folder's other rows, in a
                 *  word, beside the agent name that is the card's own first line.
                 *  The accent bar down its left edge groups the card with the
@@ -1505,7 +1557,7 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
                *  both read as a stutter. Folder membership is carried by the tree
                *  itself in folder view; in flat view the row's own context menu
                *  still names it. */}
-              {slotActivityTs(s) || isPinned || s.muted || conductorMeta ? (
+              {slotActivityTs(s) || isPinned || s.muted || s.process === 'released' || conductorMeta ? (
                 <span className="ml-auto inline-flex items-center gap-1 shrink-0">
                   {/* FIRST in the group, so it sits immediately left of the timestamp
                    *  and the timestamp keeps the position it has in every other lane.
@@ -1519,6 +1571,7 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
                   {/* At rest, not hover-only: a muted session must read differently
                    *  from a quiet one. Beside the pin, the other state marker. */}
                   {s.muted && <span className="shrink-0" data-testid="session-row-muted" role="img" aria-label={i18nT('pages.chatSidebar.muted')} title={i18nT('pages.chatSidebar.muted')}><VolumeX size={10} className="text-muted" /></span>}
+                  {s.process === 'released' && <span className="shrink-0" data-testid="session-row-released" role="img" aria-label={i18nT('pages.chatSidebar.process_released')} title={i18nT('pages.chatSidebar.process_released')}><Moon size={10} className="text-muted" /></span>}
                   {isPinned && <span className="shrink-0" title={i18nT('pages.chatSidebar.pinned')}><Pin size={10} className="text-accent" /></span>}
                 </span>
               ) : null}
@@ -1532,7 +1585,7 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
             <div
               data-session-title
               className={`${ROW_TITLE_CLS} font-semibold text-text ${renamingHere ? '' : 'truncate'}`}
-              title={s.title && s.title !== s.key ? s.title : s.key}
+              title={tooltipTitle}
             >
               {/* No separate fork glyph: forked titles already carry the
                   persisted "↳ " marker (chat_fork.py _FORK_TITLE_MARKER). Keeping
@@ -1556,7 +1609,7 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
                   {titleGenerating && (
                     <Loader size={ROW_ICON_PX} className="lucide-inline mr-1 shrink-0 text-accent animate-spin" role="img" aria-label={i18nT('pages.chatPage.regenerating_title')} data-testid="row-title-generating" />
                   )}
-                  {s.title && s.title !== s.key ? s.title : s.key}
+                  {shownTitle}
                 </>
               )}
             </div>
@@ -1590,6 +1643,27 @@ export const SessionRow = memo(function SessionRow({ view, actions }: SessionRow
             {/* No tag chips here: every tag renders in the meta line above as
              *  tinted `· name` text. A chip row would print each tag twice. */}
           </div>
+          {/* Under Manual an unpinned row wears a drag handle in its LEFT PAD,
+           *  out of flow, so the agent name, title and status line stay on the
+           *  content column and keep the folder name's left edge
+           *  (docs/decisions/2026-10-09-folder-glyph-sits-on-its-connector-line.md).
+           *  The box runs from 4px to 14px, so it ends where the content column
+           *  starts, and the glyph's dots start at 7px, where the recency tint's
+           *  widest stripe ends (`recencyTintShadow`); the colour bar takes only
+           *  the first 2px. Not at the right end, which belongs to the ⋮ button's
+           *  touch area and the hover toolbar: they would take a press aimed at
+           *  it. The whole row still drags, so the handle only says it can.
+           *  Decorative to assistive tech, which reads the row's Alt+Arrow
+           *  shortcut instead. */}
+          {manualHandle && (
+            <span
+              className="absolute left-1 w-2.5 top-1/2 -translate-y-1/2 flex"
+              data-testid="session-row-drag-handle"
+              aria-hidden="true"
+              title={i18nT('pages.chatSidebar.drag_to_reorder')}>
+              <GripVertical size={10} className="shrink-0 text-muted" />
+            </span>
+          )}
           {/* Hide the hover action popup (⋯ / duplicate / close) while THIS slot
            *  is being renamed: it is absolute-positioned at right-1.5 and reveals
            *  on `:focus-visible` inside the row, which a focused text input

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, type MutableRefObject, type Dispatch, t
 import { useQuery } from '@tanstack/react-query'
 import { store, type AppDispatch, type AppStore } from '../store'
 import type { ErrorReport } from '../utils/errorReport'
-import { forkSlot, switchSlot, createSlot, type FollowupItem, setPendingInput, clearFollowupCard, openActivityToTab } from '../store/chatSlice'
+import { captureForkOrigin, forkMayOpen, forkOpenSettled, forkOpenStarted, forkSlot, switchSlot, createSlot, type FollowupItem, setPendingInput, clearFollowupCard, openActivityToTab, requestSlotFolderOpen } from '../store/chatSlice'
 import { api } from '../api/client'
 import { safeSetSessionItem } from '../utils/safeStorage'
 import { extractPromptFromToken, extractSlackContextFromToken } from '../utils/tokenPrompt'
@@ -21,7 +21,7 @@ interface ForkSessionOptions {
 
 /**
  * Fork from a transcript row: reads whether a tail fork is offered, forks the slot at that
- * row, and switches to the new session.
+ * row, and switches to the new session unless the user opened another one meanwhile.
  *
  * Called from ChatPage at the position its statements held, so React registers its effects in the same order.
  */
@@ -29,9 +29,24 @@ export function useForkSession({
   activeSlot, dispatch, showActionError,
 }: ForkSessionOptions) {
   const { data: forkCfg } = useQuery<{ tail_fork_enabled?: boolean }>({ queryKey: ['dashboardConfig'], queryFn: fetchDashboardConfig, staleTime: 30_000 })
-  const handleFork = useCallback(async (visibleIndex: number, messageId?: string) => {
+  // While Tail-only Fork is on the plain entry forks the tail, so the menu also offers a fork with
+  // history; with it off the plain entry already forks with history. A primitive, so it can sit in
+  // the transcript renderer's dependency list.
+  const forkDirectionChoice = forkCfg?.tail_fork_enabled === true
+  const handleFork = useCallback(async (visibleIndex: number, messageId?: string, explicitDirection?: 'head') => {
     if (!activeSlot) return
+    // Read before the config fetch and the fork request: the user can open
+    // another session while either runs, and the fork then must not take the view.
+    const origin = captureForkOrigin(store.getState())
     let direction: 'head' | 'tail' = 'head' // hoisted so the catch advises the same way
+    let control: string | undefined
+    // Pending until the child is active or the fork failed (the `finally`), so
+    // the chat page does not open another session if this one leaves the list.
+    // Released once: `switchSlot.pending` makes the child active synchronously,
+    // so the count drops before the child's transcript fetch, not after it.
+    let released = false
+    const release = () => { if (!released) { released = true; dispatch(forkOpenSettled()) } }
+    dispatch(forkOpenStarted())
     try {
       // Fork WITHOUT a prompt: an unsent composer draft must never be
       // auto-submitted into the freshly forked session. The
@@ -45,20 +60,35 @@ export function useForkSession({
       // — which would downgrade an intended tail-fork to a head-fork whenever
       // the query has errored or settled with no data, not just while loading.
       const resolvedCfg = forkCfg ?? await api.dashboardConfig()
-      direction = resolvedCfg?.tail_fork_enabled ? 'tail' : 'head'
+      // A direction named by a menu entry wins; a plain fork follows the setting.
+      direction = explicitDirection ?? (resolvedCfg?.tail_fork_enabled ? 'tail' : 'head')
+      if (resolvedCfg?.tail_fork_enabled === true) {
+        control = i18nT(direction === 'head' ? 'pages.chat.assistantMessage.fork_earlier_messages' : 'pages.chat.assistantMessage.fork_later_messages_only')
+      }
       const result = await dispatch(forkSlot({ slot: activeSlot, atIndex: visibleIndex, messageId, direction })).unwrap()
       if (result.ok) {
-        await dispatch(switchSlot(result.key))
+        if (forkMayOpen(store.getState(), origin)) {
+          const switching = dispatch(switchSlot(result.key))
+          // The child inherits this session's folder, which can be collapsed when
+          // the session was opened from the command bar, a tab or a link: open
+          // that path so the child's row shows. switchSlot.pending has already
+          // made the child active, so the request follows the activation.
+          dispatch(requestSlotFolderOpen({ key: result.key, folder_id: result.folder_id }))
+          release()
+          await switching
+        }
       } else {
-        showTranscriptForkFailure(showActionError, result.code, result.error, direction)
+        showTranscriptForkFailure(showActionError, result.code, result.error, direction, control)
       }
     } catch (e) {
       // A refusal is a non-2xx, so the thunk REJECTS: its code rides the rejection payload.
-      showTranscriptForkFailure(showActionError, (e as { code?: string } | null)?.code, errMessage(e), direction)
+      showTranscriptForkFailure(showActionError, (e as { code?: string } | null)?.code, errMessage(e), direction, control)
+    } finally {
+      release()
     }
   }, [activeSlot, dispatch, forkCfg, showActionError])
   return {
-    handleFork,
+    handleFork, forkDirectionChoice,
   }
 }
 

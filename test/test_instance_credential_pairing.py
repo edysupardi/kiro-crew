@@ -1118,7 +1118,7 @@ class TestTheSharedHelperOwnsThePairing:
         import pathlib
 
         src = pathlib.Path(__file__).resolve().parent.parent / "src" / "kiro_crew"
-        allowed = {pathlib.Path("config/loader.py")}
+        allowed = {pathlib.Path("config/loader_locations.py")}
         # dashboard/server.py composes its server_runtime owners into one namespace,
         # so the two are read as one module.
         runtime = pathlib.Path("dashboard/server_runtime")
@@ -1132,6 +1132,10 @@ class TestTheSharedHelperOwnsThePairing:
             text = path.read_text(encoding="utf-8")
             if rel == pathlib.Path("dashboard/server.py"):
                 text += "".join(owner.read_text(encoding="utf-8") for owner in owners)
+            if rel == pathlib.Path("cron_script.py"):
+                text += "".join(
+                    p.read_text(encoding="utf-8") for p in sorted(src.glob("cron_script_*.py"))
+                )
             reads_per_port = "run_marker.read_secret(" in text
             reads_shared = '".local_secret"' in text
             if reads_per_port and reads_shared:
@@ -1557,7 +1561,9 @@ class TestTheServingResolverIsTheOneGatewaySideChokepoint:
         for rel in (
             "computer_use/screencast.py",
             "cron_script.py",
+            *sorted(path.name for path in src.glob("cron_script_*.py")),
             "mcp_cron.py",
+            "mcp_cron_list_render.py",
         ):
             text = (src / rel).read_text(encoding="utf-8")
             if "resolve_client_port_ex" in text:

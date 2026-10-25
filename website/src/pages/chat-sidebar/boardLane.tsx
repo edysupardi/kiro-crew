@@ -2,18 +2,18 @@
  *  filter popover and native card drop, the column's folder blocks (the board's
  *  own folder rows, reorderable per column) and the unfile strip. */
 import { Fragment } from 'react'
-import { createPortal } from 'react-dom'
-import { Plus, X, EyeOff, FolderPlus, MessageSquarePlus, ChevronRight, Pencil, MoreVertical, Tag as TagIcon, GripVertical, Settings, Server } from 'lucide-react'
+import { OverlayPortal } from '../../components/overlayRoot'
+import { Plus, X, EyeOff, FolderPlus, MessageSquarePlus, ChevronRight, MoreVertical, Tag as TagIcon, GripVertical, Server } from 'lucide-react'
 import { FolderBody } from '../../components/FolderBody'
 import { FolderRail } from '../../components/FolderRail'
 import ErrorNotice from '../../components/ErrorNotice'
 import FolderGlyph from '../../components/FolderGlyph'
 import { DndContext, DragOverlay, MeasuringStrategy } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from '../../components/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent } from '../../components/ui/dropdown-menu'
+import { ContextMenu, ContextMenuTrigger, ContextMenuContent } from '../../components/ui/context-menu'
 import { Input } from '../../components/ui'
 import { safeSetItem } from '../../utils/safeStorage'
-import FolderMoveSubmenu from '../../components/FolderMoveSubmenu'
 import TagManagerList from '../../components/TagManagerList'
 import { DndActiveProbe, DndDroppable } from '../../components/dnd'
 import { collectFolderSubtreeIds } from '../../utils/folderTree'
@@ -22,32 +22,30 @@ import { SESSION_LANES } from '../chat/sessionLane'
 import { SessionRowWindowScroller } from '../chat/sessionRowWindow'
 import { i18nT } from '../../i18n/t'
 import { sidebarCollision } from './dnd/collision'
-import { PrivateChatRow } from './PrivateChatRow'
 import { BoardUnfileDropStrip, SortableColumnFolder, FolderDragGhost } from './dnd/targets'
 import type { Slot } from './types'
 import { FOLDERS_SHELVED_LS_KEY } from './persistence'
 import { sessionRowIdentity } from './rowIdentity'
-import { BOARD_FOLDER_BODY_CLS, FOLDER_BODY_OPEN_PADDING, PinnedSessionDivider, isOpenInTabModifierClick } from './chrome'
+import { BOARD_FOLDER_BODY_CLS, FOLDER_BODY_OPEN_PADDING, PinnedSessionDivider, createTabModeForClick } from './chrome'
 import type { LaneRows } from './laneRows'
 import type { FolderBlocks } from './folderBlocks'
 import type { SidebarScope } from './scope'
-import OfflineMenuReason from '../../components/OfflineMenuReason'
-import { offlineMenuRow, offlineProps } from '../../utils/offline'
+import { offlineProps } from '../../utils/offline'
 
 /** The board lane renderer for one shell render. */
 export function createBoardLane(shell: SidebarScope & LaneRows & FolderBlocks) {
   const { activeDrag, addColumnAfterMutation, attachStripEdges, boardError, boardFolderCollapsed,
     boardPeerCount, closeColumnPopover, columnEditId, columnMatches, columnPopoverImeLatch, columnPopoverRef,
-    connected, createChatInFolder, deleteColumnWithConfirm, deleteFolderWithConfirm, derivedHintCol, dndSensors,
+    connected, createChatInFolder, deleteColumnWithConfirm, derivedHintCol, dndSensors,
     dropSlotMutation, editName, editScope, editingId, flatView, folderCompare, folderCreateError,
-    folderCreateMountAbsent, folderDragWithheld, folderEditInputRef, folderReorderable, folderSortMode,
+    folderCreateMountAbsent, folderDragWithheld, folderEditInputRef, folderReorderable,
     folderSubtrees, folders, handleSidebarDragCancel, handleSidebarDragEnd, handleSidebarDragStart, heldLane,
     hiddenFolderCount, hideEmptyFolderBody, ime, isActiveRow, isFolderFilteredOut, laneSlots, moveByDrag,
-    moveFolderTo, nativeSessionDrag, onMenuCloseAutoFocus, onOpenSlotInNewTab, orderedColumns, popoverPos,
-    renameCommit, renderFolderCreateError, renderSessionRow, reorderColumnsMutation, reportDndActive,
+    nativeSessionDrag, onMenuCloseAutoFocus, onOpenSlotInNewTab, orderedColumns, popoverPos,
+    renameCommit, renderFolderCreateError, renderFolderMenuItems, renderSessionRow, reorderColumnsMutation, reportDndActive,
     revealFlash, rootFolders, setBoardError, setColumnEditId, setDerivedHintCol, setEditName, setEditScope,
     setEditingId, setFilterSortOpen, setFolderModal, setFolderOfflineNotice, setFoldersShelved, sidebarRows, slotFolders,
-    startsAutomaticSection, stripEdges, suppressMenuRestoreRef, tagById, toggleColumnCollapse,
+    startsAutomaticSection, stripEdges, tagById, toggleColumnCollapse,
     updateColumnMutation } = shell
   // Does any descendant (direct or nested) of `folderId` contain a slot from `slots`?
   function descendantMatch(fs: ChatFolder[], folderId: string, slots: Slot[], visited = new Set<string>()): boolean {
@@ -144,6 +142,10 @@ export function createBoardLane(shell: SidebarScope & LaneRows & FolderBlocks) {
           if (k) moveByDrag(k, folder.id)
         }}
       >
+        {/* Only the header opens the folder menu; body rows keep their own
+         * menus and the rename input keeps its native editing menu. */}
+        <ContextMenu>
+          <ContextMenuTrigger asChild disabled={editingId === folder.id && editScope === columnId}>
         {/* Same rule as the tree row: a column copy with no body has nothing to
          *  toggle, so it is not a control - no button role, no tab stop, no
          *  pointer cursor, no expanded state and no handler. It stays draggable,
@@ -221,41 +223,20 @@ export function createBoardLane(shell: SidebarScope & LaneRows & FolderBlocks) {
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="min-w-[180px]" onClick={e => e.stopPropagation()} onCloseAutoFocus={onMenuCloseAutoFocus}>
-                <DropdownMenuItem {...offlineMenuRow(connected, i18nT('utils.offline.rename_folders'), i18nT('pages.chatSidebar.rename'), () => { suppressMenuRestoreRef.current = true; setEditingId(folder.id); setEditScope(columnId); setEditName(folder.name) })}><Pencil size={13} /> {i18nT('pages.chatSidebar.rename')}</DropdownMenuItem>
-                <DropdownMenuItem data-testid={`col-${columnId}-folder-${folder.id}-new-sub`} {...offlineMenuRow(connected, i18nT('utils.offline.create_folders'), i18nT('pages.chatSidebar.new_subfolder'), () => { setFolderModal({ mode: 'create', parentId: folder.id }) })}><FolderPlus size={13} /> {i18nT('pages.chatSidebar.new_subfolder')}</DropdownMenuItem>
-                {/* Menu create entries take NO open-in-tab gesture (#10575,
-                 *  scoped out): a menu closes on select, and Radix keyboard
-                 *  activation synthesizes a modifier-free click, so the
-                 *  gesture would be mouse-only and undiscoverable. Listed flat,
-                 *  same as the list-view folder menu (renderFolderMenuItems). */}
-                <DropdownMenuSeparator />
-                <DropdownMenuItem className="items-start" data-testid={`col-${columnId}-folder-${folder.id}-new-incognito`} {...offlineMenuRow(connected, i18nT('utils.offline.create_sessions'), i18nT('pages.chatSidebar.new_incognito_chat'), () => { createChatInFolder(folder.id, { columnId, memoryMode: 'incognito' }) })}><PrivateChatRow kind="incognito" /></DropdownMenuItem>
-                <DropdownMenuItem className="items-start" data-testid={`col-${columnId}-folder-${folder.id}-new-temporary`} {...offlineMenuRow(connected, i18nT('utils.offline.create_sessions'), i18nT('pages.chatSidebar.new_temporary_chat'), () => { createChatInFolder(folder.id, { columnId, memoryMode: 'temporary' }) })}><PrivateChatRow kind="temporary" /></DropdownMenuItem>
-                <DropdownMenuSeparator />
-                {/* Re-parent: board-view parity with the list-view folder menu. */}
-                <FolderMoveSubmenu variant="dropdown" label={i18nT('pages.chatSidebar.move_folder_to')} sortMode={folderSortMode}
-                  folders={reparentTargets}
-                  currentFolderId={folder.parent_id || null}
-                  offline={!connected}
-                  offlineTitle={i18nT('utils.offline.gateway_offline_reconnect', { action: i18nT('utils.offline.move_folders') })}
-                  onPick={pid => moveFolderTo(folder.id, pid)} />
-                <DropdownMenuItem data-testid={`col-${columnId}-folder-${folder.id}-settings`} {...offlineMenuRow(connected, i18nT('utils.offline.change_folder_settings'), i18nT('components.folderConfigModal.folder_settings'), () => { setFolderModal({ mode: 'edit', folderId: folder.id }) })}><Settings size={13} /> {i18nT('components.folderConfigModal.folder_settings')}</DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem className="text-danger focus:text-danger" {...offlineMenuRow(connected, i18nT('utils.offline.delete_folders'), i18nT('pages.chatSidebar.delete_folder'), () => { deleteFolderWithConfirm(folder) })}><X size={13} /> {i18nT('pages.chatSidebar.delete_folder')}</DropdownMenuItem>
-                <OfflineMenuReason testId="col-folder-offline-reason" />
+                {renderFolderMenuItems(folder, reparentTargets, 'dropdown', columnId)}
               </DropdownMenuContent>
             </DropdownMenu>
             {/* Same three-gesture contract as the header New button; the
              *  existing stopPropagation stays so the header click/drag
              *  handlers never see the press. */}
             <button type="button" data-testid={`col-${columnId}-folder-${folder.id}-new-chat`} className="text-muted hover:text-accent bg-transparent border-none cursor-pointer p-[2px]" title={i18nT('pages.chatSidebar.new_chat_in_name', { name: folder.name })} aria-label={i18nT('pages.chatSidebar.new_chat_in_name', { name: folder.name })} {...offlineProps(connected, i18nT('utils.offline.create_sessions'), i18nT('pages.chatSidebar.new_chat_in_name', { name: folder.name }))}
-              onClick={e => { e.stopPropagation(); createChatInFolder(folder.id, { columnId, inNewTab: !!onOpenSlotInNewTab && isOpenInTabModifierClick(e) }) }}
+              onClick={e => { e.stopPropagation(); createChatInFolder(folder.id, { columnId, inNewTab: onOpenSlotInNewTab ? createTabModeForClick(e) : false }) }}
               onMouseDown={e => { e.stopPropagation(); if (e.button === 1 && onOpenSlotInNewTab) e.preventDefault() }}
               onAuxClick={onOpenSlotInNewTab ? (e => {
                 if (e.button !== 1) return
                 e.preventDefault()
                 e.stopPropagation()
-                createChatInFolder(folder.id, { columnId, inNewTab: true })
+                createChatInFolder(folder.id, { columnId, inNewTab: 'background' })
               }) : undefined}
               onKeyDown={e => { e.stopPropagation() }}>
               <MessageSquarePlus size={11} />
@@ -263,6 +244,11 @@ export function createBoardLane(shell: SidebarScope & LaneRows & FolderBlocks) {
           </span>
           )}
         </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent data-testid={`col-${columnId}-folder-${folder.id}-context-menu`} className="min-w-[180px]" onClick={e => e.stopPropagation()} onCloseAutoFocus={onMenuCloseAutoFocus}>
+            {renderFolderMenuItems(folder, reparentTargets, 'context', columnId)}
+          </ContextMenuContent>
+        </ContextMenu>
         {renderFolderCreateError(folder.id, columnId)}
         {!emptyBody && (
         <FolderBody padding={FOLDER_BODY_OPEN_PADDING} open={!collapsed && !forceCollapsed}>
@@ -283,9 +269,9 @@ export function createBoardLane(shell: SidebarScope & LaneRows & FolderBlocks) {
                 onAuxClick={onOpenSlotInNewTab ? (e => {
                   if (e.button !== 1) return
                   e.preventDefault()
-                  createChatInFolder(folder.id, { columnId, inNewTab: true })
+                  createChatInFolder(folder.id, { columnId, inNewTab: 'background' })
                 }) : undefined}
-                onClick={e => createChatInFolder(folder.id, { columnId, inNewTab: !!onOpenSlotInNewTab && isOpenInTabModifierClick(e) })}
+                onClick={e => createChatInFolder(folder.id, { columnId, inNewTab: onOpenSlotInNewTab ? createTabModeForClick(e) : false })}
                 title={i18nT('pages.chatSidebar.new_chat_in_name', { name: folder.name })} aria-label={i18nT('pages.chatSidebar.new_chat_in_name', { name: folder.name })} {...offlineProps(connected, i18nT('utils.offline.create_sessions'), i18nT('pages.chatSidebar.new_chat_in_name', { name: folder.name }))}
                 className="w-full flex items-center gap-2.5 px-4 py-2 rounded-md text-[11px] text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none cursor-pointer text-left">
                 <span>{i18nT('pages.chatSidebar.new_chat_in_name', { name: folder.name })}</span><MessageSquarePlus size={11} className="shrink-0 ml-auto" />
@@ -551,10 +537,10 @@ export function createBoardLane(shell: SidebarScope & LaneRows & FolderBlocks) {
                       </span>
                     )}
                   </div>
-                  {/* Column filter popover — portaled to <body> so the column's
+                  {/* Column filter popover — portaled to the body-level overlay root so the column's
                       overflow-hidden ancestor cannot clip it; viewport-anchored
                       to the edit button via popoverPos. */}
-                  {columnEditId === col.id && popoverPos && createPortal(
+                  {columnEditId === col.id && popoverPos && <OverlayPortal>{
                     /* Non-modal disclosure: role=dialog + a Tab-trap contains keyboard
                        focus, but we deliberately omit aria-modal — the popover has no
                        backdrop and is outside-click-dismissible, so claiming the rest of
@@ -602,18 +588,35 @@ export function createBoardLane(shell: SidebarScope & LaneRows & FolderBlocks) {
                           <button key={m} role="radio" aria-checked={col.mode === m} className={`text-[11px] px-2 py-0.5 rounded cursor-pointer border transition-all ${col.mode === m ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text'}`} onClick={() => updateColumnMutation.mutate({ id: col.id, body: { mode: m } })}>{m}</button>
                         ))}
                       </div>
-                      <label htmlFor={`column-include-untagged-${col.id}`} className="flex items-center gap-2 px-1 py-1 mb-2 text-[11px] text-muted cursor-pointer select-none hover:text-text" title={i18nT('pages.chatSidebar.also_show_sessions_that_have_no_tags_at_all')}>
+                      {(() => {
+                        // On a column with no tag filter, ticking the box narrows to
+                        // untagged-only (the "Untagged" column), so the label and
+                        // tooltip say "only". With a tag filter, ticking it ADDS
+                        // untagged sessions, so they say "include". Keyed on the
+                        // filter fields alone — never the display name — so the
+                        // control's wording never depends on what the column is called.
+                        const untaggedOnly = !col.tag_ids || col.tag_ids.length === 0
+                        const label = untaggedOnly
+                          ? i18nT('pages.chatSidebar.untagged_only')
+                          : i18nT('pages.chatSidebar.include_untagged_sessions')
+                        const title = untaggedOnly
+                          ? i18nT('pages.chatSidebar.only_show_sessions_that_have_no_tags')
+                          : i18nT('pages.chatSidebar.also_show_sessions_that_have_no_tags_at_all')
+                        return (
+                      <label htmlFor={`column-include-untagged-${col.id}`} className="flex items-center gap-2 px-1 py-1 mb-2 text-[11px] text-muted cursor-pointer select-none hover:text-text" title={title}>
                         <input
                           type="checkbox"
                           id={`column-include-untagged-${col.id}`}
                           data-testid={`column-include-untagged-${col.id}`}
-                          aria-label={i18nT('pages.chatSidebar.include_untagged_sessions')}
+                          aria-label={label}
                           checked={!!col.include_untagged}
                           onChange={e => updateColumnMutation.mutate({ id: col.id, body: { include_untagged: e.target.checked } })}
                           className="cursor-pointer"
                         />
-                        {i18nT('pages.chatSidebar.include_untagged_sessions')}
+                        {label}
                       </label>
+                        )
+                      })()}
                       <TagManagerList
                         mode="column-filter"
                         selectedIds={col.tag_ids}
@@ -623,9 +626,8 @@ export function createBoardLane(shell: SidebarScope & LaneRows & FolderBlocks) {
                       <div className="mt-2 flex justify-end">
                         <button className="text-[11px] text-muted hover:text-text bg-transparent border-none cursor-pointer" onClick={() => { updateColumnMutation.mutate({ id: col.id, body: { tag_ids: [] } }) }}>{i18nT('pages.chatSidebar.clear_filter')}</button>
                       </div>
-                    </div>,
-                    document.body
-                  )}
+                    </div>
+                  }</OverlayPortal>}
                   <SessionRowWindowScroller className="flex-1 overflow-y-auto scrollbar-none p-1.5 flex flex-col" style={{ scrollbarWidth: 'none' }}>
                     {/* No onDrop here: folder assignment only changes via folder-header drop
                         (into a folder) and the unfile strip below this scroller (out of one).
@@ -686,18 +688,17 @@ export function createBoardLane(shell: SidebarScope & LaneRows & FolderBlocks) {
                              *  same visual as the list-view overlay. DragOverlay renders
                              *  null unless THIS column's DndContext has an active drag,
                              *  so per-column overlays never stack. Portaled to
-                             *  document.body: the sidebar rides inside OverlayDrawer's
+                             *  the body-level overlay root: the sidebar rides inside OverlayDrawer's
                              *  morph clip-path, and a clip-path clips fixed-position
                              *  descendants too, so an in-place overlay is erased the
                              *  moment the ghost strays past the drawer edge. React
                              *  portals preserve context, so the overlay still reads
                              *  THIS column's active drag. */}
-                            {createPortal(
+                            <OverlayPortal>{
                               <DragOverlay dropAnimation={null}>
                                 {activeDrag?.type === 'folder' ? <FolderDragGhost folder={folders.find(x => x.id === activeDrag.id)} /> : null}
-                              </DragOverlay>,
-                              document.body,
-                            )}
+                              </DragOverlay>
+                            }</OverlayPortal>
                           </DndContext>
                           )}
                           {ungrouped.map((s, i) => {

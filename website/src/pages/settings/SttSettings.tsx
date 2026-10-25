@@ -19,7 +19,9 @@ import {
   downloadRatio,
   FALLBACK_PROVIDERS,
   FALLBACK_STREAMING_PROVIDERS,
+  CODE_PROVIDER_UNAVAILABLE,
   INSTALLED_BUT_REFUSED_CODES,
+  languageOptionLabel,
   localeLanguage,
   nextTranscribeLanguages,
   PROVIDER_LOCAL,
@@ -30,6 +32,9 @@ import {
 import { parseErrorCode, parseErrorField, reportForError, sendErrorToChat } from '../../utils/errorReport'
 import { PttTestStrip } from '../../components/PttTestStrip'
 import AwsConsentGate from '../../components/AwsConsentGate'
+import SttRetentionNote from './SttRetentionNote'
+import SpeechProviderNotice from '../../components/SpeechProviderNotice'
+import { parseSpeechProviders, speechProviderNotice, speechProviderOptions } from '../../lib/speechProviders'
 import {
   BARE_CODE_LABEL_KEY,
   BARE_CODE_LABEL_KEY_OTHER,
@@ -59,7 +64,18 @@ interface SttConfig {
   streaming?: boolean
   silence_ms?: number
   partial_interval_ms?: number
+  /** Decode threads for the local model; 0 derives the count from the host. */
+  threads?: number
+  /** Picker choices served by the gateway: 0 (the Auto option, which resolves to a
+   *  count derived from this host and is never run as a literal 0), then counts this
+   *  host can run. */
+  thread_options?: number[]
+  /** The count Auto resolves to on this host, shown in the Auto option's label. */
+  threads_auto?: number
+  /** `KIROCREW_STT_THREADS` as the gateway sees it, or null when unset. It wins over `threads`. */
+  threads_env?: string | null
   endpointing?: boolean
+  submit_on_release?: boolean
   dictation_panel?: boolean
   transcribe_region?: string
   transcribe_profile?: string
@@ -78,7 +94,8 @@ interface SttConfig {
   language_code?: string
   /** Whether a fast model tidies the finished transcript. Off unless turned on. */
   polish?: boolean
-  providers?: string[]
+  /** Served provider entries (see lib/speechProviders). An older gateway sends bare names. */
+  providers?: unknown[]
   streaming_providers?: string[]
   language_codes?: string[]
   prereqs: string[]
@@ -455,17 +472,6 @@ function TranscribeVocabularyPicker({
 }
 
 /**
- * A locale code as a picker option: the language's name in the app language for
- * the reader, then the code, which is what tells two dialects apart.
- */
-function languageOptionLabel(code: string): string {
-  return i18nT('pages.settings.sttSettings.language_option', {
-    name: fmtLanguageName(localeLanguage(code)),
-    code,
-  })
-}
-
-/**
  * The mixed-language picker for the `transcribe` provider.
  *
  * Every tick saves, like the rest of this panel. The backend identifies languages
@@ -631,9 +637,9 @@ const PTT_MODES: readonly PttMode[] = ['toggle', 'ptt', 'hybrid']
  * cutoff, and the live test strip.
  *
  * State is BROWSER-LOCAL (see `lib/pushToTalk`), so this block writes
- * localStorage and does not go through the STT config mutation — the right key
- * depends on the keyboard in front of you, and pushing one machine's choice to
- * every other device would be wrong.
+ * localStorage and does not go through the STT config mutation. The ui-prefs
+ * backup carries the key between clients under the inherit-once contract in
+ * that module's header.
  *
  * Row ORDER is deliberate and was corrected after a first-run review: key first,
  * then behaviour, then the cutoff, then the test. Asking "how should the key
@@ -649,10 +655,17 @@ const PTT_MODES: readonly PttMode[] = ['toggle', 'ptt', 'hybrid']
  */
 function PushToTalkConfig() {
   const [cfg, setCfg] = useState(() => loadPttConfig())
+  const [saveError, setSaveError] = useState<string | null>(null)
+  // A save the browser refuses (storage full) stores nothing, so the form keeps
+  // showing the stored binding and says why the change did not take.
   const patch = (next: Partial<typeof cfg>) => {
     const merged = { ...cfg, ...next }
+    if (!savePttConfig(merged)) {
+      setSaveError(i18nT('pages.settings.sttSettings.ptt_save_refused'))
+      return
+    }
+    setSaveError(null)
     setCfg(merged)
-    savePttConfig(merged)
   }
 
   const bare = isBareModifier(cfg.binding)
@@ -700,6 +713,9 @@ function PushToTalkConfig() {
         checked={cfg.enabled}
         onChange={v => patch({ enabled: v })}
       />
+      {saveError && (
+        <ErrorNotice variant="inline" message={saveError} askAgent testId="ptt-save-error" className="my-1" />
+      )}
 
       <SettingsSelect
         label={i18nT('pages.settings.sttSettings.ptt_key')}
@@ -999,7 +1015,9 @@ export default function SttSettings({ cardIndex }: {
 
   const isTranscribe = stt.provider === PROVIDER_TRANSCRIBE
   const provider = stt.provider || PROVIDER_LOCAL
-  const providerOptions = stt.providers?.length ? stt.providers : FALLBACK_PROVIDERS
+  const servedProviders = parseSpeechProviders(stt.providers)
+  const providerChoices = speechProviderOptions(servedProviders, FALLBACK_PROVIDERS, providerLabel)
+  const providerNotice = speechProviderNotice(servedProviders, provider)
   // Gate the streaming controls on the CAPABILITY, not on a provider name. The
   // backend owns the list (`stt_stream._STREAMING_PROVIDERS`) and serves it, so
   // adding a streaming provider cannot silently hide its own toggle — which is
@@ -1181,6 +1199,11 @@ export default function SttSettings({ cardIndex }: {
                 // unknown stored value was degraded onto). Neutral, and the reason
                 // line below names the control.
                 ? <Badge variant="muted">{i18nT('pages.settings.sttSettings.status_provider_off')}</Badge>
+                : status?.code === CODE_PROVIDER_UNAVAILABLE || providerNotice
+                  // A registered provider that cannot run now: nothing is
+                  // missing from this host, so "not installed" would be wrong.
+                  // The provider notice under the picker says why.
+                  ? <Badge variant="warn">{i18nT('pages.settings.sttSettings.status_unavailable_provider')}</Badge>
                 : INSTALLED_BUT_REFUSED_CODES.has(status?.code ?? '')
                   // The recogniser IS installed in these states; it failed to
                   // load or was refused. "not installed" would contradict
@@ -1202,8 +1225,16 @@ export default function SttSettings({ cardIndex }: {
             so a bare "not installed" sends the user looking for the wrong thing.
             Rendered from the backend's machine-readable `code`; see
             `lib/sttProviders.unavailableMessage`. */}
-        {!available && unavailableText && (
-          <p className="text-[12px] text-muted -mt-1 mb-1">{unavailableText}</p>
+        {/* Not when a provider notice is shown: it carries the same reason, from
+            the same check, right under the picker. */}
+        {/* A recogniser that is installed but failed to load is a failure, so it
+            goes through ErrorNotice with the hand-off (off while an AWS draft is
+            unsaved, as for the other notices here). A missing prerequisite or a
+            disabled state is status text. */}
+        {!available && unavailableText && !providerNotice && (
+          INSTALLED_BUT_REFUSED_CODES.has(status?.code ?? '')
+            ? <ErrorNotice variant="inline" className="-mt-1 mb-1" message={unavailableText} askAgent={awsDraftsSaved} testId="stt-unavailable-error" />
+            : <p className="text-[12px] text-muted -mt-1 mb-1">{unavailableText}</p>
         )}
         {/* The probe itself failed: the badge above is then showing the config's
             plain boolean, not a verdict, and the model catalog is absent. Status
@@ -1243,7 +1274,11 @@ export default function SttSettings({ cardIndex }: {
           </button>
         )}
 
-        <SettingsSelect label={i18nT('pages.settings.sttSettings.provider')} hint={i18nT('pages.settings.sttSettings.provider_desc')} value={provider} options={providerOptions} optionLabels={providerOptions.map(providerLabel)} onChange={handleProvider} disabled={saving} configKey="stt.provider" />
+        <SettingsSelect label={i18nT('pages.settings.sttSettings.provider')} hint={i18nT('pages.settings.sttSettings.provider_desc')} value={provider} options={providerChoices.options} optionLabels={providerChoices.labels} onChange={handleProvider} disabled={saving} configKey="stt.provider" />
+        {/* No hand-off while the AWS profile/region drafts below are unsaved: see `awsDraftsSaved`. */}
+        {providerNotice && <SpeechProviderNotice entry={providerNotice} testId="stt-provider-notice" askAgent={awsDraftsSaved} />}
+
+        <SttRetentionNote provider={provider} />
 
         {/* Gated on a NON-EMPTY catalog, not just on the provider: the catalog is
             the status endpoint's to serve, and a picker with no options is worse
@@ -1531,7 +1566,45 @@ export default function SttSettings({ cardIndex }: {
             </>
           )}
 
+          {/* Outside the streaming block: a deliberate stop ends batch and
+              streaming dictation alike, so this works on every provider. Kept
+              apart from Auto-submit above, which judges the speech itself. */}
+          <SettingsToggle label={i18nT('pages.settings.sttSettings.submit_on_release')} hint={i18nT('pages.settings.sttSettings.submit_on_release_desc')} checked={!!stt.submit_on_release} onChange={v => set({ submit_on_release: v })} disabled={saving} configKey="stt.submit_on_release" />
+
           <SettingsToggle label={i18nT('pages.settings.sttSettings.dictation_panel')} hint={i18nT('pages.settings.sttSettings.show_an_animated_panel_while_recording_instead_of')} checked={stt.dictation_panel !== false} onChange={v => set({ dictation_panel: v })} disabled={saving} />
+
+          {/* The thread picker is the local provider's alone: the others run their
+              recogniser somewhere this setting cannot reach. Its options come from
+              the gateway, sized to the host's cores, so it offers no new count the
+              engine would lower. A stored count above the cores (a config from a
+              larger machine) stays listed so the picker shows it, and the engine
+              clamps it at load. */}
+          {isLocal && (stt.thread_options?.length ?? 0) > 1 && (
+            <>
+              <SettingsSelect
+                label={i18nT('pages.settings.sttSettings.decode_threads')}
+                hint={i18nT('pages.settings.sttSettings.decode_threads_desc')}
+                value={String(stt.threads ?? 0)}
+                options={(stt.thread_options ?? []).map(String)}
+                optionLabels={(stt.thread_options ?? []).map(n => (n !== 0
+                  ? fmtNumber(n)
+                  : stt.threads_auto
+                    ? i18nT('pages.settings.sttSettings.decode_threads_auto_count', { n: fmtNumber(stt.threads_auto) })
+                    : i18nT('pages.settings.sttSettings.decode_threads_auto')))}
+                onChange={v => set({ threads: Number(v) })}
+                // While KIROCREW_STT_THREADS overrides the stored value, a choice
+                // here has no effect, so the picker is disabled and the note below
+                // says why.
+                disabled={saving || Boolean(stt.threads_env)}
+                configKey="stt.threads"
+              />
+              {stt.threads_env && (
+                <p className="text-[12px] text-warn -mt-1 mb-1">
+                  {i18nT('pages.settings.sttSettings.decode_threads_env_override', { value: fmtNumber(Number(stt.threads_env)) })}
+                </p>
+              )}
+            </>
+          )}
 
           {stt.enabled && <PushToTalkConfig />}
         </SettingsSection>

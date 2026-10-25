@@ -110,10 +110,11 @@ def backfill_events(art: Artifact) -> bool:
     events field. Idempotent — sets ``events_backfilled=True`` so we
     only run once per artifact. Returns True if mutated.
 
-    Generates a synthetic ``created`` event from ``created_at`` and one
-    ``edited`` event per intermediate version (created_at → updated_at
-    gap counts as a single edit if version > 1; we don't have per-version
-    timestamps in legacy meta).
+    Generates a synthetic ``created`` event from ``created_at`` when it is
+    set, and a single ``edited`` event at ``updated_at`` when ``version > 1``
+    and ``updated_at`` is set and differs from ``created_at``. Legacy meta has
+    no per-version timestamps, so every later version collapses into that one
+    edit.
     """
     if art.events_backfilled or art.events:
         # Either explicitly backfilled before, or a fresh artifact whose
@@ -216,6 +217,7 @@ def decode_meta(raw: Any, path: Path) -> Artifact:
         pinned=bool(raw.get("pinned", False)),
         session_key=str(raw.get("session_key", "")),
         auto_registered=bool(raw.get("auto_registered", False)),
+        goal_report=raw.get("goal_report") is True,
         publication=publication,
         fork_metadata=fork_metadata,
         version_kinds=version_kinds,

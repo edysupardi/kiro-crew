@@ -781,7 +781,7 @@ class TestTheRenderPathServesAnAppliedVersion:
     carrying ``by=actor`` (``artifacts_writes.update``), and that actor is derived from HOW
     the request authenticated -- ``actor = "agent" if is_mcp else "user"`` where
     ``is_mcp`` is the presence of the ``X-Internal-Secret`` header
-    (``dashboard/handlers/artifacts.py:1960``). So:
+    (``dashboard/handlers/artifacts_parts/create_update.py``). So:
 
         applied version := the newest version whose event has ``by == "user"``
 
@@ -820,6 +820,22 @@ class TestTheRenderPathServesAnAppliedVersion:
         _owner_write(
             live.store, live.slug, content=dp.dump_package(page), snapshot=True, actor="user"
         )
+
+    @pytest.mark.asyncio
+    async def test_a_bound_draft_keeps_the_page_the_tab_had(self, live: Any) -> None:
+        """The upgrade case at the route: a crewmate with no pinned record whose bound
+        package has only agent versions -- a `dashboard_save` with no apply yet. The
+        binding names it, and the tab still draws what it had rather than a blank frame,
+        because no version of it was ever put in force. This crewmate never adopted a
+        page and none is named for it, so what it had is the suggestions page."""
+        self._agent_writes(live, "draft")
+        # The control: the binding really resolves to the draft.
+        assert md._bound_package_slug(CREW) == live.slug
+        status, body = await _call(md.api_member_dashboard, _request(live.app, "GET", NO_SLUG_PATH))
+        assert status == 200, body
+        assert body.get("dashboard", "") != live.slug, "the draft was served as the page"
+        assert "draft" not in (body.get("rendered_html") or "")
+        assert body.get("suggestions") is True, "the tab drew a blank frame, not its page"
 
     def test_the_store_really_tags_the_actor_on_the_event(self, live: Any) -> None:
         """The control for the whole class. If the store stopped recording `by`, every

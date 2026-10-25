@@ -8,8 +8,6 @@
  * -- from flex and grid sizing, which only a real engine can answer
  * (scripts/capture-topbar-flow.mjs sweeps that in Chromium).
  */
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { MOBILE_BREAKPOINT } from '../hooks/useIsMobile'
@@ -21,6 +19,7 @@ import {
   useTopbarCollapse,
   type TopbarSide,
 } from '../lib/useTopbarCollapse'
+import { readIndexCss } from './indexCssSource'
 
 const SIDES: TopbarSide[] = ['left', 'right']
 const DATA = { left: 'tbLeft', right: 'tbRight' } as const
@@ -341,7 +340,7 @@ describe('useTopbarCollapse', () => {
 
 describe('index.css measured ladders', () => {
   const css = async () =>
-    (await readFile(join(__dirname, '..', 'index.css'), 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '')
+    readIndexCss().replace(/\/\*[\s\S]*?\*\//g, '')
 
   /** What each rung hides, cheapest first, per group. */
   const LADDERS: Record<TopbarSide, string[]> = {
@@ -492,7 +491,7 @@ describe('index.css measured ladders', () => {
   })
 
   it('scopes the desktop rules to the width App.tsx enables the ladders at', async () => {
-    // App.tsx enables the hook exactly when useIsMobile is false.
+    // The shell (useAppShell) enables the hook exactly when useIsMobile is false.
     const s = await css()
     expect(s).toMatch(new RegExp(`@media \\(min-width:${MOBILE_BREAKPOINT}px\\)\\{\\s*\\.topbar\\.tb-measured > `))
   })

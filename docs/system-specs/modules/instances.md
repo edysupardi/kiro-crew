@@ -21,15 +21,16 @@ per-instance (`connection_method`) — see §13.
 > registry, the tunnel or the EC2 box rather than the surface.
 
 > **Section numbers in this document are an API.** Code cites them:
-> `dashboard/handlers_instances.py` cites §6, and `dashboard/session_transfer.py`
-> cites §1 and §14. Do not renumber existing sections; append new material as new
-> trailing sections.
+> `dashboard/handlers_instances.py` cites §6, `dashboard/session_transfer.py`
+> cites §14 and `dashboard/session_transfer_staging.py` cites §1. Do not renumber
+> existing sections; append new material as new trailing sections.
 
 Code: `src/kiro_crew/instances/` (registry, tunnel manager, port allocator, token
 mint, diagnostics, injection validation, run-marker, shared constants
 (`constants.py`), the warm set (`warm_set.py`), the tunnel keeper
 (`tunnel_keeper.py`) and the chained-hop port guard (`hop_port_guard.py`, §17)) plus
-`src/kiro_crew/dashboard/handlers_instances.py` (control plane) and the frontend
+`src/kiro_crew/dashboard/handlers_instances.py` (control plane, with its owners
+`handlers_instances_gate.py` and `handlers_instances_peer.py`) and the frontend
 `InstanceTabBar` / `InstancesViewport` / `Settings → Remote Crew` surfaces.
 
 ---
@@ -136,6 +137,7 @@ after startup and a restart is still pending.
  |   |- validation.py       injection-safe ssh_host / remote_bin guards  |
  |   |- run_marker.py       <home>/run/gateway-<port>.bin launcher hint  |
  |   |- ssh_tunnel_manager  supervised ssh -N -L, probe, self-heal, refresh|
+ |   |- ssh_tunnel_manager_*  its owner modules (table below)            |
  |   +- diagnostics.py      ssh -> remote-dashboard -> local-forward ladder|
  +-----------------------------------------------------------------------+
         | ssh -N [-C] -L 127.0.0.1:<local>:127.0.0.1:<remote> <ssh_host>
@@ -158,7 +160,48 @@ Module responsibilities:
 | `run_marker.py` | Records the running gateway's own `kirocrew` launcher (and pid) keyed by port, so a remote mint execs the same venv the live gateway runs from. Also backs zero-config client port discovery. See §12. |
 | `ssh_tunnel_manager.py` | Supervises one tunnel child per instance — `ssh -N -L` or `aws ssm start-session` — with readiness wait, health probe, 2-tier self-heal, proactive token refresh, stored-token liveness probe, remote restart. One state machine, two forwarder shapes; the `fargate` method shares the SSM forwarder, and a headless crew mints nothing whatever its method (§16). An SSM child's stdout is captured and drained alongside stderr, because the close notice that names why a forward ended is printed there. |
 | `diagnostics.py` | Dependency-ordered failure probes; reports the first broken link. `diagnose_instance` (SSH ladder), `diagnose_instance_ssm` (SSM ladder) and `diagnose_instance_fargate` (ECS task ladder, §16). |
-| `handlers_instances.py` | Owner-only, enabled-gated, SEL-audited HTTP control plane. |
+| `handlers_instances.py` | Owner-only, enabled-gated, SEL-audited HTTP control plane: the registry, connection, remote-update, session-search and session-send routes. It is the import path of its two owners, `handlers_instances_gate.py` (the owner gate `_guard`, the SEL audit, registry access and the chain policy every handler shares) and `handlers_instances_peer.py` (the routes that read a connected peer — capabilities, approval state, versions, live sessions — and the proxy to it). New gate or registry primitives go to the gate owner; a new route that reads the peer goes to the peer owner. |
+
+`ssh_tunnel_manager.py` stays the import path, and `SshTunnelManager`'s behaviour lives in
+sibling `instances/ssh_tunnel_manager_*.py` owner modules, one responsibility each; new work
+goes to the owner of its responsibility. A member's body is a module-level function there
+whose first parameter is `self` (annotated `SshTunnelManager` for type checkers only, so
+`typing.get_type_hints` or `inspect.signature(eval_str=True)` on a bound member needs
+`SshTunnelManager` passed in through `localns`, and raises `NameError` without it), and
+the class binds it by name under one comment header per owner (`connect =
+_lifecycle.connect`, `staticmethod(...)` for a static method), ahead of `__init__`, the one
+member whose body stays in the class. Every member therefore stays an attribute of the one
+class: a patch of a method on the class or on an instance reaches every caller, a
+`SshTunnelManager.__new__` build works, and the manager's state stays on the instance. Each
+owner's docstring names the instance fields its members write and read. A bound member's
+`__qualname__` and `__module__` name its owner (no reader keys on them).
+
+A class an owner defines keeps `kiro_crew.instances.ssh_tunnel_manager` as its
+`__module__`, so a traceback and `gateway.log` name the path callers import it from.
+Introspection that follows `__module__` therefore resolves through the facade:
+`typing.get_type_hints` evaluates the class's annotations in the facade's namespace, which
+binds every name they spell (`TunnelState`, for `TunnelStatus`), and `inspect.getsource` on
+the class looks in `ssh_tunnel_manager.py`, which holds no class body, and raises `OSError`,
+so read a moved class's source from its owner module. The module-level helpers, constants and classes
+live in the owners: the facade keeps every import it had bound, and serves each moved
+definition from the owner that defines it, so a write through it reaches every owner binding
+the same object (`kiro_crew._facade_mirror`). Owners log under the
+`kiro_crew.instances.ssh_tunnel_manager` logger, import only owners listed before them in
+`_OWNERS`, and never import the facade at run time.
+`test/test_ssh_tunnel_manager_bindings.py` pins the member inventory, the binding and the
+reach.
+
+| Tunnel manager owner | Owns |
+|---|---|
+| `ssh_tunnel_manager_child_text.py` | the forwarder child's text contract: the loopback argv builders (`_build_ssh_tunnel_argv`, `_build_ssm_tunnel_argv`), the ssh and SSM stderr signals, the SSM stdout close-reason anchors (`_ssm_close_reason`), and the banner and stdout sanitizers |
+| `ssh_tunnel_manager_child.py` | supervising one forwarder child: `_SshTunnel` (spawn, readiness wait, health probe, stdout and stderr drains, exit errors, stop), `TunnelState`, `TunnelStatus` |
+| `ssh_tunnel_manager_peer.py` | requests over a connected crew's forward: resolving the forward and refusing one that moved, the far-end identity gate, the link-to-cookie exchange, `token_validates`, `proxy_request`, `send_session_bundle`, `peer_capability`, `peer_version`, `search_sessions_remote`, `ProxyRequestError` |
+| `ssh_tunnel_manager_transport.py` | reaching a crew and minting its credential: `_TransportParams`, `_Mint`, the per-transport timeouts, `_resolve_transport` and the chained resolver, the `/api/health` gateway-id probes (`_peer_identity`, `_peer_gateway_id`) and the cycle check, `_mint_for`, `_mint_through_parent` |
+| `ssh_tunnel_manager_ports.py` | who owns a local forward port: `_reserved_ports`, the lent-hop holds and `hop_ownership_violations`, the forwarder identity record, `_reclaim_orphan_forwarder` and `_verify_and_reclaim_forwarder` |
+| `ssh_tunnel_manager_tokens.py` | credential custody after a mint: `_store_token`, `_credential_forward_moved`, the proactive refresh loop, chained retirement, `get_token` and the TTL readers, and lending a credential to another pane (`mint_embed_token`) |
+| `ssh_tunnel_manager_lifecycle.py` | the manager-lock lifecycle: `connect`, `disconnect`, `_teardown_locked`, `reconfigure`, `shutdown`, the status readers, `apply_config`, `_persist_hint` |
+| `ssh_tunnel_manager_self_heal.py` | the two-tier self-heal: `_on_tunnel_exit`, `_recover_after`, `_rebuild`, `_recover`, `_mark_recovered` and the recovery tasks |
+| `ssh_tunnel_manager_remote_ops.py` | operations on a crew's own gateway: `diagnose`, `restart_remote`, `start_remote_update` and its version check |
 
 **The local forward port is allocated, not mirrored.** `connect()` takes a free
 loopback port from `PortAllocator` (from `tunnel_base_port`, skipping ports the
@@ -487,13 +530,14 @@ Two persisted hints drive lazy reconnect:
   only reader and has no production caller.
 
 An in-place restart tears the tunnels down before it execs. The dashboard
-restart (`dashboard/handlers/updates.py::_restart_gateway`) and the update
+restart (`dashboard/handlers/updates_apply.py::_restart_gateway`) and the update
 restart (`slack/gateway_runtime/update_schedule.py::_restart_after_update_claimed`) replace the image
 with `os.execv`, which skips the cleanup hook that runs `shutdown()`. The exec
 keeps the pid, so a forwarder left running would still name the gateway as its
 live parent: the orphan reclaim below refuses it and the allocator routes around
 its port for the life of the process. So the instances startup hook in
-`dashboard/server.py` registers `shutdown()` with the pre-exec seam
+`_register_instances_hooks` (`dashboard/server_runtime/instances_lifecycle.py`)
+registers `shutdown()` with the pre-exec seam
 (`pre_exec_stops.register_pre_exec_stop`) when it creates the manager, and its
 cleanup hook unregisters it. Both restarts call `run_pre_exec_stops()` once,
 after the sessions close and the MCP broker stops. The seam runs every
@@ -638,7 +682,7 @@ with `403 owner_only`, and rejects a disabled feature with `403`. Every call, su
 | Method and path | Purpose |
 |---|---|
 | `GET /api/instances` | List instances + live status + `warm_set_cap` + `active`. |
-| `POST /api/instances` | Add an instance. A rejection carries a machine-readable `code` beside its human message, so a client can branch without parsing prose: `invalid_json` / `invalid_body` (unreadable request), `invalid_field` (a named field failed validation), `instance_duplicate` (the name is taken), `instance_invalid` (the record as a whole is not addressable) and `instances_manager_unavailable`, plus the chain refusals for a chained crew (`chain_parent_unknown`, `chain_duplicate`, `chain_too_deep`, `chain_parent_full`, `chain_parent_not_ssh`; see §17.4). The dashboard forwards the code into its error → agent hand-off, which is why it has to be on the wire rather than derived from the message. |
+| `POST /api/instances` | Add an instance. A rejection carries a machine-readable `code` beside its human message, so a client can branch without parsing prose: `invalid_json` / `invalid_body` (unreadable request), `invalid_field` (a named field failed validation), `instance_duplicate` (the name is taken), `instance_invalid` (the record as a whole is not addressable), plus the chain refusals for a chained crew (`chain_parent_unknown`, `chain_duplicate`, `chain_too_deep`, `chain_parent_full`, `chain_parent_not_ssh`; see §17.4). The dashboard forwards the code into its error → agent hand-off, which is why it has to be on the wire rather than derived from the message. |
 | `PATCH /api/instances/{id}` | Edit `name`/`ssh_host`/`remote_port`/`ttl`/`remote_bin`/`connection_method`/`ssm_target`/`ssm_run_as`/`aws_profile`/`aws_region`/`via_remote_port`/`disabled` (`id`, `via_instance_id` and internal hints are not editable). `disabled` is the owner's per-crew off switch. `disabled: true` goes through the same `reconfigure()` teardown as a built-field edit (below) on every request, even when the record already reads off: the record is read before the lock, so an enable and a connect can land in between, and on an idle crew the teardown changes nothing. `disabled: false` only clears the flag; the dashboard then connects the crew itself. Editing a built field of a crew that others chain through tears its chained crews down first, and aborts the edit when one will not stop (§17.4). Editing a field the tunnel is BUILT from (everything except `name` and `ttl`) disconnects a live tunnel first, because it would otherwise keep forwarding the old port to the old host under the new label; the teardown passes `keep_intent=True` so it does not touch `was_connected` — that flag records a USER disconnect, so a reconfiguration leaves it alone and a real disconnect arriving mid-edit still wins. The crew therefore keeps its switcher entry and reconnects in one click. The teardown and the coordinate rewrite happen as ONE operation, `SshTunnelManager.reconfigure()`, which holds the manager lock across both. Done as two steps a `connect` can read the OLD record in between, and whether its tunnel is already CONNECTED or still CONNECTING when the write lands decides whether any after-the-fact sweep would notice it — so the window is removed rather than narrowed: a racing `connect` either completes before (and is torn down inside the section) or starts after (and reads the new coordinates). It also cancels and AWAITS that instance's in-flight self-heal first: recovery reads the record before it takes the lock, so a recovery already running carries the pre-edit coordinates and would reinstall a tunnel to the old machine. Because that cancellation itself awaits, a reconfiguration additionally raises a per-instance BARRIER before its first await; while the barrier is up the scheduling seams refuse to start work — `_on_tunnel_exit` will not begin a self-heal, a backed-off one returns without acting, and `_schedule_token_refresh` will not restart a mint loop — so nothing can slip into the window. Self-heal is cancelled AND awaited before the coordinates move, because it rebuilds from the record it read. The token-refresh loop is unwound by the teardown instead — after the stop succeeds — so a REJECTED edit leaves the live tunnel holding both its credential and its refresh; in both cases the cancellation is awaited, since a mint already in flight would otherwise store a token for a tunnel that is being replaced. A teardown that raises ABORTS the edit with `503` / `code: tunnel_teardown_failed` and persists nothing: a stop that failed leaves the old forward live, so advancing the record would describe one machine while the still-open tunnel serves another — and that tunnel is the one the user reaches. Nothing is discarded unless the stop succeeded — the tunnel keeps its place in `_tunnels` along with its token and refresh task — so a failed stop can neither leave an untracked process holding the port nor a live forward without a credential. The registry write is also shielded from cancellation: a client hanging up mid-write must not unwind the `async with` and free the lock while the write is still in flight. An edit sends only the fields that DIFFER from an IMMUTABLE snapshot of the record taken when its form opened (not the live polled record, which a concurrent CLI edit would move under the user), so the later of two concurrent saves cannot revert the earlier one's corrections; optional fields travel as explicit empty values, so emptying one clears it instead of being read as "leave as-is". The dashboard does NOT reconnect afterwards: any automatic reconnect races an explicit Disconnect arriving mid-save, so the row offers **Connect** instead. A crew CORRELATED to a cloud stack has its `connection_method`/`ssm_target`/`aws_profile`/`aws_region` frozen in the edit form and omitted from the request — Stop/Start/Delete resolve the machine through those, so editing them would strand a billing instance. That freeze is enforced **server-side too**: this endpoint rejects the four addressing fields for a correlated cloud instance with `400` / `code: cloud_instance_addressing_locked`, so a non-dashboard caller (CLI, script, the agent driving this owner-only API) can no longer rewrite the coordinates and strand a billing instance. Correlation is resolved against the cloud launch store via `_is_correlated_cloud_instance()`, checked against the record already fetched for the edit. An SSM crew that cannot be correlated is offered no lifecycle action, so its fields stay editable — that identity is how the dashboard finds the machine to stop or delete, and editing it away would strand a billing instance. |
 | `DELETE /api/instances/{id}` | Disconnect then remove, cascading over the crews chained behind this one. Every captured crew comes down first, deepest first, and a stop that raises answers `409 remove_teardown_failed` with NOTHING deleted: rows removed over a live forwarder strand it with its minted token and take the `forwarder_pid` reclaim hint with them. `404` when no row has that id, decided before any deletion so a missing parent cannot take its orphaned descendants with it. On success the body carries `removed` and nothing else. A second pass follows the deletion and cannot refuse, because the removal has already happened, so a forward a racing connect re-established after the rows went is written to the gateway's warning log rather than into the response -- see §17.4. |
 | `POST /api/instances/{id}/connect` | Open tunnel + mint token. Returns the token. Idempotent by default; `409` with `code: restarting` while a gateway restart is under way (nothing is started); `409` with `code: instance_disabled` when the crew, or a crew up its chain, is disabled (nothing is started), its `error` naming the crew that is off by id; `?rebuild=1` (Retry after a load-watchdog verdict: tear down and re-spawn on a different local port) and `?only_if_connected=1` (auto-warm: answer an up tunnel, never bring one up — a down tunnel is a `200` with `code: instance_not_connected`) are the two opt-in exceptions, mutually exclusive (`400`), described in §4 step 1. A failure carries a machine-readable `code`, and that code is the failure-diagnosis ladder's OWN verdict (`ssh_unreachable`, `remote_down`, `tunnel_down`, …) promoted to the top level, so a client reads which link broke without walking into `diagnosis`. Only a verdict that is present AND **negative** is promoted: the stored diagnosis is the last ladder RUN, so a stale `ok` from before the failure would otherwise be published as this call's reason. With no usable verdict the stage that failed names itself — `instance_connect_failed`, or `instance_token_unconfirmed` when the tunnel came up but its credential did not confirm, which also covers the forward MOVING while the credential was being confirmed: the probe and any re-mint both await for seconds while the response's port is already frozen, so the live status is re-read before the token is attached and a port or state that has changed is refused rather than answered with half a pair. The frontend applies the same present-AND-negative rule before quoting a verdict or its probe chain into the agent hand-off, for the same staleness reason. |
@@ -672,7 +716,12 @@ narrower reading would leave a route out of any audit of where tokens leave the
 gateway: the set is `connect` + `refresh-token` + `embed-token`, and nothing else.
 
 Status codes worth knowing: `503` when the manager is not running (feature
-enabled after startup), `404` for an unknown id, `502` when a connect, refresh,
+enabled after startup). `instances.enabled` is restart-marked and the manager is
+built only by the startup hook, so every `/api/instances/{id}/*` route that needs
+it answers the same body from `_manager_unavailable_response()` in
+`handlers_instances_gate`: code `instances_manager_unavailable` and a message
+that tells the user to restart the gateway (chat-slots included). Settings -> Remote Crew keys on that code to tell
+the user to restart. Then `404` for an unknown id, `502` when a connect, refresh,
 or remote restart fails, and `400` on invalid add/update input (including a
 locked addressing-field edit on a correlated cloud instance — see §7).
 
@@ -776,6 +825,13 @@ what its own edit invalidated, and never reopens anything on the user's behalf.
   for its first automatic pick, and only if that chat is still in its own slot
   list. It is not a `?sid=` deep link: a gone chat falls back to the stored chat,
   then the first chat, with no error banner.
+- **Active pane on reload.** `mc-active-pane` in sessionStorage
+  (`lib/activePaneMemory.ts`) stores only the crew id, never a port or token.
+  Reload keeps it. A new window starts empty and opens on Local. The first
+  instances poll restores it once through the viewport's own connect, the one
+  Retry uses, with the same connect condition as a tab click. An id that
+  is not a switcher tab falls back to Local and is dropped. A crew picked
+  before that poll wins. Embedded panes never save or restore it.
 - **CSP.** `frame-ancestors` is `'self'` plus the exact parent origin carried in
   the minted token's signed `embed_parent_port` claim, never a wildcard and never
   a hardcoded port, so a local page with no validly-signed token can never frame
@@ -812,7 +868,7 @@ what its own edit invalidated, and never reopens anything on the user's behalf.
   when the instance's current `ssm_target` matches an EC2 instance id in the
   cloud launch job store (`kiro_crew.cloud.connect.is_launched_instance()`) —
   i.e. Kiro Crew provisioned it, as opposed to a hand-added SSM record. These
-  four fields are how `coordsOf()` (`RemoteCrewPanel.tsx`) builds
+  four fields are how `coordsOf()` (`RemoteCrewPanelCrewRow.tsx`) builds
   `{profile, region, instanceId}` for Stop/Start/Delete; rewriting them on a
   correlated instance leaves those actions unable to resolve the real EC2
   stack, which then keeps running and billing with no dashboard path to reach
@@ -1505,7 +1561,7 @@ Two rules keep the two halves paired:
   explicitly and passes it, where the choice is reviewable. Each TCP-loopback caller
   names the IPv4 loopback LITERAL (`127.0.0.1`) as its `dial_host` -- `cli_server`
   (`_CLI_LOOPBACK`), `mcp_core` (derived from the base it dials), `mcp_shared`,
-  `mcp_cron`, `cron_script`, `cron_trigger`, `computer_use/screencast`, `cli_commands`
+  `mcp_cron`, `cron_script`, `cron_trigger`, `computer_use/screencast`, `cli_commands_gateway_api`
   and the Sage review driver -- and dials that same literal in its URL, NOT the
   ambiguous `localhost`. A literal reaches ONE family, so a gateway that bound only v4,
   or a wildcard/container bind (`0.0.0.0`) that publishes a single v4-family entry,
@@ -1759,7 +1815,12 @@ The legacy `ssm_proxy_ssh_host` helper is kept for reference only.
 Copies one dashboard session from this instance to a connected peer. The user
 picks it from any session menu: **Send a copy to ▸ `<instance>`**.
 
-Code: `src/kiro_crew/dashboard/session_transfer.py` (bundle + importer),
+Code: `src/kiro_crew/dashboard/session_transfer.py` (the sending side's bundle
+assembly, and the import path of its owners: `session_transfer_staging.py` for the
+bundle format, staging dirs and bundle files, `session_transfer_layers.py` for
+reading Layer A and B and writing Layer B on arrival, `session_transfer_intake.py`
+for admitting and parsing an arriving body, and `session_transfer_install.py` for
+validating and installing it),
 `src/kiro_crew/dashboard/transcript_snapshot.py` (the bundle's consistent
 transcript read, under its `TRANSFER` rules),
 `SshTunnelManager.send_session_bundle` (delivery),
@@ -2830,7 +2891,7 @@ addresses the crew by `ssm_target` + AWS profile/region) and `hasDashboardPane()
 federated session polling (`useInstanceSessions`), so a `fargate` crew gets no
 tab, no pane, no auto-connect and no rows in the session palette.
 
-In `website/src/pages/settings/RemoteCrewPanel.tsx` a connected `fargate` row
+In `website/src/pages/settings/RemoteCrewPanelCrewRow.tsx` a connected `fargate` row
 renders the status's `turn_url` in a copyable field (`TurnUrlField`) and shows no
 Open control: the URL answers JSON, so a control that promised a dashboard would
 be the defect the field replaces.
@@ -3274,7 +3335,7 @@ worth stating because those two fields arrive in the announcing pane's payload, 
 untrusted -- and an origin check cannot help, since the sender is the remote gateway the
 owner deliberately connected to and therefore holds the correct origin. What makes a
 forged value harmless is the branch, not a check on the value. In
-`ssh_tunnel_manager.py`: `_resolve_transport` returns `_resolve_chained_transport` as its
+`ssh_tunnel_manager_transport.py`: `_resolve_transport` returns `_resolve_chained_transport` as its
 FIRST branch whenever `via_instance_id` is set, that resolver builds its
 `_TransportParams` with `ssh_host=validate_ssh_host(parent.ssh_host)`, and the
 `via_instance_id` field's own declaration states the rule. The branch that reads

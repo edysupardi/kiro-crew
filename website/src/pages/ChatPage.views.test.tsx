@@ -40,6 +40,7 @@ vi.mock('./chat/ChatHeaderMenu', () => ({
 }))
 vi.mock('./chat/SessionTitleControl', () => ({ default: () => null }))
 vi.mock('../components/InboundLinkChip', () => ({ default: () => null }))
+vi.mock('../components/ChatHeaderChips', () => ({ default: () => null }))
 vi.mock('./chat', async (orig) => ({
   ...(await orig<typeof import('./chat')>()),
   PinnedPrompt: (p: { onToggleExpanded: () => void; onJump: () => void }) => { seen.pinnedPrompt = p; return null },

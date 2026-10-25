@@ -24,6 +24,7 @@ from aiohttp.client_exceptions import ClientConnectionResetError  # noqa: F401
 
 from kiro_crew import members as members_mod  # noqa: F401
 from kiro_crew import model_registry  # noqa: F401
+from kiro_crew._facade_compose import compose as _facade_compose
 from kiro_crew.acp.client import AcpModelUnavailable
 from kiro_crew.agent_discovery import (  # noqa: F401
     cached_project_agent_names,
@@ -33,6 +34,7 @@ from kiro_crew.agent_sdk.backends import ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS  # n
 from kiro_crew.agent_sdk.capabilities import MODEL_NAMESPACE_ACP, capabilities_of  # noqa: F401
 from kiro_crew.agent_sdk.provider_identity import is_claude_code  # noqa: F401
 from kiro_crew.agent_switch_command import switch_announcement  # noqa: F401
+from kiro_crew.atomic_write import atomic_write  # noqa: F401
 from kiro_crew.config.loader import (  # noqa: F401
     AUTOCOMPACT_PCT_MAX,
     AUTOCOMPACT_PCT_MIN,
@@ -48,8 +50,12 @@ from kiro_crew.config.loader import (  # noqa: F401
     published_autocompact_pct,
     resolve_agent_bindings,
 )
-from kiro_crew.dashboard import chat_api as _chat_api
+from kiro_crew.config.sections import (  # noqa: F401 -- read by chat_api.slot_settings
+    AutocompactPctError,
+    parse_autocompact_pct,
+)
 from kiro_crew.dashboard import display_verdicts  # noqa: F401 -- read by chat_api.slot_detail
+from kiro_crew.dashboard.body_numbers import body_int  # noqa: F401
 from kiro_crew.dashboard.channel_slots import channel_slot_name, note_slot_closed  # noqa: F401
 from kiro_crew.dashboard.chat_api import agent_switch as _owner_agent_switch
 from kiro_crew.dashboard.chat_api import app_admission as _owner_app_admission
@@ -76,6 +82,7 @@ from kiro_crew.dashboard.chat_api import source_links as _owner_source_links
 from kiro_crew.dashboard.chat_api import turn_stop as _owner_turn_stop
 from kiro_crew.dashboard.chat_api.agent_switch import (  # noqa: F401
     SlotAgentSwitchCaller,
+    _append_session_switch_notice,
     _MemberMemoryRequiresNewConversation,
     agent_switch_outcome,
     api_chat_slot_agent,
@@ -182,11 +189,13 @@ from kiro_crew.dashboard.chat_api.slot_approval import (  # noqa: F401
     _approval_target_required,
     _deny_approval_mode,
     _deny_trust_pattern,
+    _elicitation_not_an_approval,
     _end_trust_scope,
     _end_trust_scopes,
     _get_pattern_from_pending,
     _grant_deadline,
     _internal_session_approval_refusal,
+    _pending_elicitation_ids,
     _still_owning,
     api_chat_mode,
     api_chat_slot_approve,
@@ -195,8 +204,10 @@ from kiro_crew.dashboard.chat_api.slot_approval import (  # noqa: F401
     deny_session_approval_caller,
 )
 from kiro_crew.dashboard.chat_api.slot_create import (  # noqa: F401
+    _created_slot_row,
     _default_template_stamp,
     _persist_app_agent_owner,
+    _retract_failed_newborn,
     api_chat_slot_create,
 )
 from kiro_crew.dashboard.chat_api.slot_detail import (  # noqa: F401
@@ -405,6 +416,9 @@ from kiro_crew.dashboard.chat_utils import (  # noqa: F401
 from kiro_crew.dashboard.chat_utils import (  # noqa: F401
     tighten_replacement_to_restricted_original as _tighten_replacement_to_restricted_original,
 )
+from kiro_crew.dashboard.default_session_folder import (  # noqa: F401
+    resolve_default_session_folder,
+)
 from kiro_crew.dashboard.handlers._shared import (  # noqa: F401
     _SLOT_SCOPED_TRUST_MODES,
     _owner_denial_response,
@@ -473,7 +487,13 @@ from kiro_crew.dashboard.state import (  # noqa: F401
     request_slot_origin,
     row_mid,
 )
-from kiro_crew.dashboard.system_notices import SESSION_RELOAD_KIND, is_system_notice  # noqa: F401
+from kiro_crew.dashboard.system_notices import (  # noqa: F401
+    SESSION_RELOAD_KIND,
+    SESSION_SWITCH_KIND,
+    is_system_notice,
+    session_switch_notice,
+)
+from kiro_crew.dashboard.token_auth import folder_principal  # noqa: F401
 from kiro_crew.dashboard.turn_dispatch import (  # noqa: F401
     chat_turn_timeout_secs,
     spawn_guarded_turn,
@@ -597,7 +617,9 @@ _source_link_unlink_tasks: set[asyncio.Task] = set()
 #: assistant text reaches this endpoint — the client filters raw ``chunk`` itself.
 #: ``done`` is discarded by ``_prepare_messages`` regardless, and ``queued`` stays
 #: listed because the client rebuilds those bubbles from the payload's ``queue``.
-_UNOWED_WINDOW_ROLES = _TRANSIENT_ROLES - {"permission", "chunk", "streaming"}
+#: ``elicitation`` is carved out for the same reason as ``permission``: a pending
+#: ask is actionable and the client reads it out of the transcript.
+_UNOWED_WINDOW_ROLES = _TRANSIENT_ROLES - {"permission", "elicitation", "chunk", "streaming"}
 
 
 # Modes a slot may be CREATED with. A deliberate superset of the mode-SWITCH
@@ -624,6 +646,9 @@ _DEFERRED_PLAIN_CREATE_KNOWN_KEYS = frozenset(
         "title",
         "artifact",
         "ephemeral",
+        # Only a request; a create that it actually files is not plain,
+        # because the handler then sees a folder_id.
+        "default_folder",
     }
 )
 
@@ -715,6 +740,9 @@ async def _reset_slot_session(
     the UI presenting a dead session's server list as the live one's — the
     stale-evidence failure that report exists to remove.
     """
+    from kiro_crew.dashboard.warm_task_brief import cancel_warm_task_brief
+
+    cancel_warm_task_brief(state, slot.key)
     _unblock_pending_waits(state, slot)
     if _test_interleave is not None:
         # The near side of the pop. Every teardown in the process funnels through
@@ -1045,7 +1073,9 @@ _MAX_RECENT_PROJECTS = 100
 #
 # Both write verbs are a read-modify-write of one file, run on worker threads, so two
 # overlapping requests (two dashboard tabs) would each write back the snapshot they read
-# and one change would be lost. One lock serialises the whole transaction for both.
+# and one change would be lost. One lock serialises the whole transaction for both, and
+# the display read loads under it too: on Windows a rename cannot replace a file another
+# handle has open, so a read open during a write's rename failed that write.
 _favorite_projects_lock = threading.Lock()
 
 
@@ -1152,7 +1182,7 @@ _SOURCE_CTRL_RE = SOURCE_LABEL_CTRL_RE
 # Every function the owners define runs on this module's globals, so a patch of
 # ``kiro_crew.dashboard.chat_handlers.<name>`` reaches it wherever it lives; see
 # ``kiro_crew.dashboard.chat_api``. Run once, after this body has bound every name.
-_chat_api.compose(
+_facade_compose(
     globals(),
     (
         _owner_agent_switch,

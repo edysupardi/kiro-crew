@@ -45,7 +45,7 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "kiro_crew"
 #: The module that DEFINES the primitives. Its own calls are the primitives'
 #: implementation -- ``kill_pid_pinned`` delegating to ``kill_pid``, which issues
 #: the group signal -- not a caller deciding a process should die.
-PRIMITIVE_HOME = "platform_compat.py"
+PRIMITIVE_HOME = "platform_compat_kill.py"
 
 #: Assembled, not written: this file must not contain the names it scans for.
 _KILL = "kill"
@@ -85,8 +85,8 @@ BYPASS_BASELINE = 67
 #: synchronous provider teardown (a dashboard reset-all, a pool teardown, a
 #: failed start's cleanup) and the runtime's own kill.
 ATTRIBUTED_KILL_PATHS = (
-    ("session_pid.py", "_sync_kill_provider"),
-    ("acp/runtime.py", "kill"),
+    ("session_pid_provider_kill.py", "_sync_kill_provider"),
+    ("acp/runtime_tree_kill.py", "kill"),
 )
 
 GATE = "authorize_runtime_kill"
@@ -281,7 +281,7 @@ _RELEASE_BEFORE_KILL = (
         "_dispatch_hard_kill",
     ),
     (
-        "src/kiro_crew/dashboard/handlers/sessions.py",
+        "src/kiro_crew/dashboard/handlers/sessions_parts/restart.py",
         "release_session_lease",
         "_sync_kill_provider",
     ),
@@ -376,7 +376,7 @@ def test_the_leaked_provider_killer_commits_the_teardown_before_it_signals() -> 
     And every commit needs its release: a barrier left standing refuses that pid's
     tenancies for the life of the gateway, so the paired call is pinned too.
     """
-    tree = _parse(SRC / "session_pid.py")
+    tree = _parse(SRC / "session_pid_provider_kill.py")
     assert tree is not None
     target = _function_named(tree, "_sync_kill_provider")
     assert target is not None

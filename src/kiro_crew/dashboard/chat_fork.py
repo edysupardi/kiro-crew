@@ -9,8 +9,9 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from aiohttp import web
 
-from kiro_crew.config.loader import KiroCrewConfig
+from kiro_crew.config.loader import KiroCrewConfig, resolve_agent_identity
 from kiro_crew.dashboard import transcript_snapshot
+from kiro_crew.dashboard.chat_folders import _unhide_folder
 from kiro_crew.dashboard.chat_persistence import (
     _coerce_requested_mode,
     save_slot_off_loop,
@@ -32,7 +33,7 @@ from kiro_crew.dashboard.chat_utils import (
 from kiro_crew.dashboard.handlers.memory import _store_unavailable_response
 from kiro_crew.dashboard.handlers.source_providers import is_owner_dashboard_request
 from kiro_crew.dashboard.relay_archive import is_relay_archive
-from kiro_crew.dashboard.slot_ownership import deny_app_slot_access
+from kiro_crew.dashboard.slot_ownership import deny_app_slot_access, slot_not_found
 from kiro_crew.dashboard.state import (
     _MAX_SLOT_MESSAGES,
     MAX_LIVE_SLOTS,
@@ -65,7 +66,8 @@ _MAX_MESSAGE_ID_CHARS = 256
 
 
 def drop_persisted_tail_prefix(full_disk: list[dict], tail: list[dict]) -> list[dict]:
-    """Re-exported from ``history_projection``, which owns the identity rule.
+    """Re-exported from ``history_projection`` (defined in ``history_projection_contract``,
+    which owns the identity rule).
 
     Kept importable from here because this module was its first consumer and is
     where callers and tests reach for it.
@@ -78,12 +80,14 @@ def _fork_execution_context(
     agent: str,
     recorded_store: str,
     memory_mode: str,
+    agent_kind: str,
 ):
     """Capture the parent's execution without opening learned memory."""
     from kiro_crew.execution_context import (
         ExecutionContext,
         MemoryStoreRef,
         read_session_execution,
+        resolve_member_execution,
     )
     from kiro_crew.memory_stores import UnknownMemoryStore, require_memory_store
 
@@ -95,7 +99,35 @@ def _fork_execution_context(
         )
         if getattr(cfg.memory_stores.get(store), "memory_version", 1) == 2:
             raise UnknownMemoryStore("The fork source's execution identity is unavailable")
-        execution = ExecutionContext(None, MemoryStoreRef(store), "template", agent or "kirocrew")
+        # Record the identity the parent's own turns resolve to with no carrier
+        # (``resolve_session_agent_bindings``): a ``config.agents`` alias on a
+        # slot not stamped ``template`` runs as that crewmate, with its
+        # template, workspace and model pin, so the child gets the same
+        # member-kind record the owner's create writes. Stamping the alias as a
+        # template id instead made the child ask the backend for an agent
+        # called ``default``, which does not exist. Any other name is already a
+        # template (possibly one only the parent's project declares) and is
+        # kept verbatim. The loader's resolver makes the alias-or-template
+        # call, so the fork and the parent's own turns share one rule. Those
+        # turns first map a stored skill-view name back to the agent it was
+        # built from, so the fork does too before asking whether it is an alias.
+        from kiro_crew.session_agent_selection import _source_of_view
+
+        agent = _source_of_view(agent)
+        alias = resolve_agent_identity(cfg, agent, selection_kind=agent_kind)[0]
+        if alias:
+            execution = resolve_member_execution(cfg, alias, validate_memory_files=False)
+            # The V2 refusal above covers the RECORDED store only. A parent
+            # with no recorded store whose crewmate holds private V2 memory
+            # has no carrier to prove it ran on that store, so it is refused
+            # the same way rather than bound to the crewmate's memory.
+            resolved = cfg.memory_stores.get(execution.store.store_id)
+            if getattr(resolved, "memory_version", 1) == 2:
+                raise UnknownMemoryStore("The fork source's execution identity is unavailable")
+        else:
+            execution = ExecutionContext(
+                None, MemoryStoreRef(store), "template", agent or "kirocrew"
+            )
     if recorded_store and (recorded_store or "default") != execution.store.store_id:
         raise UnknownMemoryStore("The fork source's recorded memory binding has changed")
     return execution.with_mode(memory_mode)
@@ -110,6 +142,65 @@ def _bind_fork_execution(source, child_key: str, execution) -> None:
     bind_session_execution(child_key, execution)
 
 
+def _forget_fork_child_binding(child_key: str) -> None:
+    """Withdraw what the memory bind published for a fork child that failed.
+
+    The bind writes the live execution carrier and, for a persistent child, the
+    identity fields of a transcript record that holds no message yet. The child
+    key is freshly minted, so a record with no message row is the bind's own and
+    goes with the child. A record that holds messages is left alone. File IO, so
+    callers run it off the loop.
+
+    Best-effort: the caller is already answering a failure, and its structured
+    response and audit record must still go out if this cleanup raises too.
+    """
+    from kiro_crew.execution_context import clear_session_execution
+    from kiro_crew.history import ConversationLog
+
+    clear_session_execution(child_key)
+    try:
+        # The same log the bind wrote through (``bind_session_execution``).
+        log = ConversationLog()
+        if log.has_log(child_key) and not log.has_messages(child_key):
+            log.delete_session(child_key)
+    except Exception:
+        logger.warning(
+            "chat_fork: removing the failed fork child's record for %s raised",
+            child_key,
+            exc_info=True,
+        )
+
+
+async def _withdraw_fork_child(
+    state: DashboardState, new_slot: "_ChatSlot", *, announced: bool
+) -> None:
+    """Undo a fork child whose fork is answered with a failure.
+
+    One rollback for every failure path (bind, shape, stamp, the destination
+    save, a source deleted during that save), so none of them can leave a
+    memory identity under a key that the live slot table does not list. The slot
+    and its restricted key leave synchronously, before any await, so nothing on
+    the loop sees the child half withdrawn. ``announced`` is true once the mint
+    block has exited and its flush listed the child; the withdrawal is then
+    pushed too, or other sidebars keep the row until the next frame. Never
+    raises, so the caller's response and audit always run.
+    """
+    child_key = effective_session_key(new_slot)
+    state._slots.pop(new_slot.key, None)
+    state._restricted_keys.discard(child_key)
+    if announced:
+        state.push_slots_update()
+    try:
+        await drained_to_thread(_forget_fork_child_binding, child_key)
+    except Exception:
+        # ``clear_session_execution`` raised, or the worker hand-off failed.
+        logger.warning(
+            "chat_fork: withdrawing the failed fork child %s raised",
+            new_slot.key,
+            exc_info=True,
+        )
+
+
 #: SEL operation name the human fork route records under. The session-control
 #: route passes its own so the two entry points stay distinguishable in the audit.
 FORK_AUDIT_OPERATION = "chat.slot_fork"
@@ -119,19 +210,21 @@ FORK_AUDIT_OPERATION = "chat.slot_fork"
 class ForkSource:
     """A fork parent with its memory identity frozen at the moment it was checked.
 
-    ``identity`` is the six-tuple :func:`fork_slot` re-compares the live slot
+    ``identity`` is the seven-tuple :func:`fork_slot` re-compares the live slot
     against before binding and again before copying, so a parent whose agent,
     store, mode or WORKSPACE moved under the fork is refused rather than copied.
     Workspace is in the tuple because the child is born in ``slot.workspace``
     read live: an agent caller's containment check (``authorize_target``) ran
     against the workspace the source had at the time, and a concurrent owner
     switch of the source (``api_chat_slot_workspace``) would otherwise carry the
-    transcript into a workspace that check never admitted.
+    transcript into a workspace that check never admitted. The slot's
+    ``agent_kind`` closes it because a parent with no execution record forks to
+    the crewmate or the template that stamp selects.
     """
 
     slot: "_ChatSlot"
     execution: Any
-    identity: tuple[str, str, str, str, str, str]
+    identity: tuple[str, str, str, str, str, str, str]
 
 
 class _ForkRefused(Exception):
@@ -238,11 +331,12 @@ async def resolve_fork_source(
         slot.memory_mode,
         slot_history_key(slot),
         str(getattr(slot, "workspace", "default") or "default"),
+        str(getattr(slot, "agent_kind", "") or ""),
     )
 
     try:
         inherited_execution = await asyncio.to_thread(
-            _fork_execution_context, *source_memory_identity[:4]
+            _fork_execution_context, *source_memory_identity[:4], source_memory_identity[6]
         )
     except (OSError, ValueError) as exc:
         return _store_unavailable_response(source_memory_identity[2], exc)
@@ -288,7 +382,7 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
     slot = state._slots.get(name)
     request_app = request.get("app", "")
     if not slot:
-        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+        return slot_not_found()
 
     # Rate/resource guard: reject if we're already at the cap. Counts slots still
     # under construction too (``live_slot_count``): the import path retracts a
@@ -416,7 +510,7 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
         request_app=request_app,
         origin=request_slot_origin(request_app),
         # Human request-layer path: a person forking a conversation. The
-        # origin conjunct in state.py still excludes app-token callers.
+        # origin conjunct in state_parts/slot_directory.py still excludes app-token callers.
         count_user_session=True,
         # Inheriting is arming a SECOND routed session, so it answers to the
         # same owner predicate as the arm itself: this route is gated on app
@@ -449,6 +543,62 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
     )
 
 
+def _shape_fork_child(
+    new_slot: "_ChatSlot", slot: "_ChatSlot", *, direction: str, jev_route_allowed: bool
+) -> None:
+    """Copy onto the just-minted *new_slot* what it inherits from its parent *slot*.
+
+    Synchronous and assignment-only. :func:`fork_slot` runs it in the
+    push-suspended window that began at the mint, so the child's first
+    ``slots`` frame already shows the folder, tags and fork title set here.
+    """
+    new_slot.forked_from = effective_session_key(slot)
+    new_slot.reasoning_effort = slot.reasoning_effort
+    # Inherited beside the model it belongs to: the constructor takes `model` and
+    # the routing choice is the other half of the same answer, so a fork of an
+    # "Auto (Jev)" session that arrived pinned would run the parent's next turns
+    # on a model the parent had explicitly stopped choosing by hand.
+    # Inheriting is arming a SECOND routed session, so it answers to the same owner
+    # predicate as the arm itself; the caller says whether it passed that predicate.
+    new_slot.jev_route = slot.jev_route and jev_route_allowed
+    # Inherit the active project directory so the fork keeps the parent's working
+    # context (agent resolution, steering files, CWD) instead of falling back to
+    # the config/workspace default on first message.
+    new_slot.project = slot.project
+    # Keep the app-owned agent binding with the agent it binds: the fork runs as
+    # the same app agent, so the per-turn shadow check must still apply to it.
+    new_slot.app_agent_owner = slot.app_agent_owner
+    # Inherit the sidebar folder so the fork appears next to its parent in the UI.
+    new_slot.folder_id = slot.folder_id
+    # Inherit tags (copied, so later edits to either slot's list stay independent).
+    new_slot.tags = list(slot.tags)
+    # "tags changed => revision changed": the slot was constructed with an empty
+    # list under its birth revision; a snapshot of that newborn state (a slot
+    # fetch racing the fork) must not share a revision with the inherited list,
+    # or a delayed empty frame could become a client's next toggle base.
+    new_slot.bump_tags_revision()
+    parent_title = slot.title if slot._titled else "Untitled"
+    parent_title, _ = redact_exfiltration_urls(parent_title)
+    parent_title, _ = redact_credentials(parent_title)
+    # Strip a leading marker from the parent so it never compounds on a
+    # fork-of-a-fork.
+    parent_title = parent_title.removeprefix(FORK_TITLE_MARKER)
+    fork_word = "Tail of" if direction == _FORK_DIRECTION_TAIL else "Fork of"
+    new_slot.title = f"{FORK_TITLE_MARKER}{fork_word} {parent_title}"
+    new_slot._titled = True
+    # The fork name is derived, not typed: it stays inside the automatic title
+    # lifecycle (refreshable, and renamed from the child's own question once the
+    # fork is acknowledged) unless the name it wraps is final. A parent with a
+    # manual name, or a legacy one, hands the child a final title too. Persisted
+    # by the birth save, so a reload keeps the provenance instead of treating the
+    # fork name as an untyped legacy title.
+    new_slot._title_origin = (
+        _TITLE_ORIGIN_USER
+        if slot._titled and slot._title_origin != _TITLE_ORIGIN_AUTO
+        else _TITLE_ORIGIN_AUTO
+    )
+
+
 async def fork_slot(
     state: DashboardState,
     source: "ForkSource",
@@ -466,6 +616,7 @@ async def fork_slot(
     audit_operation: str = FORK_AUDIT_OPERATION,
     stamp: "Callable[[_ChatSlot], None] | None" = None,
     recheck: "Callable[[], None] | None" = None,
+    reveal_folder: bool = True,
 ) -> "ForkResult | web.Response":
     """Copy *source*'s transcript up to (or after) the fork point into a new slot.
 
@@ -481,11 +632,12 @@ async def fork_slot(
 
     ``stamp``, when given, is called on the child once it is fully shaped
     (title, folder, tags, inherited memory identity) and BEFORE the transcript
-    copy is saved -- so whatever it sets rides the child's own birth save and is
-    on disk before ``push_slots_update`` broadcasts the slot. This is how
+    copy is saved, still inside the push-suspended window that began at the
+    mint. Whatever it sets is therefore on the child's first ``slots`` frame
+    and rides its birth save. This is how
     ``session_control.fork_session`` lands creator attribution and its optional
-    title/folder in the same write as the transcript, with no second persistence
-    window in which a persisted, broadcast child exists unattributed. It must
+    title/folder in the same write as the transcript, and why no client ever
+    sees the child unattributed or outside the folder it asked for. It must
     only assign in-memory fields; it is not awaited and must not raise for
     ordinary input (a raise here is treated as fork finalisation failing, and
     the child is withdrawn).
@@ -501,6 +653,13 @@ async def fork_slot(
     eligibility, the source's addressability, the folder's existence -- true at
     the act rather than at the moment they were first read, across the
     suspensions this function takes for the transcript read and the memory bind.
+
+    ``reveal_folder`` says whether a hidden folder the child is filed into is
+    un-hidden once the fork is acknowledged. The human route leaves it True: a
+    person forking a session wants to see the child. ``session_control``'s
+    agent fork passes True only when the agent named the folder, matching agent
+    ``session_create``, so an agent fork that merely inherits a folder the user
+    hid leaves that choice alone.
 
     Returns a :class:`ForkResult` on success. A refusal is returned as the
     finished ``web.Response`` -- this module's refusal shape, kept so its coded
@@ -998,6 +1157,7 @@ async def fork_slot(
             slot.memory_mode,
             slot_history_key(slot),
             str(getattr(slot, "workspace", "default") or "default"),
+            str(getattr(slot, "agent_kind", "") or ""),
         )
 
     try:
@@ -1012,100 +1172,78 @@ async def fork_slot(
         # `get_or_create_slot`, so what this asserts is true of the child's birth.
         recheck()
 
-    new_slot = state.get_or_create_slot(
-        name=None,
-        agent=slot.agent,
-        workspace=slot.workspace,
-        model=slot.model,
-        mode=fork_mode,
-        # Inherited at BIRTH, not stamped afterwards: get_or_create_slot is what
-        # registers the child's ``dashboard:`` key as restricted, and every memory
-        # gate (lessons, consolidation, artifact registration) reads that
-        # registry. A later assignment would leave a window where the child of
-        # an incognito parent is a persistent slot. The value is the one
-        # validated above, so the constructor cannot raise on it.
-        memory_mode=inherited_memory_mode,
-        app=request_app,
-        origin=origin,
-        count_user_session=count_user_session,
-    )
-    if inherited_execution is not None:
+    # Mint, bind and shape the child inside ONE ``suspend_slots_push`` block.
+    # ``get_or_create_slot`` pushes the slot list as it registers the child, and
+    # an idle coalescer sends that frame at once. Shaped any later, the child
+    # reaches every sidebar unfiled and untitled, then moves into its folder one
+    # trailing flush afterwards. Deferring the push to the block's exit makes the
+    # child's first frame carry its folder, tags, title, pin and whatever
+    # ``stamp`` sets, and a child withdrawn inside the block is never announced.
+    # The block's only await is the memory bind; the transcript copy and its
+    # save stay outside it, so other slots' frames wait at most that long.
+    with state.suspend_slots_push():
+        new_slot = state.get_or_create_slot(
+            name=None,
+            agent=slot.agent,
+            workspace=slot.workspace,
+            model=slot.model,
+            mode=fork_mode,
+            # Inherited at BIRTH, not stamped afterwards: get_or_create_slot is what
+            # registers the child's ``dashboard:`` key as restricted, and every memory
+            # gate (lessons, consolidation, artifact registration) reads that
+            # registry. A later assignment would leave a window where the child of
+            # an incognito parent is a persistent slot. The value is the one
+            # validated above, so the constructor cannot raise on it.
+            memory_mode=inherited_memory_mode,
+            app=request_app,
+            origin=origin,
+            count_user_session=count_user_session,
+        )
+        if inherited_execution is not None:
+            try:
+                # Bind the frozen identity and strict mode while the child is empty.
+                await drained_to_thread(
+                    _bind_fork_execution,
+                    (*source_memory_identity[:4], source_memory_identity[6]),
+                    effective_session_key(new_slot),
+                    inherited_execution,
+                )
+                if recheck is not None:
+                    # The bind suspended; re-assert the caller's containment answers
+                    # first, so a source that became unaddressable meanwhile is
+                    # refused with ITS code rather than as an identity drift. A raise
+                    # here takes the withdrawal path below (no rows copied yet), and
+                    # nothing suspends between here and the copy.
+                    recheck()
+                if not _source_identity_unchanged():
+                    raise UnknownMemoryStore(
+                        "The fork source changed before its history was copied"
+                    )
+                new_slot.memory_store = inherited_store
+            except BaseException as exc:
+                await _withdraw_fork_child(state, new_slot, announced=False)
+                if isinstance(exc, (OSError, ValueError)):
+                    return _store_unavailable_response(inherited_store, exc)
+                raise
         try:
-            # Bind the frozen identity and strict mode while the child is empty.
-            await drained_to_thread(
-                _bind_fork_execution,
-                source_memory_identity[:4],
-                effective_session_key(new_slot),
-                inherited_execution,
+            _shape_fork_child(
+                new_slot, slot, direction=direction, jev_route_allowed=jev_route_allowed
             )
-            if recheck is not None:
-                # The bind suspended; re-assert the caller's containment answers
-                # first, so a source that became unaddressable meanwhile is
-                # refused with ITS code rather than as an identity drift. A raise
-                # here takes the withdrawal path below (no rows copied yet), and
-                # nothing suspends between here and the copy.
-                recheck()
-            if not _source_identity_unchanged():
-                raise UnknownMemoryStore("The fork source changed before its history was copied")
-            new_slot.memory_store = inherited_store
-        except BaseException as exc:
-            from kiro_crew.execution_context import clear_session_execution
-
-            clear_session_execution(effective_session_key(new_slot))
-            state._slots.pop(new_slot.key, None)
-            state._restricted_keys.discard(effective_session_key(new_slot))
-            if isinstance(exc, (OSError, ValueError)):
-                return _store_unavailable_response(inherited_store, exc)
+            if stamp is not None:
+                stamp(new_slot)
+        except Exception:
+            await _withdraw_fork_child(state, new_slot, announced=False)
+            sel().log_api_access(
+                caller=audit_caller,
+                operation=audit_operation,
+                outcome="error",
+                source="dashboard",
+                resources=f"from={slot.key},to={new_slot.key}",
+                error="fork finalisation failed",
+            )
             raise
-    new_slot.forked_from = effective_session_key(slot)
-    new_slot.reasoning_effort = slot.reasoning_effort
-    # Inherited beside the model it belongs to: the constructor takes `model` and
-    # the routing choice is the other half of the same answer, so a fork of an
-    # "Auto (Jev)" session that arrived pinned would run the parent's next turns
-    # on a model the parent had explicitly stopped choosing by hand.
-    # Inheriting is arming a SECOND routed session, so it answers to the same owner
-    # predicate as the arm itself; the caller says whether it passed that predicate.
-    new_slot.jev_route = slot.jev_route and jev_route_allowed
-    # Inherit the active project directory so the fork keeps the parent's working
-    # context (agent resolution, steering files, CWD) instead of falling back to
-    # the config/workspace default on first message.
-    new_slot.project = slot.project
-    # Keep the app-owned agent binding with the agent it binds: the fork runs as
-    # the same app agent, so the per-turn shadow check must still apply to it.
-    new_slot.app_agent_owner = slot.app_agent_owner
-    # Inherit the sidebar folder so the fork appears next to its parent in the UI.
-    new_slot.folder_id = slot.folder_id
-    # Inherit tags (copied, so later edits to either slot's list stay independent).
-    new_slot.tags = list(slot.tags)
-    # "tags changed => revision changed": the slot was constructed with an empty
-    # list under its birth revision; a snapshot of that newborn state (a slot
-    # fetch racing the fork) must not share a revision with the inherited list,
-    # or a delayed empty frame could become a client's next toggle base.
-    new_slot.bump_tags_revision()
-    parent_title = slot.title if slot._titled else "Untitled"
-    parent_title, _ = redact_exfiltration_urls(parent_title)
-    parent_title, _ = redact_credentials(parent_title)
-    # Strip a leading marker from the parent so it never compounds on a
-    # fork-of-a-fork.
-    parent_title = parent_title.removeprefix(FORK_TITLE_MARKER)
-    fork_word = "Tail of" if direction == _FORK_DIRECTION_TAIL else "Fork of"
-    new_slot.title = f"{FORK_TITLE_MARKER}{fork_word} {parent_title}"
-    new_slot._titled = True
-    # The fork name is derived, not typed: it stays inside the automatic title
-    # lifecycle (refreshable, and renamed below from the child's own question)
-    # unless the name it wraps is final. A parent with a manual name, or a
-    # legacy one, hands the child a final title too. Persisted by the birth
-    # save, so a reload keeps the provenance instead of treating the fork name
-    # as an untyped legacy title.
-    new_slot._title_origin = (
-        _TITLE_ORIGIN_USER
-        if slot._titled and slot._title_origin != _TITLE_ORIGIN_AUTO
-        else _TITLE_ORIGIN_AUTO
-    )
 
     try:
-        if stamp is not None:
-            stamp(new_slot)
         for m in visible:
             role = m.get("role", "assistant")
             content = m.get("content", "")
@@ -1124,7 +1262,9 @@ async def fork_slot(
         await save_slot_off_loop(state, new_slot)
         new_slot._resumed_count = len(new_slot.messages)
     except Exception:
-        state._slots.pop(new_slot.key, None)
+        # The child's row was announced when the mint block exited. A partial
+        # save can leave message rows, and the withdrawal keeps such a record.
+        await _withdraw_fork_child(state, new_slot, announced=True)
         sel().log_api_access(
             caller=audit_caller,
             operation=audit_operation,
@@ -1135,7 +1275,7 @@ async def fork_slot(
         )
         raise
     # Acknowledgment boundary. The destination save above is the last await
-    # before this fork is answered, and it takes the DESTINATION's history lock
+    # before the acknowledgment check below, and it takes the DESTINATION's history lock
     # -- nothing in it serialises against the SOURCE's permanent delete. So a
     # delete that began after the pre-copy probe passed can commit inside that
     # await, and the copy now on disk is a conversation the user has since
@@ -1150,12 +1290,13 @@ async def fork_slot(
     # Acknowledgment is the only boundary a handler owns, so it is the line
     # drawn here.
     if session_was_deleted(state, slot):
-        # Roll the destination back. It has been neither acknowledged nor
-        # broadcast (``push_slots_update`` is below, and every ``append`` above
-        # passed ``broadcast=False``), so nothing outside this handler has seen
-        # it: removing it leaves no trace of the deleted conversation instead of
-        # a fresh key holding a full copy. Removing the destination cannot harm
-        # the source -- different key, different lock -- so a false positive
+        # Roll the destination back. It has not been acknowledged, and no
+        # message of it was broadcast (every ``append`` above passed
+        # ``broadcast=False``). Its sidebar row went out when the mint block
+        # exited, so the rollback pushes the slot list again to take that row
+        # back. Removing it leaves no trace of the deleted conversation instead
+        # of a fresh key holding a full copy. Removing the destination cannot
+        # harm the source -- different key, different lock -- so a false positive
         # here (``session_was_deleted`` fails CLOSED when a stat or metadata
         # read is unverifiable) costs a retryable 409 against a still-live
         # source, not data.
@@ -1175,7 +1316,9 @@ async def fork_slot(
                     new_slot.key,
                     exc_info=True,
                 )
-        state._slots.pop(new_slot.key, None)
+        # The record is already gone, or it holds the copy and is kept; the
+        # withdrawal takes the slot, its restricted key and its carrier.
+        await _withdraw_fork_child(state, new_slot, announced=True)
         if removed:
             logger.warning(
                 "chat_fork: source slot=%s was permanently deleted during the "
@@ -1227,6 +1370,25 @@ async def fork_slot(
             f"memory_mode={new_slot.memory_mode}"
         ),
     )
+    if reveal_folder and new_slot.folder_id:
+        # Model-B un-hide, as create and resume do: a child filed into a hidden
+        # folder (inherited from the parent, or named by ``stamp``) would be a
+        # session the sidebar hides by construction. The agent route asks for
+        # it only for a folder the agent named. It runs only past the
+        # acknowledgment boundary, so a refused fork leaves the user's choice
+        # alone, and before the push below, so the frame that announces the
+        # child already shows its folder. Best-effort: the child is saved and
+        # acknowledged, so a folder-store failure must not fail the fork and
+        # invite a retry that makes a duplicate.
+        try:
+            await _unhide_folder(state, new_slot.folder_id)
+        except Exception:
+            logger.warning(
+                "chat_fork: fork %s committed but un-hiding folder %s failed",
+                new_slot.key,
+                new_slot.folder_id,
+                exc_info=True,
+            )
     _sync_dashboard_slots(state)
     state.push_slots_update()
     _schedule_fork_title(state, new_slot)

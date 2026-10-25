@@ -54,6 +54,7 @@ import { prepareSendPayload, serializeDirTokens } from '../../utils/fileTokens'
 import { appendSessionRefLinks, type SessionRef } from '../../utils/sessionRefs'
 import { expandAll, pruneBlocks, type PasteBlock } from '../../utils/pasteTokens'
 import { expandKnowledgeBlock, type KnowledgeBlock } from '../../pages/chat/useKnowledgeFetch'
+import { knowledgeEnvelopeMark, type KnowledgeEnvelopeMark } from '../../utils/knowledgeEnvelope'
 import { prependQuote, type MessageQuote } from './messageQuote'
 
 export type OutgoingTurnMode = 'send' | 'steer'
@@ -73,6 +74,11 @@ export interface OutgoingTurnInput {
   quote?: MessageQuote | null
   /** Project root `@rel/` folder tokens resolve against (send only). */
   project?: string
+  /** Send only: leave `@rel/` folder tokens as typed and carry no
+   *  `meta.dirs`. For a surface with no project root to resolve them against
+   *  (the app-sdk `ChatEmbed`), where a marker would name a path nothing
+   *  travels with; every other part of the send shape is unchanged. */
+  keepFolderTokens?: boolean
 }
 
 /** The knowledge card's record on `meta.knowledge`. */
@@ -81,6 +87,9 @@ export interface KnowledgeMeta {
   tokens: number
   titles: string[]
   content: Array<{ title: string; text: string }>
+  /** The injected block's length and hash, so a bubble served back as wire
+   *  text can remove exactly that block (`stripKnowledgeEnvelope`). */
+  envelope: KnowledgeEnvelopeMark
 }
 
 /** The fields this module contributes to the message's `meta`, in wire order. */
@@ -133,6 +142,7 @@ export function knowledgeMeta(block: KnowledgeBlock): KnowledgeMeta {
     tokens: block.totalTokens,
     titles: block.items.map(i => i.title),
     content: block.items.map(i => ({ title: i.title, text: i.content.slice(0, 2000) })),
+    envelope: knowledgeEnvelopeMark(expandKnowledgeBlock(block)),
   }
 }
 
@@ -147,7 +157,7 @@ export function buildOutgoingTurn(input: OutgoingTurnInput, mode: OutgoingTurnMo
   const send = mode === 'send'
   const quote = input.quote ?? null
   const { txt, displayTxt, filePaths } = prepareSendPayload(input.text.trim(), [...(input.files ?? [])])
-  const { llm: typedWire, dirPaths } = send ? serializeDirTokens(txt, input.project || '') : { llm: txt, dirPaths: [] }
+  const { llm: typedWire, dirPaths } = send && !input.keepFolderTokens ? serializeDirTokens(txt, input.project || '') : { llm: txt, dirPaths: [] }
   const refs = send ? [...(input.sessionRefs ?? [])] : []
   const linked = appendSessionRefLinks(typedWire, refs)
   // On a send the bubble text is what the user sees, so it decides which

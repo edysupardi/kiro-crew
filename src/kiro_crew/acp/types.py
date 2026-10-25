@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re as _re
 from dataclasses import dataclass, field
 from typing import Any
@@ -29,6 +30,7 @@ from kiro_crew.acp_backends import (  # noqa: F401 - re-exported for existing im
     ACP_BACKENDS_COMPACT,
     ACP_BACKENDS_CONTEXT_RECYCLE,
     ACP_BACKENDS_EFFORT_FROM_ADVERTISED_OPTION,
+    ACP_BACKENDS_EFFORT_OVERLAY,
     ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION,
     ACP_BACKENDS_FORK_AT_MESSAGE,
     ACP_BACKENDS_HARNESS_MANAGED_COMPACTION,
@@ -37,11 +39,14 @@ from kiro_crew.acp_backends import (  # noqa: F401 - re-exported for existing im
     ACP_BACKENDS_HOST_AUTH_CALLBACK,
     ACP_BACKENDS_INLINE_COMPACTION,
     ACP_BACKENDS_INTERNAL_SANDBOX,
+    ACP_BACKENDS_KIRO_FAMILY,
     ACP_BACKENDS_KIRO_SLASH_COMMANDS,
     ACP_BACKENDS_KNOWN,
     ACP_BACKENDS_LOAD_WITHOUT_MODES,
     ACP_BACKENDS_MARKDOWN_AGENT_SPECS,
+    ACP_BACKENDS_MATE_WORKER_KIT,
     ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD,
+    ACP_BACKENDS_MCP_WIRE_REINJECT,
     ACP_BACKENDS_MEMBER_CAPABILITIES,
     ACP_BACKENDS_MEMBER_DISPATCH,
     ACP_BACKENDS_MEMBER_PANEL,
@@ -66,6 +71,7 @@ from kiro_crew.acp_backends import (  # noqa: F401 - re-exported for existing im
     ACP_BACKENDS_STRUCTURED_REFUSAL,
     ACP_BACKENDS_TOOL_SEARCH_OVERLAY,
     ACP_BACKENDS_UNATTRIBUTED_TERMINAL_ERROR,
+    ACP_BACKENDS_UNMARKED_COMPACTION_PAIR,
     ACP_BACKENDS_USER_LEVEL_AGENT_SPECS_ONLY,
     effort_config_option_id,
     effort_config_option_value,
@@ -86,6 +92,8 @@ from kiro_crew.recovery.ladder import (  # noqa: E402 - see the re-export note a
     SESSION_RECOVERY_MAX_ATTEMPTS,
 )
 
+logger = logging.getLogger(__name__)
+
 # ── ACP Event Kinds ──
 
 EVENT_TEXT_CHUNK = "text_chunk"
@@ -103,6 +111,15 @@ EVENT_TOOL_RESULT = "tool_result"
 #: ``unknown`` for an outcome the stream did report.
 TERMINAL_TOOL_STATUSES = frozenset({"completed", "failed", "cancelled", "canceled", "refused"})
 EVENT_PERMISSION_REQUEST = "permission_request"
+#: An MCP server's elicitation, turned around by the harness as a server->client
+#: request (``METHOD_ELICITATION_CREATE`` or ``METHOD_KAS_MCP_ELICITATION``).
+#: Carries :attr:`AcpEvent.elicitation`; the consumer answers it through the
+#: driver's ``answer_elicitation``. Yielded only to a consumer that declared it
+#: can put the ask to a person (``accepts_elicitation``); every other consumer's
+#: request is declined by the driver before it would be yielded, so no consumer
+#: that never heard of this kind can leave the tool call hanging. See
+#: :mod:`kiro_crew.acp.elicitation`.
+EVENT_ELICITATION_REQUEST = "elicitation_request"
 EVENT_COMPLETE = "complete"
 EVENT_COMPACTION_STATUS = "compaction_status"
 EVENT_CLEAR_STATUS = "clear_status"
@@ -134,6 +151,11 @@ METHOD_SET_MODE = "session/set_mode"
 METHOD_PROMPT = "session/prompt"
 METHOD_CANCEL = "session/cancel"
 METHOD_REQUEST_PERMISSION = "session/request_permission"
+#: Standard ACP client method: the agent asks the client to put an MCP server's
+#: elicitation to the person. Fields flat on ``params`` (``mode``, ``message``,
+#: ``requestedSchema`` or ``elicitationId`` + ``url``) next to ``sessionId`` and
+#: ``toolCallId``. Answered ``{"action": ..., "content"?: ...}``.
+METHOD_ELICITATION_CREATE = "elicitation/create"
 METHOD_SESSION_UPDATE = "session/update"
 METHOD_METADATA = "_kiro.dev/metadata"
 METHOD_COMMANDS_EXECUTE = "_kiro.dev/commands/execute"
@@ -196,16 +218,27 @@ METHOD_KAS_SESSION_DELETE = "_kiro/session/delete"
 #: summary and the context does not shrink. Advertised in ``initialize``'s
 #: ``_meta.kiro.extensionMethods`` and forwarded by kiro-cli's relay.
 METHOD_KAS_SESSION_COMPACT = "_kiro/session/compact"
+#: KAS's in-place rewind to before a user message. A REQUEST with
+#: ``{"sessionId", "messageId"}`` (the id KAS reports for a prompt as a
+#: ``user_message_id_assigned`` session_info_update), answered
+#: ``{"success": bool, "affectedFiles": [...], "totalFiles": int}``. It appends a
+#: ``tombstone`` row that hides that message and everything after it from the
+#: model, and restores files that write tools in the hidden range changed. Refused
+#: while a turn runs. Not listed in ``extensionMethods``: the engine announces it
+#: as ``_meta.kiro.checkpoints``. Driven live against kiro-cli 2.32.0's relay: the
+#: model's next answer left the reverted prompt out.
+METHOD_KAS_CHECKPOINT_REVERT = "_kiro/checkpoint/revertMultiple"
 #: The STANDARD ACP evict verb, for a host that implements it. codex-acp does: it
 #: drops the session from its local map and unsubscribes the Codex thread, so the
 #: sessionId stops answering while the thread's own record survives on the Codex
 #: side -- the same evict-not-delete shape as kiro-cli's ``terminate``. A REQUEST,
 #: answered with ``{}``; sent as a notification the adapter ignores it and the
 #: session stays resident, which is the leak this verb exists to close. Also
-#: idempotent: closing an already-closed id answers ``{}`` again. Measured live
-#: against codex-acp 1.11.0; the gated test
+#: idempotent: closing an already-closed id answers ``{}`` again. Measured on
+#: codex-acp 1.11.0; the gated test
 #: ``test_codex_session_mcp.py::test_real_codex_acp_session_close_evicts`` re-runs
-#: that measurement on every install that has the adapter.
+#: that measurement on every install that has the adapter, and the lane pins
+#: its release in ``test/real_adapters/package.json``.
 METHOD_SESSION_CLOSE = "session/close"
 METHOD_COMPACTION_STATUS = "_kiro.dev/compaction/status"
 METHOD_CLEAR_STATUS = "_kiro.dev/clear/status"
@@ -235,6 +268,13 @@ METHOD_KAS_MCP_RESET_SERVER = "_kiro/mcp/resetServer"
 #: Engine -> client request carrying the consent URL of that sign-in. It names
 #: neither the session nor the server.
 METHOD_KAS_OPEN_EXTERNAL_URL = "_kiro/openExternalUrl"
+#: KAS's spelling of ``elicitation/create``: the engine turns an MCP server's
+#: elicitation around as this server->client request, with the elicitation
+#: fields NESTED under ``params.elicitation`` next to ``sessionId`` and
+#: ``toolCallId``. Same answer shape as the standard method. A client that does
+#: not answer (a -32601) makes the engine report ``cancel`` to the server, so the
+#: elicitation-gated tool fails silently rather than asking.
+METHOD_KAS_MCP_ELICITATION = "_kiro/mcp/elicitation"
 METHOD_SUBAGENT_LIST_UPDATE = "_kiro.dev/subagent/list_update"
 METHOD_KIRO_SESSION_UPDATE = "_kiro.dev/session/update"
 METHOD_SET_CONFIG_OPTION = "session/set_config_option"
@@ -269,24 +309,38 @@ TODO_ID_MAX = 64
 
 # Capabilities we advertise during `initialize`.
 #
-# Nothing is advertised that has no inbound handler. Kiro Crew serves exactly one
-# server-initiated request, `session/request_permission`; everything else reaches
-# `_reject_unknown_server_request` and comes back `-32601 method not found`.
+# Nothing is advertised that has no inbound handler. Kiro Crew serves two
+# server-initiated requests on every harness, `session/request_permission` and
+# `elicitation/create`; everything else reaches `_reject_unknown_server_request`
+# and comes back `-32601 method not found`.
 #
-# `elicitation` was declared here as a forward-bet on kiro-cli routing an MCP
-# server's `elicitation/create` out over ACP. It is withdrawn because the bet is
-# not free, which is what the bet assumed. A client that sees the capability
-# routes its human-in-the-loop prompts through `elicitation/create` INSTEAD of
-# falling back to `session/request_permission` -- codex-acp gates exactly that
-# way on `clientCapabilities.elicitation.form` -- so declaring a capability we do
-# not serve does not sit inert waiting for a handler. It replaces a path that
-# works with one that returns an error, and the client reads that error as a
-# cancellation of the tool call the human was approving.
-#
-# So the declaration goes back to honest, and every affected client returns to the
-# fallback that already works. Re-add the key in the same change that registers a
-# handler for it, never before: `test_acp_client_capabilities.py` fails if the two
-# drift apart again.
+# `elicitation` is declared because both drivers answer it (see
+# :mod:`kiro_crew.acp.elicitation`). The declaration is what makes a standard
+# ACP harness forward an MCP server's elicitation at all: the schema marks
+# `elicitation/create` as gated on this capability, so without the key the ask
+# never leaves the agent. It is not inert either way, which is why it is never
+# declared ahead of the handler and `test_acp_client_capabilities.py` pins the
+# two together. It does not move TOOL APPROVALS: codex-acp
+# (`@agentclientprotocol/codex-acp`, `src/CodexElicitationHandler.ts`) recognises
+# a tool approval as a message-only form and routes it through
+# `session/request_permission` whatever the client declared
+# (`shouldUseAcpElicitation` returns false for a message-only form); only a
+# form WITH fields and a URL ask consult `clientCapabilities.elicitation`, and
+# those are the asks this handler renders. Measured, not only read:
+# `test_codex_session_mcp_approval.py` drives the pinned codex-acp with
+# this very dict declared and sees the command approval arrive as
+# `session/request_permission` (the live fixture
+# `codex/command-approval-elicitation-declared-live.jsonl`). Codex's own command
+# approvals never pass through its elicitation handler at all
+# (`handleCommandExecution` -> `requestPermission`). Without the key codex
+# answers a URL ask through `session/request_permission` and cancels a form
+# with fields. opencode's ACP server routes tool permissions through
+# `requestPermission` and never calls the SDK's `unstable_createElicitation`;
+# pi's gated `bash` call is measured in `test_pi_real_adapter.py` under Crew's
+# own handshake and arrives as `session/request_permission`; kiro-cli, KAS,
+# claude-agent-acp and goose never send `elicitation/create`. Both modes are
+# declared because both are rendered: a form from the requested schema, and a
+# URL the person is sent to.
 #
 # `fs` and `terminal` stay false for the same reason, and always have: Kiro Crew
 # does not serve the agent's file or terminal requests over ACP -- the agent uses
@@ -295,6 +349,7 @@ TODO_ID_MAX = 64
 ACP_CLIENT_CAPABILITIES: dict = {
     "fs": {"readTextFile": False, "writeTextFile": False},
     "terminal": False,
+    "elicitation": {"form": {}, "url": {}},
 }
 
 # The variable kiro-cli reads to name the application driving it, and the name
@@ -384,9 +439,15 @@ PROVIDER_LABEL_BY_BACKEND: dict = {
 # ``openExternalUrl`` is declared because it is the only channel an MCP OAuth
 # consent URL reaches the client on: without it the engine has nowhere to send
 # the link of a sign-in Crew starts with ``_kiro/mcp/resetServer``, and a remote
-# OAuth server never connects. ``secretStorage`` stays undeclared, so the engine
-# holds the resulting grant in memory and Crew never stores an MCP token. Every
-# other callback stays undeclared (= false) too.
+# OAuth server never connects.
+#
+# ``secretStorage`` is NOT in this constant. By default the engine holds the
+# resulting grant in its own memory and Crew never stores an MCP token. Only with
+# ``agent.kas_persist_mcp_sign_in`` on does the spawn add it to a copy of this
+# declaration (``acp/kas_secret_storage.py``): Crew then keeps each server's
+# ``client`` and ``tokens`` in a dedicated encrypted vault under ``kas/``, never the
+# Secrets vault, and serves them back only on the engine's own pipe. Every other
+# callback stays undeclared (= false).
 KAS_CLIENT_CAPABILITIES: dict = {
     **ACP_CLIENT_CAPABILITIES,
     "_meta": {"kiro": {"settings": {}, "openExternalUrl": True}},
@@ -905,6 +966,12 @@ class AcpEvent:
     # MCP OAuth notification fields (EVENT_MCP_OAUTH_REQUEST):
     server_name: str = ""
     oauth_url: str = ""
+    #: The parsed ask of an ``EVENT_ELICITATION_REQUEST``, as
+    #: ``ElicitationRequest.as_dict()`` renders it for a card: ``mode``,
+    #: ``message``, the ``fields`` of a form or the ``url`` of a URL ask, plus
+    #: ``request_id`` and ``tool_call_id``. ``request_id`` and ``tool_call_id``
+    #: on the event itself carry the same ids. None on every other kind.
+    elicitation: dict[str, Any] | None = None
     #: True when this text chunk is a backend CONTROL NOTICE that arrived as
     #: ordinary assistant text -- today only the claude adapter's compaction
     #: notices, which it emits as plain ``agent_message_chunk`` content with no
@@ -1031,6 +1098,16 @@ class AcpEvent:
     #: a permission event and only from that cached stamp; empty on every other
     #: backend and for every other tool.
     harness_builtin_tool: str = ""
+    #: The DeepSeek Harness tool a permission request is for (``read``, ``bash``),
+    #: as the preceding ``tool_call`` frame stated it in ``title``. Set only on a
+    #: deepseek permission event, only from that cached name, and empty when a
+    #: second ``tool_call`` frame named the same id differently in the turn; empty
+    #: on every other backend.
+    deepseek_tool_name: str = ""
+    #: Why a DeepSeek Harness READ_ONLY turn refuses this request outright: its
+    #: launch did not prove stock dsh registers the read tools. Set only on a
+    #: deepseek permission event; empty once proved and on every other backend.
+    deepseek_read_only_issue: str = ""
     # Diff content block fields — authoritative before/after text from kiro-cli
     # for write tools. Used by chat_runner to derive the "before" snapshot
     # without a racy disk read (the write has already landed by the time the
@@ -1260,6 +1337,14 @@ class AcpPromptStats:
     # delta'd against. SESSION state: survives ``carry_over()`` like the
     # context fields, or every turn would re-bill the whole session's spend.
     cost_session_usd: float = 0.0
+    # The ACP session ``cost_session_usd`` was measured on. Lets a restore of
+    # that SAME session keep the baseline (see ``restore_cost_session``).
+    cost_baseline_sid: str = ""
+    # True while the adapter's counter holds spend Crew never saw: a restored
+    # session's ledger is brought back from the harness's own transcript, so
+    # its first reading includes everything billed before this process. The
+    # next reading is adopted as the baseline and bills nothing.
+    cost_baseline_unknown: bool = False
     # True while ``context_pct`` reads 0.0 only because a compaction dropped the
     # counts and no fresh telemetry has re-derived them. Distinguishes "the
     # transcript is empty" from "the transcript's size is unknown" — the two are
@@ -1275,6 +1360,10 @@ class AcpPromptStats:
     # this turn, so ``carry_over()`` drops it -- a refusal that survived into
     # the next turn would brand an ordinary answer as declined.
     refusal: "RefusalInfo | None" = None
+    # The KAS engine's own measurement of this turn (``kas_profile`` module): the
+    # context breakdown and time to first token. PER-TURN, dropped by
+    # ``carry_over()``, so a replayed or late frame cannot reach a later turn.
+    kas_profile: "dict[str, Any] | None" = None
 
     def carry_over(self) -> "AcpPromptStats":
         """Return fresh per-turn stats carrying this turn's context state.
@@ -1290,6 +1379,8 @@ class AcpPromptStats:
             context_tokens_from_usage=self.context_tokens_from_usage,
             context_pct_unknown=self.context_pct_unknown,
             cost_session_usd=self.cost_session_usd,
+            cost_baseline_sid=self.cost_baseline_sid,
+            cost_baseline_unknown=self.cost_baseline_unknown,
         )
 
     def reset_context_state(self) -> None:
@@ -1323,6 +1414,7 @@ class AcpPromptStats:
         # under-count the first turns (any new reading below the stale baseline
         # only survives via the monotonic reset guard).
         self.cost_session_usd = 0.0
+        self.cost_baseline_unknown = False
 
     def note_pct_reported(self) -> None:
         """Mark ``context_pct`` as backed by real telemetry.
@@ -1350,20 +1442,71 @@ class AcpPromptStats:
             return STOP_REASON_REFUSAL, self.refusal
         return stop_reason, None
 
+    def begin_cost_session(self, session_id: str) -> None:
+        """Start the cost baseline for a session this process just created.
+
+        A ``session/new`` opens a fresh ledger in the adapter, so its counter
+        starts at zero and every later reading is spend Crew can see.
+        """
+        self.cost_session_usd = 0.0
+        self.cost_baseline_sid = session_id or ""
+        self.cost_baseline_unknown = False
+
+    def restore_cost_session(self, session_id: str) -> None:
+        """Set the cost baseline for a session restored by load or resume.
+
+        The claude harness restores a resumed session's cost ledger from its
+        own transcript, so the counter does NOT restart at zero: it carries the
+        session's whole lifetime spend. A baseline measured on this same session
+        (the adapter process restarted under a live client) still describes
+        that ledger and is kept. Any other baseline -- a fresh client after a
+        gateway restart, or one measured on a different session -- cannot, so
+        the next reading is adopted as the baseline instead of billed.
+        """
+        sid = session_id or ""
+        if sid and sid == self.cost_baseline_sid and not self.cost_baseline_unknown:
+            return
+        self.cost_session_usd = 0.0
+        self.cost_baseline_sid = sid
+        self.cost_baseline_unknown = True
+
     def apply_cost_cumulative(self, cumulative: float) -> None:
         """Fold a session-cumulative cost reading into the per-turn delta.
 
         The adapter reports cost as a running session total, so the per-turn
-        figure is the movement since the last reading. Monotonic guard: a
-        reading BELOW the stored baseline means the adapter's counter reset
-        (process restart) — the new total is then entirely spend since the
-        reset, so it is taken whole rather than producing a negative delta.
-        The caller validates the value (finite, non-negative) at the
+        figure is the movement since the last reading. Two readings carry spend
+        Crew cannot attribute, and both bill nothing and rebase:
+
+        - the first reading after ``restore_cost_session`` found no usable
+          baseline: it includes spend billed before this process;
+        - a reading BELOW the stored baseline: the ledger was restored to a
+          total Crew never saw, so taking it whole would re-bill the lifetime.
+
+        Under-counting one turn is bounded; re-billing a session's lifetime is
+        not. Each case logs a WARNING so a gap in the usage rows explains
+        itself. The caller validates the value (finite, non-negative) at the
         ``parse_usage_cost`` chokepoint.
         """
+        if self.cost_baseline_unknown:
+            logger.warning(
+                "cost baseline unknown for restored session %s: adopting "
+                "cumulative $%.6f as the baseline; this reading bills $0",
+                self.cost_baseline_sid or "(unknown)",
+                cumulative,
+            )
+            self.cost_baseline_unknown = False
+            self.cost_session_usd = cumulative
+            return
         delta = cumulative - self.cost_session_usd
         if delta < 0:
-            delta = cumulative
+            logger.warning(
+                "cost cumulative for session %s fell from $%.6f to $%.6f: "
+                "rebasing; this reading bills $0",
+                self.cost_baseline_sid or "(unknown)",
+                self.cost_session_usd,
+                cumulative,
+            )
+            delta = 0.0
         self.cost_usd += delta
         self.cost_session_usd = cumulative
 

@@ -424,7 +424,25 @@ over. A clear hold's `reason` says what the next exec step waits for: the
 ceiling, the idle clock ("idle; restoring toward 32 in 25s"), demand at the cap,
 or the completions still owed; when only host-only evidence (loop lag, memory)
 fired, the gate's hold is named instead. Cap decreases, pauses and resumes are logged at
-WARNING (growth at INFO) so `gateway.log` keeps them.
+WARNING (growth at INFO) so `gateway.log` keeps them. So that a throttled period's
+end, and its length, are in that log too, the first cut or pause opens a period and
+one WARNING closes it, `adaptive concurrency restored: exec_cap=N gate_cap=M after
+Ss (before the cut: exec_cap=N gate_cap=M)`, when the policy's caps are back at the
+values held just before that cut (a ceiling lowered meanwhile lowers the target; a
+switch to fixed mode also closes it; with no demand left, a return to the policy's
+start caps closes it too, since idle recovery restores only that far). A decrease or pause that loop lag caused ends
+with `busy=<module.qualname>[ via <module.qualname>]`: what the loop thread was
+running while the controller's timer was late. `adaptive/busy.py`'s
+`LoopBusySampler` is one daemon thread, armed before each sample's sleep for the
+sleep plus `lag_decrease_ms`; if the controller has not woken by then it reads the
+loop thread's frame once, and the controller disarms it on waking. It names code
+only (the innermost frame, and the innermost `kiro_crew` frame below a library
+frame, each at most 120 characters), never a file path, argument or local value.
+The walk stops at asyncio's `Handle._run`; with no `kiro_crew` frame inside the
+callback the handle is running, it names that callback (the watchdog's
+`stall_enrichment._callable_name`, attributes only), which is the only name a
+native callback has.
+A punctual tick reads no frame.
 Session health publishes the same state (`slack/gateway_runtime/admission.py`):
 the exec cap (`subagents`) and the spawn gate cap (`spawn_gate`) as cap sources,
 and a degrade reason of `adaptive_pause`, `adaptive_probe` or `adaptive_decrease`
@@ -439,6 +457,44 @@ its signals, throttled provider scopes, and the last five of
 ceiling and a cut is on record it adds "Last pressure cut: decrease 42s ago
 (corroborated pressure: slow_keys,timeouts); signals: ..."). Only an exec cut
 is on record: a gate cut or pause lowers no exec cap.
+
+**The chat header shows a cut while it is in force.** `GET /api/spawn/adaptive`
+(below) returns, beside the snapshot, a `throttle` reading
+(`dashboard/handlers/spawn_resume.py::throttle_view`): whether a cut is in force,
+the execution cap and the spawn gate each as `{cap, configured, cut}` (the gate
+also carries `paused`), and `queued`, the work the last sample saw waiting for an
+execution slot. A cut is a cap below the value a fresh process starts it at --
+the execution cap below the policy's `exec_start` (the user's ceiling), the gate
+paused or below `gate_start` (`spawn_concurrency_initial`). A gate below its
+ceiling is not a cut, because the gate starts at its initial capacity and grows
+from there. The Tasks & capacity card's "lowered" mark reads the same start
+value: `/api/tasks/summary` publishes it as the gate lane's `start`
+(`handlers/tasks.py::_lane_caps`, through the same `_start_caps` read), so a
+gate between its start value and its ceiling is cut on neither surface. A disabled controller and
+`fixed` mode answer `{"cut": false}`. The
+dashboard's chat header (`components/ConcurrencyCutChip.tsx`) polls it every
+15 s and, while `cut` holds, shows one chip naming the reduced cap and the queue,
+linked to the Tasks & capacity card, with a polite live region that announces
+the cut and not each move of the queued count. Next to it the open session gets a
+marker when its own subagent starts wait for a slot under a cut execution cap; a
+memory wait keeps the sidebar's memory wording instead. Both read the title row
+as a container (`@container/chathead`), so they step down with the pane, not the
+window: as the row narrows the chip's sentence gives way to "Under load: 2/8",
+then to "2/8", and the marker folds away (the subagent progress bar and the
+sidebar row still count the queue); a row that also holds the two-way
+channel-link chip steps down sooner and, narrowest, shows the gauge alone. The
+sentence stays the link's accessible name at every width, and its numbers are
+formatted in the active locale's numerals, as the narrow "2/8" is. On a phone the title
+row is not rendered, so the top bar's overflow menu carries the cut as a row
+linking to the card, with the chip's hover reassurance (waiting work keeps its
+place) as a visible second line, since a touch screen shows no hover title; its
+trigger carries a warning-toned dot, and the bar holds the live
+region. A read that fails twice renders through `ErrorNotice` on both
+surfaces, in place of the chip and the menu row, and the phone trigger's dot
+turns error-toned: the last good reading is
+withheld once the failure is reported, so no surface shows numbers it cannot
+confirm (withheld while the dashboard is disconnected, which its offline
+banner covers).
 
 **A tool server is not the gateway process,** so that registry is empty there:
 `mcp_tools/spawn.py::_live_adaptive_state` falls back to `GET
@@ -469,10 +525,11 @@ why, and none of those is a doctor issue, since the Connectivity section reports
 a gateway that is down (`doctor_checks/workload.py::_doctor_adaptive_live`).
 
 The two other places the model is handed a fan-out figure -- the spawn tool
-descriptions (`mcp_tools/spawn.py::schemas`, "You can run up to N sub-agents
+descriptions (`mcp_tools/spawn_parts/schemas.py::schemas`, "You can run up to N sub-agents
 concurrently", followed in both branches by the note that each start also waits
 until host memory can hold it) and the `{{MAX_SUBAGENTS}}` prompt token
-(`context.py::_resolve_prompt_templates`) -- read the in-process registry only,
+(`context_assembly/agent_spec.py::_resolve_prompt_templates`) -- read the in-process
+registry only,
 through `resource_status.adaptive_exec_cap()`, and never the loopback API: the
 prompt token is resolved once per session -- a session start takes the reading
 and the restore of the contract after compaction reuses it, unless the memo has

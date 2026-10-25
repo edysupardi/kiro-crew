@@ -1,10 +1,11 @@
 import { safeSetItem } from '../utils/safeStorage'
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useImeGuard } from '../hooks/useImeGuard'
 import Clickable from '../components/Clickable'
 import { List, CalendarDays, CalendarClock, Plus, ClipboardList, ChevronRight, Globe, History, Trash2, FolderPlus, MoreHorizontal, Pencil, Folder, LayoutGrid, GitPullRequestArrow, Download, KeyRound, Info, X } from 'lucide-react'
-import { api } from '../api/client'
+import { api, type MemberRosterRow } from '../api/client'
+import { membersRosterQuery } from '../api/membersQuery'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useArmedDelete } from '../hooks/useArmedDelete'
 import { PageHeader, Card, Btn, SendBtn, Badge, SearchInput, EmptyState, FilteredEmpty, Skeleton, Input } from '../components/ui'
@@ -15,7 +16,9 @@ import TimezoneSelect from '../components/TimezoneSelect'
 import JobForm from '../components/JobForm'
 import JobLogsView from '../components/JobLogsView'
 import ErrorNotice from '../components/ErrorNotice'
-import type { KiroCrewAgent } from '../components/AgentSelector'
+import { crewDisplayName, type KiroCrewAgent } from '../components/AgentSelector'
+import CrewAvatar from '../components/CrewAvatar'
+import SimpleSelect from '../components/SimpleSelect'
 import InfoTip from '../components/InfoTip'
 import type { CronJob } from '../types'
 import { useAgents } from '../hooks/useAgents'
@@ -53,7 +56,7 @@ import { uiLocation } from '../uiLocations/uiLocation'
 import { useGuidePredicate, useGuideSelection } from '../guide/guidePredicates'
 import { defaultAgentQuery } from '../api/defaultAgentQuery'
 import { agentOrDefaultLabel } from '../utils/agentLabel'
-import { compareText, fmtDateTimeNumeric } from '../i18n/format'
+import { compareText, fmtDateTimeNumeric, fmtTime } from '../i18n/format'
 import { formatCadence } from '../utils/scheduleCadence'
 import { guideConfirm, guidePick, guidePickControl } from '../uiLocations/targetRegistry'
 const RENDER_TZ_STORAGE_KEY = 'kirocrew.schedule.renderTz'
@@ -70,11 +73,11 @@ const SCHEDULE_COLUMNS = 10
 
 /**
  * The jobs table's declared min-width in px: the number in its
- * `min-w-[1176px]` class. It exists as a constant only so a user's column
+ * `min-w-[1194px]` class. It exists as a constant only so a user's column
  * resize can move it (`JOBS_TABLE_MIN_WIDTH + jobCols.extra`); the class stays
  * the default, and `SchedulePage.columnContract.test.ts` holds the two equal.
  */
-const JOBS_TABLE_MIN_WIDTH = 1176
+const JOBS_TABLE_MIN_WIDTH = 1194
 
 /**
  * The user-resizable jobs columns. Each `base` restates that column's
@@ -95,7 +98,7 @@ const JOB_COLUMNS = {
   name: { base: 160, min: 80, max: 640 },
   type: { base: 116, min: 64, max: 480 },
   schedule: { base: 180, min: 80, max: 480 },
-  status: { base: 86, min: 60, max: 240 },
+  status: { base: 104, min: 60, max: 240 },
   lastRun: { base: 82, min: 56, max: 240 },
   nextRun: { base: 92, min: 56, max: 240 },
 } satisfies Record<string, TableColumnSpec>
@@ -253,6 +256,46 @@ function EmptyFolderChip({ folder, onRename, onDelete, error }: { folder: CronFo
   )
 }
 
+/** The roster row a job's `member_id` names. Creation stores the durable id
+ *  (`bind_cron_memory`), which is the roster row's `slug` (`member_slug`), so the
+ *  match is on the slug alone, as `wakesCrew` does. A slug two rows share (a
+ *  legacy name-derived slug can equal another crewmate's id) names nobody, as
+ *  the roster itself treats it, rather than whichever row comes first. */
+function crewmateForJob(memberId: string | undefined, roster: MemberRosterRow[]): MemberRosterRow | undefined {
+  if (!memberId) return undefined
+  const bySlug = roster.filter(r => r.slug === memberId)
+  return bySlug.length === 1 ? bySlug[0] : undefined
+}
+
+/** What a crewmate job's Type cell shows for its crewmate: the display name, or
+ *  the raw id when no roster row resolves. */
+function crewmateLabel(memberId: string, roster: MemberRosterRow[]): string {
+  const row = crewmateForJob(memberId, roster)
+  return row ? crewDisplayName(row) : memberId
+}
+
+/** Type cell for a crewmate's own schedule (`member_id` set): the kind on line 1,
+ *  the crewmate's face and name on line 2, linking to its Crewmates page. With no
+ *  roster row (still loading, or the crewmate is gone) the raw id shows and
+ *  nothing links. */
+function CrewmateTypeCell({ job, row }: { job: CronJob; row: MemberRosterRow | undefined }) {
+  return (
+    <>
+      <span className="text-muted">{i18nT('pages.schedulePage.type_crewmate')}</span>
+      {row ? (
+        <Link
+          to={`/members?member=${encodeURIComponent(row.name)}`}
+          onClick={e => e.stopPropagation()}
+          className="flex items-center gap-1 min-w-0 text-[11px] text-muted hover:text-text"
+        >
+          <CrewAvatar seed={row.name} avatar={row.avatar} size={14} className="shrink-0" />
+          <span className="truncate underline decoration-dotted underline-offset-2">{crewDisplayName(row)}</span>
+        </Link>
+      ) : <span className="block truncate text-[11px] text-muted">{job.member_id}</span>}
+    </>
+  )
+}
+
 export default function SchedulePage() {
   const [jobs, setJobs] = useState<CronJob[]>([])
   const dispatch = useAppDispatch()
@@ -278,6 +321,11 @@ export default function SchedulePage() {
   const { data: defaultAgentData, isError: defaultAgentFailed, error: defaultAgentError } = useQuery({ ...defaultAgentQuery, select: d => d.default_template })
   const defaultAgent = defaultAgentData ?? ''
   const [cronFilter, setCronFilter] = useState('')
+  // "By crewmate": '' lists every job, a crewmate name lists only that
+  // crewmate's own schedules (rows whose `member_id` resolves to it).
+  const [crewmateFilter, setCrewmateFilter] = useState('')
+  const { data: rosterData, isError: crewmateRosterFailed, error: crewmateRosterError, refetch: reloadCrewmateRoster, isFetching: crewmateRosterReloading } = useQuery(membersRosterQuery)
+  const roster = useMemo(() => (Array.isArray(rosterData) ? rosterData : []), [rosterData])
   const [selected, setSelected] = useState<CronJob | null>(null)
   /**
    * Whether the job detail dialog is showing for `selected`.
@@ -475,7 +523,29 @@ export default function SchedulePage() {
     }
   }, [load, setActionError])
   const { armedId: confirmDeleteId, arm: armDelete, confirm: confirmDelete, isDeleting } = useArmedDelete(performDelete)
-  const filteredJobs = useMemo(() => sanitizedJobs.filter(j => !cronFilter || (j.name+' '+j.safeMessage+' '+(j.agent||'')+' '+(j.model||'')+' '+(j.session_key||'')).toLowerCase().includes(cronFilter.toLowerCase())), [sanitizedJobs, cronFilter])
+  // The crewmates that own at least one listed job, for the filter.
+  const crewmateOptions = useMemo(() => {
+    const byName = new Map<string, MemberRosterRow>()
+    for (const j of jobs) {
+      const row = crewmateForJob(j.member_id, roster)
+      if (row) byName.set(row.name, row)
+    }
+    return [...byName.values()].sort((a, b) => compareText(a.name, b.name))
+  }, [jobs, roster])
+  // The filter applies only while its crewmate is still an option: once that
+  // crewmate's last job is deleted or the crewmate is gone, the list shows every
+  // job again and the dropdown reads "All crewmates", rather than filtering to
+  // nothing behind a trigger that says otherwise.
+  const activeCrewmate = crewmateOptions.find(r => r.name === crewmateFilter)
+  const filteredJobs = useMemo(() => sanitizedJobs.filter(j => {
+    const row = crewmateForJob(j.member_id, roster)
+    const crewmate = row?.name || ''
+    // Searchable by the label the row shows as well as the internal name.
+    const crewmateText = row ? `${row.name} ${crewDisplayName(row)}` : ''
+    return (!activeCrewmate || crewmate === activeCrewmate.name) &&
+      (!cronFilter || (j.name+' '+j.safeMessage+' '+(j.agent||'')+' '+crewmateText+' '+(j.model||'')+' '+(j.session_key||'')).toLowerCase().includes(cronFilter.toLowerCase()))
+  }), [sanitizedJobs, cronFilter, activeCrewmate, roster])
+  const filterActive = !!cronFilter || !!activeCrewmate
   const scheduleComparators = useMemo(() => ({
     name: (a: CronJob, b: CronJob) => a.name.localeCompare(b.name),
     // Clock time first, so `9:00 AM` precedes `1:00 PM` -- the label sorts wrongly
@@ -503,10 +573,10 @@ export default function SchedulePage() {
   // no row (collapse is bypassed while a filter is active), so select-all must
   // not silently include them.
   const visibleScheduleJobs = useMemo(
-    () => cronFilter
+    () => filterActive
       ? sortedScheduleJobs
       : sortedScheduleJobs.filter(j => !(j.folder_id && collapsedFolders.has(j.folder_id))),
-    [sortedScheduleJobs, cronFilter, collapsedFolders],
+    [sortedScheduleJobs, filterActive, collapsedFolders],
   )
   const allVisibleSelected = visibleScheduleJobs.length > 0 && visibleScheduleJobs.every(j => selectedIds.has(j.id))
   const someVisibleSelected = visibleScheduleJobs.some(j => selectedIds.has(j.id))
@@ -641,6 +711,24 @@ export default function SchedulePage() {
               </Btn>
             </div>
           )}
+          {/* Only when a listed job needs the roster: with no crewmate job the
+              failed read costs the page nothing worth reporting. */}
+          {crewmateRosterFailed && jobs.some(j => j.member_id) && !detailDialogOpen && (
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              {/* askAgent on: the job dialog is closed, so no job draft can be lost. */}
+              <ErrorNotice
+                variant="inline"
+                className="flex-1 min-w-0"
+                title={i18nT('pages.membersPage.roster_load_failed')}
+                message={queryErrorMessage(crewmateRosterError)}
+                askAgent
+                testId="schedule-crewmate-roster-error"
+              />
+              <Btn onClick={() => void reloadCrewmateRoster()} disabled={crewmateRosterReloading} aria-busy={crewmateRosterReloading}>
+                {i18nT('pages.schedulePage.retry')}
+              </Btn>
+            </div>
+          )}
           {foldersFailed && (
             <ErrorNotice className="mb-3" message={queryErrorMessage(foldersError)} askAgent testId="schedule-folders-error" />
           )}
@@ -706,7 +794,7 @@ export default function SchedulePage() {
                       <span className="flex items-center gap-2 mt-auto">
                         <span className="text-[12px] text-muted/80 font-medium">{formatCadence(p.prefill)}</span>
                         {p.writes && (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-warn-fg bg-warn-subtle rounded-full px-2 py-0.5" title={i18nT('pages.schedulePage.writes_badge_tooltip')}>
+                          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-warn-text bg-warn-subtle rounded-full px-2 py-0.5" title={i18nT('pages.schedulePage.writes_badge_tooltip')}>
                             <GitPullRequestArrow size={11} aria-hidden="true" />
                             {i18nT('pages.schedulePage.writes_to_your_repos')}
                           </span>
@@ -725,6 +813,18 @@ export default function SchedulePage() {
           <div className="mb-3 flex flex-wrap items-center gap-2">
             {jobsView === 'list' && (<>
               <div className="flex-1 min-w-[140px] sm:min-w-[200px]"><SearchInput placeholder={i18nT('pages.schedulePage.filter_jobs')} value={cronFilter} onChange={e => setCronFilter(e.target.value)} /></div>
+              {crewmateOptions.length > 0 && (
+                <SimpleSelect
+                  aria-label={i18nT('pages.schedulePage.filter_by_crewmate')}
+                  options={crewmateOptions.map(r => r.name)}
+                  optionLabels={crewmateOptions.map(r => crewDisplayName(r))}
+                  optionIcons={crewmateOptions.map(r => <CrewAvatar key={r.name} seed={r.name} avatar={r.avatar} size={16} />)}
+                  value={activeCrewmate?.name ?? ''}
+                  onChange={setCrewmateFilter}
+                  clearLabel={i18nT('pages.schedulePage.all_crewmates')}
+                  className="shrink-0 w-auto min-w-[160px]"
+                />
+              )}
               {selectedIds.size > 0 && (
                 <div className="flex items-center gap-2 shrink-0">
                   <span className="text-[13px] text-muted whitespace-nowrap">{selectedIds.size} {i18nT('pages.schedulePage.selected')}</span>
@@ -816,7 +916,7 @@ export default function SchedulePage() {
                   it overlaps the next cell. That is what put the Message chevron
                   and preview on top of the Status badge at phone widths, and on a
                   1280px desktop with the nav rail open (measured 0px there too).
-                - `min-w` covers the nine px columns (996px, border-box, so the
+                - `min-w` covers the nine px columns (1014px, border-box, so the
                   `p-2`/`px-2` is inside each) PLUS a 180px floor for Message —
                   enough for the 14px chevron and a one-line preview. A narrower
                   container scrolls the table, which is honest; voiding a column
@@ -835,7 +935,7 @@ export default function SchedulePage() {
                 column, and restates the rule above mechanically: the px
                 columns moved by `extra`, so min-width moves by the same
                 amount and Message keeps its floor. */}
-            <Table className="table-fixed min-w-[1176px]" style={jobCols.extra ? { minWidth: JOBS_TABLE_MIN_WIDTH + jobCols.extra } : undefined} aria-label={i18nT('pages.schedulePage.jobs_table')} {...uiLocation('schedule.job-list', attachJobsTable)}>
+            <Table className="table-fixed min-w-[1194px]" style={jobCols.extra ? { minWidth: JOBS_TABLE_MIN_WIDTH + jobCols.extra } : undefined} aria-label={i18nT('pages.schedulePage.jobs_table')} {...uiLocation('schedule.job-list', attachJobsTable)}>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   <TableHead className="w-[36px] px-2 text-center">
@@ -860,7 +960,7 @@ export default function SchedulePage() {
                       NOT out of Message, which keeps its floor. */}
                   <SortableTableHead label={i18nT('pages.schedulePage.schedule')} sortKey="schedule" sort={schedSort} onToggle={toggleSchedSort} className="w-[180px] relative" style={jobCols.style('schedule')} resizer={jobCols.resizer('schedule')} />
                   <TableHead>{i18nT('pages.schedulePage.message')}</TableHead>
-                  <SortableTableHead label={i18nT('pages.schedulePage.status')} sortKey="status" sort={schedSort} onToggle={toggleSchedSort} className="w-[86px] relative" style={jobCols.style('status')} resizer={jobCols.resizer('status')} />
+                  <SortableTableHead label={i18nT('pages.schedulePage.status')} sortKey="status" sort={schedSort} onToggle={toggleSchedSort} className="w-[104px] relative" style={jobCols.style('status')} resizer={jobCols.resizer('status')} />
                   <SortableTableHead label={i18nT('pages.schedulePage.last_run')} sortKey="lastRun" sort={schedSort} onToggle={toggleSchedSort} className="w-[82px] relative" style={jobCols.style('lastRun')} resizer={jobCols.resizer('lastRun')} />
                   <SortableTableHead label={i18nT('pages.schedulePage.next_run')} sortKey="nextRun" sort={schedSort} onToggle={toggleSchedSort} className="w-[92px] relative" style={jobCols.style('nextRun')} resizer={jobCols.resizer('nextRun')} />
                   {/* 176px, not 164: under `table-fixed` a column width is a
@@ -899,14 +999,14 @@ export default function SchedulePage() {
               <TableBody>{jobs.length === 0
               ? <TableRow className="hover:bg-transparent"><TableCell colSpan={SCHEDULE_COLUMNS}><EmptyState icon={<ClipboardList className="lucide-inline" />} title={i18nT('pages.schedulePage.no_cron_jobs')} /></TableCell></TableRow>
               : sortedScheduleJobs.length === 0
-              ? <TableRow className="hover:bg-transparent"><TableCell colSpan={SCHEDULE_COLUMNS}><FilteredEmpty query={cronFilter} onClear={() => setCronFilter('')} noun={i18nT('pages.schedulePage.jobs_noun')} /></TableCell></TableRow>
+              ? <TableRow className="hover:bg-transparent"><TableCell colSpan={SCHEDULE_COLUMNS}><FilteredEmpty query={cronFilter || (activeCrewmate ? crewDisplayName(activeCrewmate) : '')} onClear={() => { setCronFilter(''); setCrewmateFilter('') }} noun={i18nT('pages.schedulePage.jobs_noun')} /></TableCell></TableRow>
               : (() => {
-                const groups = groupJobsByFolder(sortedScheduleJobs, cronFolders, { omitEmpty: !!cronFilter })
+                const groups = groupJobsByFolder(sortedScheduleJobs, cronFolders, { omitEmpty: filterActive })
                 const hasFolders = cronFolders.length > 0
                 return groups.map(group => {
                   const folderId = group.folder?.id
                   // Fix #3: bypass persisted collapse state while filter is active
-                  const isCollapsed = cronFilter ? false : (folderId ? collapsedFolders.has(folderId) : false)
+                  const isCollapsed = filterActive ? false : (folderId ? collapsedFolders.has(folderId) : false)
                   return (
                     <Fragment key={`group-${folderId || 'ungrouped'}`}>{group.folder && (
                       <CronFolderHeader
@@ -977,9 +1077,10 @@ export default function SchedulePage() {
                     schedule/timezone pair in the next column. The agent's model
                     is tooltip-only: at this width it truncated to noise, and the
                     detail dialog shows it in full. */}
-                <TableCell className="truncate" title={j.script ? j.script : j.command ? j.command : `${agentOrDefaultLabel(j.agent, defaultAgent)}${j.model ? ` · ${j.model}` : ''}`}>
+                <TableCell className="truncate" title={j.script ? j.script : j.command ? j.command : `${j.member_id ? crewmateLabel(j.member_id, roster) : agentOrDefaultLabel(j.agent, defaultAgent)}${j.model ? ` · ${j.model}` : ''}`}>
                   {j.script ? <span className="font-medium text-[var(--accent)]">{i18nT('pages.schedulePage.script_python')}</span>
                     : j.command ? <span className="font-medium text-[var(--warn)]">{i18nT('pages.schedulePage.command_shell')}</span>
+                    : j.member_id ? <CrewmateTypeCell job={j} row={crewmateForJob(j.member_id, roster)} />
                     : <>
                         <span className="text-muted">{i18nT('pages.schedulePage.agent')}</span>
                         <span className="block truncate text-[11px] text-muted">{agentOrDefaultLabel(j.agent, defaultAgent)}</span>
@@ -1027,7 +1128,35 @@ export default function SchedulePage() {
                     </span>
                   )}
                 </TableCell>
-                <TableCell className="text-muted" title={j.next_run_ts ? fmtDateTimeNumeric(j.next_run_ts) : ''}><span className="block truncate">{fmtIn(j.next_run_ts)}</span></TableCell>
+                {(() => {
+                  // Why the next run sits later than the schedule says: a job
+                  // with auto-pause off (or a raised limit) that keeps failing
+                  // backs off, and `next_run_ts` already carries the shift. The
+                  // gateway sends `failure_backoff_until` only when the backoff
+                  // moved the next run; a past value has elapsed and explains
+                  // nothing. Wraps like the retry note: the column is narrow.
+                  const backoffNote =
+                    typeof j.failure_backoff_until === 'number' && j.failure_backoff_until > Date.now() / 1000
+                      ? i18nT('pages.schedulePage.backing_off_after_n_failures', {
+                        count: j.consecutive_failures ?? 0,
+                        time: fmtTime(j.failure_backoff_until),
+                      })
+                      : ''
+                  const nextRunTitle = j.next_run_ts ? fmtDateTimeNumeric(j.next_run_ts) : ''
+                  return (
+                    <TableCell
+                      className="text-muted"
+                      title={backoffNote
+                        ? `${nextRunTitle}\n${backoffNote}\n${i18nT('pages.schedulePage.backoff_ends_on_success')}`
+                        : nextRunTitle}
+                    >
+                      <span className="block truncate">{fmtIn(j.next_run_ts)}</span>
+                      {backoffNote && (
+                        <span className="block whitespace-normal text-[11px] leading-tight text-warn">{backoffNote}</span>
+                      )}
+                    </TableCell>
+                  )
+                })()}
                 {/* Two controls plus the overflow menu. Anything wider than this
                     is what pushed the column off screen; see CronRowActions.
                     Pinned like the header cell above, on an OPAQUE `bg-card`.
@@ -1376,7 +1505,7 @@ export function JobSecretsPanel({ job, onSaved }: { job: CronJob; onSaved: () =>
   return (
     <div className="flex flex-col gap-1.5">
       {pending && (
-        <div className="flex flex-col gap-2 px-3 py-2.5 rounded-lg bg-warn-subtle text-warn-fg" role="note">
+        <div className="flex flex-col gap-2 px-3 py-2.5 rounded-lg bg-warn-subtle text-warn-text" role="note">
           <div className="flex items-center gap-1.5 text-[13px] font-semibold">
             <KeyRound size={14} className="lucide-inline shrink-0" aria-hidden="true" />
             {i18nT('pages.schedulePage.secrets_pending_title')}
@@ -1610,7 +1739,7 @@ function JobDetailDialog({ job, prefill, prefillWrites, agents, defaultAgent, ro
           <>
             {job && <TemplateUpdatedNotice job={job} />}
             {prefillWrites && (
-              <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-warn-subtle text-[12.5px] text-warn-fg" role="note" data-testid="schedule-writes-notice">
+              <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-warn-subtle text-[12.5px] text-warn-text" role="note" data-testid="schedule-writes-notice">
                 <GitPullRequestArrow size={14} className="shrink-0 mt-0.5" aria-hidden="true" />
                 <span>{i18nT('pages.schedulePage.writes_notice')}</span>
               </div>

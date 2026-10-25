@@ -36,8 +36,9 @@ import logging
 from typing import Any
 from urllib.parse import quote
 
-from kiro_crew import dashboard_agentic
+from kiro_crew import dashboard_agentic, mcp_panel_snapshot
 from kiro_crew.dashboard_templates.instance import AUTHORED_PAGE_REFUSAL
+from kiro_crew.dashboard_templates.page_look import PAGE_LOOK
 from kiro_crew.mcp_core import (
     _get,
     _post,
@@ -52,6 +53,17 @@ logger = logging.getLogger(__name__)
 
 SERVER_NAME = "kirocrew-panel"
 SERVER_VERSION = "1.0.0"
+
+#: The field list's own ceiling, because its GET does real work: the route reads the
+#: dashboard instance, folds the mistake book and the page's values from the crew
+#: log, and scans the template catalog, all on the gateway's shared default
+#: executor, where a busy gateway makes the read wait its turn. ``_get``'s 10 s
+#: default is sized for a telemetry read and its docstring asks a route like this
+#: one to raise it. The value is the write path's: ``dashboard_write`` passes the
+#: same caller gate and reads the same mistake book through ``_post``, whose default
+#: is 30 s, so the read that tells an agent what to write is not the call that fails
+#: first. Every reader of the route uses it, the type lookup a clear makes included.
+DASHBOARD_FIELDS_READ_TIMEOUT_SECS = 30.0
 
 
 def _tool_definitions() -> list[dict[str, Any]]:
@@ -148,11 +160,11 @@ def _tool_definitions() -> list[dict[str, Any]]:
             "name": "dashboard_types",
             "description": (
                 "READ THIS BEFORE YOU COMPOSE A DASHBOARD. Lists every DATA TYPE "
-                "you can bind a dashboard block to -- one per fold of your crew "
+                "you can bind a dashboard field to -- one per fold of your crew "
                 "log -- and for each one: its name, the field shape inside it (so "
                 "you can name a path instead of guessing one), which fold the "
                 "value is folded from, and how far that fold has been folded for "
-                "you right now. A block bound to a path this does not list draws "
+                "you right now. A field bound to a path this does not list draws "
                 "nothing, so read the shape and copy the path out of it. Three "
                 "things to read carefully: an `array` is where the shape STOPS, "
                 "because a path cannot reach inside a list; an `opaque` object is "
@@ -221,62 +233,49 @@ def _tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "dashboard_save",
             "description": (
-                "STAGE the page you composed as YOUR crewmate's Dashboard. A page "
-                "is three declarations and this call stages all three at once: a "
+                "SAVE a draft of your crewmate's Dashboard page. dashboard_apply "
+                "puts it live separately. A page has three declarations; this saves all "
+                "three at once: a "
                 "`model` naming the fields the page holds and where each value "
-                "comes from, a `view` laying out the blocks that draw them, and a "
+                "comes from, a `view` holding the page itself as inline HTML, and a "
                 "`theme` of tokens. Read dashboard_fields first -- it tells you "
-                "the page in force -- and ASK the person before you save, because "
-                "the page is theirs and one changed without asking is one they "
-                "have to undo. A field reads either from a crew-log fold "
+                "the page in force -- and tell the person what you are changing, "
+                "because the page is theirs. A field reads either from a crew-log fold "
                 '(`{"fold": <name>, "path": <dotted keys>}`, filled by the '
                 'gateway) or from you (`{"agentic": true}`) -- never a number you '
                 "type into the layout, which would be true only at the moment you "
                 "typed it. The "
-                "block types and data types come from a CLOSED catalog, so a "
+                "data types come from a CLOSED catalog, so a "
                 "package naming one that does not exist is refused and the refusal "
                 "lists the ones that do: recompose from that list. NAME YOUR FIELDS "
-                "AND BLOCKS FOR A READER -- `open_prs`, not a token. A name a "
+                "FOR A READER -- `open_prs`, not a token. A name a "
                 "redactor would mask is refused, because a name is a key the page "
                 "joins its cells by and cannot be rewritten on the way out; the "
                 "refusal tells you which position to rename. Values never version "
-                "and never belong in a package. NOTHING IS STORED, AND THERE IS NO "
-                "LINK TO SHOW: this call stages the page and hands you back its "
-                "field and block counts. A staged page can be neither shown nor "
-                "put in force on this build -- dashboard_apply of one, and its "
-                "`?preview=1` read, both answer `package_display_pending`, change "
-                "nothing and leave the staged page in place. Applying is refused "
-                "because binding a composed page stops every dashboard_write you "
-                "have, with no call that undoes it. So DESCRIBE the page to the "
-                "person IN WORDS -- the fields it holds and the blocks that lay "
-                "them out -- and do not offer a link to open: there is none, and "
-                "the tab turns that refusal into a load error. A later change "
-                "lifts both refusals together. A page you write as `view.html` is "
-                "RUN once by the gateway over a SYNTHETIC copy of your crewmate's current "
-                "data (the same shape with invented values, so a page never sees the "
-                "record; a key is kept only if your page spells it out or the dashboard "
-                "type catalog lists it), and "
-                "the reply carries a `verification` block: `passed`, "
-                "`failed` with each script error and the `view.html` line and column "
-                "it was thrown at, `timed_out` when the run hit its time limit, or "
-                "`skipped` with the reason. Fix a failed page and save again BEFORE you "
-                "describe it to the person. The run is offline: a library the page "
-                "loads from the CDN allowlist is not fetched, and a page whose script "
-                "stops at that library's name is `skipped`, not `failed`. The page is "
-                "checked as the dashboard shows it: the gateway's secret filter rewrites "
-                "text in a page that looks like a key (a long run of letters and digits "
-                "can), and when it did the reply says how many places and which line the "
-                "first is on. One page is "
-                "checked at a time across the gateway, so a save that finds it busy, or "
-                "a machine short of memory, is `skipped` and does not wait. The save "
-                "waits for the run, usually about a second and never more than about "
-                "twelve. The staged "
-                "page expires, and a stale one has to be saved again. Two things "
-                "still belong to the "
-                "template path -- dashboard_fields lists the TEMPLATE page's "
-                "fields, and dashboard_rollback restores a template version, not "
-                "one of yours. The page in force is untouched by a save, so tell "
-                "the person the page is staged rather than that their tab draws it."
+                "and never belong in a package. This call STORES the page as your "
+                "own dashboard package; dashboard_apply with no arguments then puts "
+                "it live as a new version -- no preview step. Once live, "
+                "dashboard_write keeps working on its agentic fields and "
+                "dashboard_fields lists them. To go back, dashboard_rollback to the "
+                "version you were on -- a template version brings the template "
+                "page back."
+                " A page you write as `view.html` is RUN once by the gateway over a "
+                "SYNTHETIC copy of your crewmate's current data (the same shape with "
+                "invented values, so a page never sees the record; a key is kept only if "
+                "your page spells it out or the dashboard type catalog lists it), and the "
+                "reply carries a `verification` block: `passed`, `failed` with each script "
+                "error and the `view.html` line and column it was thrown at, `timed_out` "
+                "when the run hit its time limit, or `skipped` with the reason. Fix a "
+                "failed page and save again BEFORE you dashboard_apply it. The run is "
+                "offline: a library the page loads from the CDN allowlist is not fetched, "
+                "and a page whose script stops at that library's name is `skipped`, not "
+                "`failed`. The page is checked as the dashboard shows it: the gateway's "
+                "secret filter rewrites text in a page that looks like a key (a long run "
+                "of letters and digits can), and when it did the reply says how many "
+                "places and which line the first is on. One page is checked at a time "
+                "across the gateway, so a save that finds it busy, or a machine short of "
+                "memory, is `skipped` and does not wait. The save waits for the run, "
+                "usually about a second and never more than about twelve."
             ),
             "inputSchema": {
                 "type": "object",
@@ -287,34 +286,41 @@ def _tool_definitions() -> list[dict[str, Any]]:
                             "The fields the page holds, as "
                             '`{"types": {<field_name>: {...}}}`. Each field names '
                             "a data type (`number`, `text`, `bool`, `timestamp`, "
-                            "`enum`) and a `source`, and may carry a `label` and "
-                            "`description` a reader sees. Field names are "
-                            "lowercase letters, digits and underscores."
+                            "`enum`, `array`, `object`) and a `source`, and may carry "
+                            "a `label` and `description`. Read a whole array or object "
+                            "in script; dashboard_types supplies row keys. A verified "
+                            "project snapshot can use an agentic source, with its "
+                            "source and observation time shown on the page. Field "
+                            "names are lowercase letters, digits and underscores."
                         ),
                     },
                     "view": {
                         "type": "object",
                         "description": (
-                            'The layout, as `{"blocks": [...]}`, in the order a '
-                            "reader meets them -- that order IS the layout. Each "
-                            "block carries an `id`, a `type` from the block "
-                            "catalog, the `fields` it draws (every one declared by "
-                            "the model) and an optional `title`."
+                            'The page, as `{"html": "..."}`: inline HTML, CSS and script. '
+                            + PAGE_LOOK
+                            + " Text cells can use "
+                            '`data-dashboard-field="<name>"`; drawings subscribe through '
+                            "window.kirocrew.subscribe. Every field is declared in the "
+                            "model, but a script-only field needs no text cell or hidden "
+                            "sink. The dashboard skill covers the frame and design."
                         ),
                     },
                     "theme": {
                         "type": "object",
                         "description": (
                             'Look, as `{"tokens": {"--name": "value"}}`, with an '
-                            'optional `"css"` string beside it for rules the '
-                            "tokens cannot express. None of "
-                            "the look is fixed by the product, so this is where "
-                            "you set it. An empty `tokens` object is valid and "
-                            "takes the defaults."
+                            'optional `"css"` string. Host variables and custom '
+                            "properties are both available; pair surfaces and text "
+                            "for light and dark. A texture or wallpaper in `css` is an "
+                            'inline data: URL (url("data:image/svg+xml,...")); an '
+                            "address that needs the network is refused. Omitting theme or "
+                            "tokens stores an empty tokens object. The page can still "
+                            "define its own complete design in view.html."
                         ),
                     },
                 },
-                "required": ["model", "view", "theme"],
+                "required": ["model", "view"],
             },
         },
         {
@@ -326,8 +332,9 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "fold paths its fields read, so asking for `cost` finds the page "
                 "that shows a usage number whether or not its author used that "
                 "word. Omit `query` for all of them. This is the FIRST step of "
-                "'show me another one': list, then dashboard_preview the one that "
-                "fits, then ask the person before you apply it."
+                "'show me another one': list, then dashboard_apply with the "
+                "`template_id` that fits. dashboard_preview it first only when the "
+                "person asks to look."
             ),
             "inputSchema": {
                 "type": "object",
@@ -350,13 +357,10 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "NOTHING IS RECORDED: their current page is untouched, no version "
                 "is written, and the answer carries a link they open to see it. "
                 "Name a `template_id` from dashboard_templates -- that is the only "
-                "argument. You CANNOT preview a page you wrote yourself: a "
-                "dashboard page runs its own script against this crewmate's task "
-                "titles and summaries in a frame that can navigate itself, so only "
-                "pages that shipped with the product are rendered. Custom "
-                "templates come later. ALWAYS show a preview and ask before you "
-                "apply: the page is the person's, not yours, and a page swapped "
-                "without asking is one they have to undo. While the person has "
+                "argument. A preview is OPTIONAL, never a step before applying: use "
+                "it only when the person asks to look first. dashboard_apply with "
+                "the `template_id` puts it live. A page you composed yourself is "
+                "saved with dashboard_save, not previewed here. While the person has "
                 "locked the layout (your [DASHBOARD] block says LOCKED), you can "
                 "still preview a page for them to look at, but do not apply it: "
                 "ask them to unlock it first."
@@ -380,27 +384,36 @@ def _tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "dashboard_apply",
             "description": (
-                "Keep the page that is staged -- the one you previewed with "
-                "dashboard_preview, or the one you composed with dashboard_save. "
-                "This is the answer to the person saying yes. It takes NO arguments "
-                "on purpose: what it installs is the page that was staged, so it "
-                "cannot differ from the one they were shown. A TEMPLATE page goes "
-                "live and its previous version stays on disk, so dashboard_rollback "
-                "can go back to it. A COMPOSED PACKAGE cannot go live on this base "
-                "-- putting one in force stops every dashboard_write you have, with "
-                "no call back -- so applying a staged package is refused with "
-                "`package_display_pending`; a later change lifts that. Refused with "
-                "`dashboard_locked` while the page is locked "
-                "(your [DASHBOARD] block says LOCKED). While locked you can still "
-                "preview."
+                "Put a page live on your crewmate's Dashboard, now, as a new "
+                "version -- there is no preview step. Pass a `template_id` from "
+                "dashboard_templates to use a shipped or operator page, or pass "
+                "nothing to put live the page you saved with dashboard_save. Every "
+                "earlier version stays on disk, so dashboard_rollback goes back in "
+                "one call. Tell the person what you changed. Refused with "
+                "`dashboard_locked` while the page is locked (your [DASHBOARD] "
+                "block says LOCKED)."
             ),
-            "inputSchema": {"type": "object", "properties": {}},
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "template_id": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "description": (
+                            "A template id dashboard_templates listed. Omit it to "
+                            "put live the page you saved with dashboard_save."
+                        ),
+                    },
+                },
+            },
         },
         {
             "name": "dashboard_rollback",
             "description": (
                 "Go BACK to an earlier version of your crewmate's page -- the "
-                "answer to the person saying 'go back'. dashboard_fields lists the "
+                "answer to the person saying 'go back'. A version can be a template "
+                "page or a page you saved with dashboard_save, and the one you "
+                "restore is the one that draws. dashboard_fields lists the "
                 "versions you can still reach; a version the store has dropped is "
                 "refused, so read that list rather than guessing. A rollback moves "
                 "FORWARD: restoring version 1 over version 2 writes version 3, so "
@@ -423,6 +436,7 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "required": ["to_version"],
             },
         },
+        mcp_panel_snapshot.TOOL_DEFINITION,
     ]
 
 
@@ -517,7 +531,11 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         sk, err = _strict_session_key()
         if err:
             return err
-        d = _get("/api/agent-panel/dashboard/fields", session_key=sk)
+        d = _get(
+            "/api/agent-panel/dashboard/fields",
+            session_key=sk,
+            timeout=DASHBOARD_FIELDS_READ_TIMEOUT_SECS,
+        )
         if d.get("error"):
             return redact(f"Error: {d['error']}")
         return redact(_render_fields(d))
@@ -581,6 +599,9 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         page: dict[str, Any] = {}
         for key in ("model", "view", "theme"):
             part = args.get(key)
+            if part is None and key == "theme":
+                # Omitted, or dropped by the client as an empty object: the default look.
+                part = {"tokens": {}}
             if not isinstance(part, dict):
                 return (
                     f"Error: `{key}` must be an object -- a page is a `model`, a "
@@ -599,9 +620,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             # from. Shortened to a generic failure it would cost a cycle and teach
             # nothing.
             return redact(f"Error: {api_err}")
-        return redact(
-            _render_staged(d.get("staged") or {}, str(d.get("next") or ""), d.get("verification"))
-        )
+        return redact(_render_saved(d.get("saved") or {}, d.get("verification"), reply=d))
 
     if name == "dashboard_templates":
         query = args.get("query")
@@ -640,19 +659,27 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         return redact(_render_preview(d.get("preview") or {}))
 
     if name == "dashboard_apply":
+        template_id = args.get("template_id")
+        if template_id is not None and (
+            not isinstance(template_id, str) or not template_id.strip()
+        ):
+            return "Error: `template_id` must be a template id from dashboard_templates"
         sk, err = _strict_session_key()
         if err:
             return err
-        d = _post("/api/agent-panel/dashboard/apply", {}, session_key=sk)
+        applying: dict[str, Any] = {} if template_id is None else {"template_id": template_id}
+        d = _post("/api/agent-panel/dashboard/apply", applying, session_key=sk)
         api_err = d.get("error")
         if api_err:
             return redact(f"Error: {api_err}")
-        # A package apply is refused by the route (`package_display_pending`) and
-        # returns above as an error, so a successful apply here is a TEMPLATE one:
-        # an instance version and a template id.
+        shown = (
+            "the page you saved with dashboard_save"
+            if d.get("package")
+            else f"template `{d.get('template_id')}`"
+        )
         return redact(
-            f"Your crewmate's page is now version {d.get('instance_version')}, "
-            f"from template `{d.get('template_id')}`." + _guide_tail(d)
+            f"LIVE: your crewmate's page is now version {d.get('instance_version')}, "
+            f"{shown}. dashboard_rollback goes back to any earlier version." + _guide_tail(d)
         )
 
     if name == "dashboard_rollback":
@@ -676,6 +703,15 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             f"{d.get('instance_version')} -- a rollback moves forward, so the page you "
             "were on is still there to go back to." + _guide_tail(d)
         )
+
+    if name == mcp_panel_snapshot.TOOL_NAME:
+        sk, err = _strict_session_key()
+        if err:
+            return err
+        own, gateway = mcp_panel_snapshot.call_snapshot(sk, _get, _render_verification)
+        # The spool path and its numbers are this server's own and skip the pass, like
+        # ``kirocrew-computer``'s screenshot note; everything the gateway sent crosses it.
+        return own + (redact(gateway) if gateway else "")
 
     return f"Error: unknown tool '{name}'"
 
@@ -756,8 +792,7 @@ def _render_verification(verification: Any) -> list[str]:
         count = len(verification.get("errors") or []) + int(verification.get("omitted") or 0)
         lines = [
             f"verification: failed -- the page ran once over {ran_over} and raised {count} "
-            "error(s). Fix them and call dashboard_save again before you describe the page "
-            "to the person."
+            "error(s). Fix them and call dashboard_save again before you apply it."
         ]
         lines.extend(errors)
     else:
@@ -766,39 +801,49 @@ def _render_verification(verification: Any) -> list[str]:
     return lines
 
 
-def _render_staged(staged: dict[str, Any], note: str, verification: Any = None) -> str:
-    """What is STAGED, and what an agent may do with it on this base.
+def _render_saved(
+    saved: dict[str, Any], verification: Any = None, *, reply: dict[str, Any] | None = None
+) -> str:
+    """What was SAVED, the page check's verdict, the gateway's own checks, and the next call.
 
-    NO LINK, because there is none to give: the save reply carries no
-    ``preview_url`` and the package read answers ``package_display_pending``, which
-    the tab draws as a load error with a Retry button. So the counts lead, and the
-    line under them says the page cannot be shown or applied here and has to be
-    described in words instead -- the one thing an agent can actually do with it.
-
-    The route's own ``next`` sentence is passed through rather than restated here.
-    It carries the expiry window, which is the gateway's number -- a copy of it in
-    this process is one deploy away from telling an agent to re-save at the wrong
-    time.
+    The verdict and the checks come before the next step: a ``failed`` page is fixed
+    and saved again before it is applied. *reply* is the whole save reply, read for its
+    ``fields``, ``manual_fields``, ``shape_warnings`` and ``theme_warnings``, which the
+    crewmate has to see to act on: a reply that dropped them would check for nobody.
     """
+    reply = reply or {}
     lines = [
-        f"STAGED, not live: {staged.get('fields')} field(s) in "
-        f"{staged.get('blocks')} block(s). Nothing on your crewmate's Dashboard has "
-        "changed yet, and nothing is stored."
+        f"SAVED as your dashboard package ({saved.get('fields')} field(s) in "
+        f"its page). It is not live yet."
     ]
     checked = _render_verification(verification)
     if checked:
         lines.append("")
         lines.extend(checked)
-    if note:
+        note = verification.get("note") if isinstance(verification, dict) else None
+        if isinstance(note, str) and note:
+            lines.append(f"  {note}")
+    rows = reply.get("fields")
+    if isinstance(rows, list) and rows:
         lines.append("")
-        lines.append(f"Next: {note}")
+        lines.append("Fields:")
+        for row in rows:
+            if isinstance(row, dict):
+                kind = row.get("type") or "untyped"
+                lines.append(f"  {row.get('field')} ({kind}) -- {row.get('source')}")
+    manual_note = reply.get("manual_note")
+    if reply.get("manual_fields") and isinstance(manual_note, str):
+        lines.append(f"  {manual_note}")
+    for key, head in (("shape_warnings", "Shape warnings"), ("theme_warnings", "Theme warnings")):
+        warned = reply.get(key)
+        if isinstance(warned, list) and warned:
+            lines.append("")
+            lines.append(f"{head}:")
+            lines.extend(f"  - {line}" for line in warned if isinstance(line, str))
     lines.append("")
     lines.append(
-        "A staged page cannot be shown or put in force on this build: there is no "
-        "preview to open, and dashboard_apply answers `package_display_pending` and "
-        "binds nothing -- putting one in force would stop every dashboard_write you "
-        "have, with no call back. Describe the fields and blocks you composed in words "
-        "when you tell the person about it. A later change lifts both refusals."
+        "Next: call dashboard_apply with no arguments to put it on your crewmate's "
+        "Dashboard as a new version."
     )
     return "\n".join(lines)
 
@@ -854,8 +899,8 @@ def _render_templates(payload: dict[str, Any]) -> str:
                 lines.append(f"  {row.get('template')}: {row.get('problem')}")
     lines.append("")
     lines.append(
-        "Next: dashboard_preview the one that fits, show the person the link, and only "
-        "call dashboard_apply once they say yes."
+        "Next: dashboard_apply with the template_id that fits. dashboard_preview it "
+        "first only if the person wants to look before choosing."
     )
     return "\n".join(lines)
 
@@ -879,9 +924,24 @@ def _flatten(node: Any, prefix: str = "") -> list[str]:
         return []
     ntype = str(node.get("type", "?"))
     label = prefix or "(the whole value)"
+    hints: list[str] = []
+    keys = node.get("row_keys")
+    if isinstance(keys, list) and keys:
+        hints.append("row_keys: " + ", ".join(str(key) for key in keys))
+    if node.get("names_the_row"):
+        hints.append("names_the_row: " + str(node["names_the_row"]))
+    if node.get("row_note"):
+        hints.append(str(node["row_note"]))
+    nested = node.get("nested_rows")
+    if isinstance(nested, dict):
+        for name, row in nested.items():
+            if isinstance(row, dict):
+                child = _flatten({"type": "array", **row}, f"{label}[].{name}")
+                hints.append("nested rows (script only): {" + "; ".join(child) + "}")
+    suffix = (" [" + "; ".join(hints) + "]") if hints else ""
     if node.get("opaque") is True:
-        keyed = node.get("keyed_by")
-        return [f"{label}: object, keyed by {keyed}" if keyed else f"{label}: object, keyed by ids"]
+        keyed = node.get("keyed_by") or "ids"
+        return [f"{label}: object, keyed by {keyed}{suffix}"]
     properties = node.get("properties")
     if ntype == "object" and isinstance(properties, dict) and properties:
         out: list[str] = []
@@ -891,7 +951,17 @@ def _flatten(node: Any, prefix: str = "") -> list[str]:
     tail = " (may be null)" if node.get("nullable") else ""
     if ntype == "array":
         tail += " -- a path cannot reach inside it"
-    return [f"{label}: {ntype}{tail}"]
+    return [f"{label}: {ntype}{tail}{suffix}"]
+
+
+def _render_rendering(payload: dict[str, Any]) -> list[str]:
+    """The per-type rendering advice a page needs for a list, a record or a time."""
+    advice = payload.get("rendering")
+    if not isinstance(advice, dict) or not advice:
+        return []
+    lines = ["", "Drawing a type a data-dashboard-field cell shows raw:"]
+    lines.extend(f"  {kind}: {how}" for kind, how in advice.items() if isinstance(how, str))
+    return lines
 
 
 def _render_types(payload: dict[str, Any]) -> str:
@@ -906,12 +976,12 @@ def _render_types(payload: dict[str, Any]) -> str:
     rows = payload.get("types")
     if not isinstance(rows, list) or not rows:
         return (
-            "No data type came back, so there is nothing to bind a dashboard block to "
+            "No data type came back, so there is nothing to bind a dashboard field to "
             "yet. Tell the human: this gateway's fold registry answered empty."
         )
     lines = [
-        f"{len(rows)} data types you can bind a dashboard block to. Each one is a fold "
-        "of your crew log; bind a block by naming the type and a path from its list.",
+        f"{len(rows)} data types you can bind a dashboard field to. Each one is a fold "
+        "of your crew log; bind a field by naming the type and a path from its list.",
     ]
     unread = False
     for row in rows:
@@ -964,16 +1034,17 @@ def _render_types(payload: dict[str, Any]) -> str:
         "null until something fills it. Binding one is allowed and it may draw nothing, "
         "so prefer a path with a real type."
     )
+    lines.extend(_render_rendering(payload))
     return "\n".join(lines)
 
 
 def _render_preview(preview: dict[str, Any]) -> str:
-    """The staged page, and the sentence that makes the agent ASK before applying.
+    """The staged page, its link, and how to put it live.
 
-    The link leads, because it is the only part the person needs. The reminder to ask
-    is last and unconditional: this tool's whole value is that it changes nothing, and
-    an agent that previews and then applies in the same breath has spent the staging
-    step without ever letting anybody look.
+    The link leads, because it is the only part the person needs: a preview is the
+    look they asked for, and it changes nothing. The apply line is last, and it tells
+    the agent to re-read its [DASHBOARD] block first, because the person may already
+    have pressed Keep or Discard on the preview.
     """
     fields = preview.get("fields")
     lines = [
@@ -990,10 +1061,9 @@ def _render_preview(preview: dict[str, Any]) -> str:
         lines.append(f"It shows: {', '.join(str(f) for f in fields)}.")
     lines.append("")
     lines.append(
-        "ASK the person whether to keep it. dashboard_apply if they say yes; stage "
-        "another one if they do not. Do not apply a page nobody has looked at. The "
-        "person may also press Keep or Discard on the preview themselves, so re-read "
-        "your [DASHBOARD] block before calling dashboard_apply."
+        f"dashboard_apply with template_id `{preview.get('template_id')}` puts it live. "
+        "The person may also press Keep or Discard on the preview themselves, so "
+        "re-read your [DASHBOARD] block before calling dashboard_apply."
     )
     return "\n".join(lines)
 
@@ -1011,8 +1081,9 @@ def _render_fields(payload: dict[str, Any]) -> str:
     lines: list[str] = []
     if not isinstance(template, dict):
         lines.append(
-            "You have no dashboard yet, so there is no field to write. Ask the human "
-            "to adopt a template for you."
+            "You have no dashboard page yet, so there is no field to write. Write your "
+            "own HTML page (view.html) with the dashboard skill: dashboard_save it, then "
+            "dashboard_apply it."
         )
     else:
         lines.append(
@@ -1109,6 +1180,7 @@ def _render_fields(payload: dict[str, Any]) -> str:
             f"A refused write names the fields you could have used. Fix it from that "
             f"list and retry; after {budget} tries, ask the human."
         )
+    lines.extend(_render_rendering(payload))
     return "\n".join(lines)
 
 
@@ -1127,7 +1199,11 @@ def _empty_value_for(field: str, sk: str) -> Any:
     refused by the write route as ``wrong_type``, and the next clear that can read
     the list writes ``{}``.
     """
-    d = _get("/api/agent-panel/dashboard/fields", session_key=sk)
+    d = _get(
+        "/api/agent-panel/dashboard/fields",
+        session_key=sk,
+        timeout=DASHBOARD_FIELDS_READ_TIMEOUT_SECS,
+    )
     rows = None if d.get("error") else d.get("fields")
     if isinstance(rows, list):
         for row in rows:

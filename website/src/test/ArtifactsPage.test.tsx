@@ -13,6 +13,17 @@ function connectedStore() {
   s.dispatch(sseConnected())
   return s
 }
+
+async function answerConfirm(confirmLabel: string, yes: boolean) {
+  // The dialog's subtree re-renders while the library animates, so a node held
+  // across ticks goes stale. Re-query and require a CONNECTED node inside waitFor.
+  await waitFor(() => {
+    const dialog = screen.getByRole('dialog')
+    const btn = within(dialog).getByRole('button', { name: yes ? confirmLabel : 'Cancel' })
+    expect(btn.isConnected).toBe(true)
+    fireEvent.click(btn)
+  }, { timeout: 3000 })
+}
 import { api } from '../api/client'
 import type { Artifact } from '../types'
 import { __resetPathKindCache } from '../hooks/usePathKind'
@@ -938,11 +949,11 @@ describe('ArtifactsPage', () => {
     })
     const deleteSpy = vi.fn().mockResolvedValue({ ok: true })
     vi.mocked(api).deleteArtifact = deleteSpy
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     renderWithProviders(<ArtifactsPage />)
     await waitFor(() => expect(screen.getByText('cr queue')).toBeInTheDocument())
     const deleteBtn = screen.getByLabelText('Remove from artifacts library')
     await userEvent.click(deleteBtn)
+    await answerConfirm('Remove artifact', true)
     expect(deleteSpy).toHaveBeenCalledWith('cr-queue')
   })
 
@@ -952,10 +963,10 @@ describe('ArtifactsPage', () => {
     })
     const deleteSpy = vi.fn()
     vi.mocked(api).deleteArtifact = deleteSpy
-    vi.spyOn(window, 'confirm').mockReturnValue(false)
     renderWithProviders(<ArtifactsPage />)
     await waitFor(() => expect(screen.getByText('cr queue')).toBeInTheDocument())
     await userEvent.click(screen.getByLabelText('Remove from artifacts library'))
+    await answerConfirm('Remove artifact', false)
     expect(deleteSpy).not.toHaveBeenCalled()
   })
 

@@ -61,16 +61,24 @@ def _agent_detail_candidates(name: str) -> list[tuple[Path, dict[str, Any]]]:
     files that match.
     """
     matches: list[tuple[Path, dict[str, Any]]] = []
-    for f in iter_agent_spec_files(kiro_agents_dir_path(), ordered=False):
-        spec = _read_agent_spec(
-            f,
-            operation="api_agent_detail",
-            source="dashboard",
-        )
-        if spec is None:
-            continue
-        if spec.get("name") == name or f.stem == name:
-            matches.append((f, spec))
+    from kiro_crew.config.paths import mate_agents_dir
+
+    # The user-level agents dir, then the crewmate scope: a crewmate's config
+    # lives in mates/agents/<id>.json, not the user-level dir, so the Built-from
+    # pane (which reads this) must look there too — the same two-folder order the
+    # KAS, loader, essential-context and capability seams use.
+    roots = [kiro_agents_dir_path(), mate_agents_dir()]
+    for root in roots:
+        for f in iter_agent_spec_files(root, ordered=False):
+            spec = _read_agent_spec(
+                f,
+                operation="api_agent_detail",
+                source="dashboard",
+            )
+            if spec is None:
+                continue
+            if spec.get("name") == name or f.stem == name:
+                matches.append((f, spec))
     return matches
 
 
@@ -193,7 +201,9 @@ async def api_agent_detail(request: web.Request) -> web.Response:
         # the same check runs again under the write lock below.
         return web.json_response(
             {
-                "error": f"'{name}' matches more than one template file; rename one first.",
+                "error": _AmbiguousTemplateName(
+                    name, tuple(f for f, _spec in candidates)
+                ).refusal_text(),
                 "code": "ambiguous_template_name",
             },
             status=409,
@@ -387,8 +397,13 @@ async def api_agent_detail(request: web.Request) -> web.Response:
                             # decides: a second claimant that landed after the
                             # scan (a package install) must refuse, not let
                             # the stale single match be overwritten.
-                            if [c for c, _spec in _agent_detail_candidates(name)] != [f]:
-                                raise _AmbiguousTemplateName(name)
+                            claimants = [c for c, _spec in _agent_detail_candidates(name)]
+                            if claimants != [f]:
+                                # Named only when several claim it: a lone or
+                                # vanished match is not a list to rename from.
+                                raise _AmbiguousTemplateName(
+                                    name, tuple(claimants) if len(claimants) > 1 else ()
+                                )
                             fresh = _read_agent_spec(
                                 f, operation="api_agent_detail", source="dashboard"
                             )
@@ -505,13 +520,9 @@ async def api_agent_detail(request: web.Request) -> web.Response:
                             {"error": str(exc), "code": exc.code, "server": exc.server},
                             status=409,
                         )
-                    except _AmbiguousTemplateName:
+                    except _AmbiguousTemplateName as exc:
                         return web.json_response(
-                            {
-                                "error": f"'{name}' matches more than one template file; "
-                                "rename one first.",
-                                "code": "ambiguous_template_name",
-                            },
+                            {"error": exc.refusal_text(), "code": "ambiguous_template_name"},
                             status=409,
                         )
                     except SharedAgentHomeRefused:

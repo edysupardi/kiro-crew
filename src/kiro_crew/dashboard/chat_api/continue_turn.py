@@ -84,7 +84,7 @@ async def api_chat_slot_continue(request: web.Request) -> web.Response:
     name = request.match_info["slot"]
     slot = state._slots.get(name)
     if not slot:
-        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+        return _slot_not_found()
 
     # App ownership check (App Kit §5.2): deny-by-default for app tokens, mirroring
     # api_chat. Without it an app token holding /api/chat could resume ANY
@@ -174,6 +174,11 @@ async def continue_slot_turn(
         if replaced is not None and replaced():
             raise SlotContinueRefusal("not found", "slot_not_found", status=404)
         if slot.running:
+            raise SlotContinueRefusal("slot is running", "slot_running")
+        if slot.linked_turn_running:
+            # A channel-path turn (the Slack thread this slot is bound to) is
+            # answering right now on the same session; a Resume here would queue
+            # a second answer to the prompt it is still answering.
             raise SlotContinueRefusal("slot is running", "slot_running")
         if slot._stopping or slot._stop_state != "idle":
             raise SlotContinueRefusal("a stop is in progress", "slot_stopping")
@@ -386,7 +391,7 @@ async def api_chat_slot_end_wait(request: web.Request) -> web.Response:
     name = request.match_info["slot"]
     slot = state._slots.get(name)
     if not slot:
-        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+        return _slot_not_found()
     denied = deny_app_slot_access(request.get("app", ""), slot, name, "slot_end_wait")
     if denied is not None:
         return denied

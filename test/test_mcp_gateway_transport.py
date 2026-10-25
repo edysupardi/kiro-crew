@@ -21,6 +21,7 @@ import os
 import shutil
 import socket
 import stat
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Iterator
@@ -31,6 +32,7 @@ from tmpdir_helpers import SHORT_TMP_PREFIX, short_tmp_base
 from kiro_crew import code_fingerprint as cf
 from kiro_crew import platform_compat as pc
 from kiro_crew.mcp_gateway import transport
+from kiro_crew.testing.wait import await_until, finished
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +99,7 @@ def test_windows_address_is_a_pipe_name(monkeypatch: pytest.MonkeyPatch) -> None
     addr = transport.resolve_address("/some/home/mcp-gateway/gateway.sock")
     assert addr.startswith(r"\\.\pipe\kirocrew-mcp-")
     # No path separators survive into the name: a pipe name is a flat namespace.
-    assert "/" not in addr[len(r"\\.\pipe\\"):]
+    assert "/" not in addr[len(r"\\.\pipe\\") :]
 
 
 def test_windows_address_is_deterministic_and_path_scoped(
@@ -208,12 +210,46 @@ def test_singleton_lock_file_is_created_beside_the_endpoint(tmp_path: Path) -> N
         os.close(fd)
 
 
+# Independent of the code under test: an open Windows file cannot be unlinked,
+# so the delete-then-acquire sequence does not exist there.
+_POSIX_UNLINK_WHILE_OPEN = sys.platform != "win32"
+
+
+@pytest.mark.skipif(not _POSIX_UNLINK_WHILE_OPEN, reason="Windows cannot unlink an open file")
+def test_deleting_the_lock_file_does_not_admit_a_second_daemon(tmp_path: Path) -> None:
+    """The incumbent keeps its flock on the unlinked inode; the next
+    daemon must still lose, because the anchor directory is still held."""
+    sock = tmp_path / "gateway.sock"
+    transport.prepare_dir(sock)
+    first = transport.acquire_singleton_lock(sock)
+    assert first is not None
+    try:
+        transport.lock_path_for(sock).unlink()
+        assert transport.acquire_singleton_lock(sock) is None
+        assert transport.singleton_lock_free(sock) is False
+        # The anchor holds an entry, so a plain rmdir cannot retire it either.
+        with pytest.raises(OSError):
+            os.rmdir(transport.anchor_path_for(sock))
+    finally:
+        # Plain os.close, as existing callers do: the next acquire finds the
+        # anchor stale and frees it.
+        os.close(first)
+    second = transport.acquire_singleton_lock(sock)
+    assert second is not None
+    os.close(second)
+
+
+def test_singleton_refusal_says_what_to_do_instead_of_deleting(tmp_path: Path) -> None:
+    sock = tmp_path / "gateway.sock"
+    msg = transport.singleton_refusal_message(sock)
+    assert "kirocrew restart" in msg
+    assert f"Do not delete {transport.lock_path_for(sock)}" in msg
+
+
 # --- POSIX serve / connect ---------------------------------------------------
 
 
-def _close_immediately(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-) -> None:
+def _close_immediately(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     """Accept-and-drop callback for tests that only need a bound endpoint.
 
     Not a no-op: ``probe_live`` really connects, and since Python 3.12
@@ -291,12 +327,12 @@ async def test_serve_and_connect_round_trip_preserves_newline_framing(
         try:
             writer.write(b'{"id":1}\n{"id":2}\n')
             await writer.drain()
-            assert await asyncio.wait_for(reader.readuntil(b"\n"), timeout=5) == (
+            assert await finished(reader.readuntil(b"\n"), "reader.readuntil", timeout=5) == (
                 b'{"type":"pong"}\n'
             )
         finally:
             writer.close()
-        await asyncio.wait_for(done.wait(), timeout=5)
+        await await_until(done, timeout=5)
     finally:
         server.close()
         await server.wait_closed()
@@ -412,8 +448,12 @@ def test_teardown_unlinks_on_posix_and_not_on_windows(
     assert not sock.exists()
 
 
-def test_teardown_tolerates_a_missing_endpoint(tmp_path: Path) -> None:
-    transport.teardown(tmp_path / "never-existed.sock")
+def test_teardown_tolerates_a_missing_endpoint(tmp_path: Path, caplog) -> None:
+    with caplog.at_level("WARNING"):
+        transport.teardown(tmp_path / "never-existed.sock")
+    # A missing file is the clean case, not the "could not unlink" warning.
+    assert "could not unlink" not in caplog.text
+    assert list(tmp_path.iterdir()) == []
 
 
 # --- TransportServer wrapper -------------------------------------------------
@@ -501,9 +541,7 @@ def test_asyncio_pipe_server_still_exposes_the_seams_we_wrap() -> None:
     # _server_pipe_handle(True) immediately, so an address without the
     # \\.\pipe\ prefix makes CreateNamedPipe fail and the constructor raise
     # before the attribute can be inspected.
-    server = windows_events.PipeServer(
-        transport._PIPE_NAME_PREFIX + f"seamprobe-{os.getpid()}"
-    )
+    server = windows_events.PipeServer(transport._PIPE_NAME_PREFIX + f"seamprobe-{os.getpid()}")
     try:
         assert hasattr(server, "_free_instances")
     finally:
@@ -785,7 +823,7 @@ async def test_wait_closed_returns_once_connections_are_cancelled(
 
     server = await transport.serve(sock, on_connect, limit=1 << 16)
     reader, writer = await transport.connect(sock)
-    await asyncio.wait_for(started.wait(), timeout=5)
+    await await_until(started, timeout=5)
 
     server.close()
     # Awaiting here first is the bug: prove it would block. CPython 3.12.0 made
@@ -800,7 +838,7 @@ async def test_wait_closed_returns_once_connections_are_cancelled(
     writer.close()
     # With the connections gone it returns promptly, which is why the daemon
     # drains and cancels before awaiting.
-    await asyncio.wait_for(server.wait_closed(), timeout=5)
+    await finished(server.wait_closed(), "server.wait_closed", timeout=5)
 
 
 def test_invalid_handle_constant_is_the_unsigned_pointer_form() -> None:
@@ -1050,9 +1088,7 @@ async def test_manager_offloads_prepare_dir_from_the_event_loop(
     # False return.
     monkeypatch.setattr(manager, "_ping_once", AsyncMock(return_value=False))
     monkeypatch.setattr(manager, "_clear_stale_socket", AsyncMock(return_value=None))
-    monkeypatch.setattr(
-        manager, "_spawn_once", AsyncMock(side_effect=RuntimeError("stop here"))
-    )
+    monkeypatch.setattr(manager, "_spawn_once", AsyncMock(side_effect=RuntimeError("stop here")))
 
     assert await manager._start_locked() is False
     assert probe.calls == 1
@@ -1077,7 +1113,8 @@ async def test_gatewayd_offloads_prepare_dir_from_the_event_loop(
     monkeypatch.setattr(gw, "warm_code_fingerprint", AsyncMock(return_value="fp-test"))
     # Lose the singleton election immediately after prepare_dir so the daemon
     # returns without binding anything.
-    monkeypatch.setattr(gw.transport, "acquire_singleton_lock", lambda _p: None)
+    lock_probe = _LoopProbe()
+    monkeypatch.setattr(gw.transport, "acquire_singleton_lock", lock_probe)
 
     await gw.run_gatewayd(
         socket_path=tmp_path / "gateway.sock",
@@ -1088,6 +1125,8 @@ async def test_gatewayd_offloads_prepare_dir_from_the_event_loop(
 
     assert probe.calls == 1
     assert probe.on_event_loop is False, "prepare_dir ran inline on the daemon loop"
+    assert lock_probe.calls == 1
+    assert lock_probe.on_event_loop is False, "singleton lock ran inline on the daemon loop"
 
 
 # --- connect() honours the server principal verdict ---------------------------
@@ -1127,15 +1166,11 @@ def _install_fake_windows_connect(monkeypatch: pytest.MonkeyPatch) -> _FakeTrans
     """
     transport_obj = _FakeTransport()
 
-    async def _fake_create_pipe_connection(
-        protocol_factory: Any, _address: str
-    ) -> tuple[Any, Any]:
+    async def _fake_create_pipe_connection(protocol_factory: Any, _address: str) -> tuple[Any, Any]:
         return transport_obj, protocol_factory()
 
     loop = asyncio.get_running_loop()
-    monkeypatch.setattr(
-        loop, "create_pipe_connection", _fake_create_pipe_connection, raising=False
-    )
+    monkeypatch.setattr(loop, "create_pipe_connection", _fake_create_pipe_connection, raising=False)
     monkeypatch.setattr(pc, "IS_WINDOWS", True)
     # The Windows-only import block binds these to None off Windows. Restore the
     # real ones -- asyncio.streams is cross-platform, and SetNamedPipeHandleState

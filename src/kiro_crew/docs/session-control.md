@@ -5,9 +5,10 @@ another one, change its model, reload its agent process, and take another one un
 the sidebar. The tools come from the
 `kirocrew-dashboard` MCP server, so an agent that does not mount that server
 never has them — exactly like any other MCP server. This page is the reference
-for all 36 of its tools, written for the agent that is about to use them.
+for all 37 of its tools, written for the agent that is about to use them.
 
-The server is defined in `src/kiro_crew/mcp_dashboard.py`. Two halves:
+The server is defined in `src/kiro_crew/mcp_dashboard.py` and its `mcp_dashboard_*`
+owner modules. Two halves:
 
 - **Session control** — `session_create`, `session_fork`, `session_send`,
   `session_read_message`, `session_summary`, `session_stop`, `session_end_wait`, `session_retry`,
@@ -18,7 +19,8 @@ The server is defined in `src/kiro_crew/mcp_dashboard.py`. Two halves:
   `chat_folder_move`, `chat_folder_update`, `chat_folder_move_session`, `chat_folder_delete`,
   `chat_folder_file_self`, `chat_tag_list`, `chat_tag_create`, `chat_tag_update`, `chat_tag_assign`,
   `chat_tag_column_list`, `chat_tag_column_create`, `chat_tag_column_move`,
-  `chat_session_pin`. These organize what the person sees in the sidebar.
+  `chat_session_pin`, `chat_session_pin_move`. These organize what the person
+  sees in the sidebar.
 
 Everything a created session does is visible: it appears in the user's sidebar
 like any other tab, they can read it, take it over, and close it. This is how
@@ -46,25 +48,28 @@ conductor: a session that can dispatch but cannot edit a file. Always pass
 | Argument | Required | Meaning |
 |---|---|---|
 | `title` | no | Short sidebar name. Say what the session is FOR. Follows `session_rename`'s character rules (`invalid_title`), then is cut to 200 characters; a title whose first 200 characters show nothing is refused |
-| `agent` | no (but always pass it) | Agent to bind the session to |
-| `agent_kind` | no | One value, `template`: run the shared template `agent` names on your own memory, even when a crewmate carries the same name. Omit for name-first resolution (a crewmate wins, with its own memory). Always pass it for `kirocrew-worker`, which needs no memory of its own. Requires `agent` (`agent_kind_requires_agent` otherwise); a kind that does not resolve is refused `agent_unresolved` rather than falling back to whoever answers by default |
+| `agent` | no (but always pass it) | Agent to bind the session to. In a crewmate's own chat it is not used: the session is always the crewmate's own worker, on the crewmate's memory and workspace with the worker's own tools plus whatever the crewmate's settings add. Naming another crewmate there is refused like any cross-workspace agent |
+| `agent_kind` | no | One value, `template`: run the shared template `agent` names on your own memory, even when a crewmate carries the same name. Omit for name-first resolution (a crewmate wins, with its own memory). A bare `kirocrew-worker` already means `template`, because that worker needs no memory of its own. Requires `agent` (`agent_kind_requires_agent` otherwise); a kind that does not resolve is refused `agent_unresolved` rather than falling back to whoever answers by default |
 | `folder` | no | Sidebar folder id or `/`-separated path to file it into, atomically with creation. Missing path segments are created (`mkdir -p`). The create is checked first, so a create that would be refused normally leaves no new empty folder behind (a race can still leave one) |
-| `model` | no | Model the session starts on, pinned as if the person picked it in the model dropdown (same guard; refused with `model_rejected` when the picker would refuse it). Omit to inherit, as below |
-| `reasoning_effort` | no | Reasoning effort the session starts at, one of the five standard levels: `low`, `medium`, `high`, `xhigh`, `max`. Any other value is refused with `effort_rejected` before anything is created. Omit to inherit, as below |
+| `model` | no | Model the session starts on, pinned as if the person picked it in the model dropdown (same guard; refused with `model_rejected` when the picker would refuse it). Omitted, it is filled as below |
+| `reasoning_effort` | no | Reasoning effort the session starts at, one of the five standard levels: `low`, `medium`, `high`, `xhigh`, `max`. Any other value is refused with `effort_rejected` before anything is created. Omitted, it is filled as below |
+| `autocompact_pct` | no | Context-usage percent (5 to 90) at which the NEW session auto-compacts, set as its own override as if the person set "Auto-compact at" in its context meter. Only the new session gets it; the global `session.autocompact_pct` and every other session are unchanged. The tool schema refuses an out-of-range value before any request reaches the dashboard. The reply is `Error: autocompact_pct: must be <= 90.0`, or `Error: autocompact_pct: must be >= 5.0` for a value below the range. Omit to follow the agent's own default, else the global value |
 
-An omitted `model` or `reasoning_effort` inherits from you when you are a
-crewmate: your profile's worker pair (`worker_model` / `worker_reasoning_effort`)
+An omitted `model` or `reasoning_effort` is filled from you when you are a
+mate: your profile's worker pair (`worker_model` / `worker_reasoning_effort`)
 when set, else your own model and effort, else the agent's or the global
-default. Your own effort carries over only while the child runs your own model:
-under a `worker_model` or a `model` you name, the only level it takes is
-`worker_reasoning_effort`. A caller that is not a crewmate (a template worker a
-crewmate dispatched is not one) gets the agent's or the global default. A child
-that is itself a crewmate (an `agent` naming one) runs its own profile and
-inherits nothing. A stale inherited model, one the picker would refuse or the
-worker's harness does not serve, is dropped rather than refused: the child
-starts on the default model. A model you name yourself is still refused with
-`model_rejected`. The reply names what came from your profile, and says so when
-the inherited model was dropped.
+default. A value from your profile is copied into the child when it is created
+and is the child's own pick from then on: a later change to your profile does
+not reach a child already open. Your own effort carries over only while the
+child runs your own model: under a `worker_model` or a `model` you name, the
+only level it takes is `worker_reasoning_effort`. A caller that is not a mate (a template worker a
+mate dispatched is not one) gets the agent's or the global default. A child
+that is itself a mate (an `agent` naming one) runs its own profile and
+inherits nothing. A stale model from your profile, one the picker would refuse
+or the worker's harness does not serve, is dropped rather than refused: the
+child starts on the default model. A model you name yourself is still refused
+with `model_rejected`. The reply names what was copied from your profile, and
+says so when that model was dropped.
 
 No argument is formally required. The new session **starts empty** — nothing runs
 in it until the person types, or until you send it a message. The reply carries
@@ -801,6 +806,27 @@ step that removes the folder, and refuses rather than unfiling anything. Empty
 the folder first with `chat_folder_move` and `chat_folder_move_session`. The
 dashboard refuses an app agent or a crew member outright.
 
+## Pinned order
+
+Pinned sessions sit at the top of their folder (or of the top level), in an
+order the person sets by dragging them. The gateway stores that order, so every
+browser and every agent sees the same one.
+
+| Tool | Arguments | What it does |
+|---|---|---|
+| `chat_session_pin_move` | `session` (required), `before`, `after` | Move a pinned session next to another pinned session in the same sidebar group |
+
+Pass exactly one of `before` / `after`, naming a pinned session in the same group.
+`chat_folder_tree` lists each group's pinned sessions first, in the order the
+sidebar draws them, so read it to pick the anchor. Pinned sessions the person
+never reordered follow in most-recent-activity order, and the first call
+stores that order for every one of them: the person's own sidebar sort lives in
+their browser, where the gateway cannot read it. The call only reorders: it
+does not pin, unpin, or move a session between folders. The order is the
+person's own preference, so an app agent, a crew member, or an agent in a
+session a channel can reach is refused; the person can still reorder from the
+browser even when that session has a channel link.
+
 ## Tags
 
 One shared vocabulary of labels. A **status tag** is what a Trello-style column
@@ -947,10 +973,11 @@ An agent in a **Persistent Agent Channel** (the multi-agent channel in
 `CHANNEL_AGENT_BLOCKED_TOOLS`.
 Reading a dashboard transcript would pull a private conversation into a channel
 other humans can see, and sending would run channel text as a turn inside it.
-`chat_session_pin` is blocked there too, because it rearranges the person's
-sidebar the same way `session_adopt` and `session_release` do. The tool also
-refuses a `channel:` caller itself, before listing any session, so an
-auto-approved call that never reaches the permission prompt is still refused.
+`chat_session_pin` and `chat_session_pin_move` are blocked there too, because
+they rearrange the person's sidebar the same way `session_adopt` and
+`session_release` do. Each tool also refuses a `channel:` caller itself,
+before listing any session, so an auto-approved call that never reaches the
+permission prompt is still refused.
 `chat_tag_column_create`, `chat_tag_column_move` and `session_move_to_column`
 are blocked and refused at dispatch in the same way, because they rearrange the
 person's board.

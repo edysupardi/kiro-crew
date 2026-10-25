@@ -354,7 +354,7 @@ def stat_writable_by_current_user(st: os.stat_result) -> bool:
     instead of about whatever the name resolves to a moment later.
 
     Callers refuse an agent-writable governance source with it
-    (``platform/policy_distribution.py``): a distribution source the account Kiro Crew
+    (``platform/policy_distribution_source.py``): a distribution source the account Kiro Crew
     runs as can rewrite is one an agent subprocess can rewrite, because it runs as the
     same uid.
 
@@ -504,7 +504,7 @@ def restrict_to_owner(path: str | os.PathLike) -> None:
     That decision is deliberately not a parameter here: by the time this function
     is reached the caller has already done whatever filesystem work it took to get
     here, so a refusal at this depth would come after the cost it was meant to
-    avoid. ``config/loader.py``'s ``write_config_atomically`` is the one such
+    avoid. ``config/loader_document.py``'s ``write_config_atomically`` is the one such
     caller today.
     """
     from kiro_crew.platform_compat import IS_POSIX

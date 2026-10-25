@@ -7,7 +7,7 @@
  * exercise the component's actual branching, not just bump statement counts.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { screen, waitFor, fireEvent } from '@testing-library/react'
+import { act, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import DesignTweak from '../apps/design-tweak/DesignTweakPage'
 import { renderWithProviders } from './helpers'
 import { i18nT } from '../i18n/t'
@@ -143,6 +143,17 @@ describe('DesignTweakPage — history, archive, states', () => {
     })
   }
 
+  /** The themed ConfirmDialog answers the delete ask: press its confirm button
+   *  (`yes`) or Cancel (`!yes`). */
+  const answerDeleteConfirm = async (yes: boolean) => {
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', {
+      name: yes
+        ? i18nT('apps.designTweak.requests.delete_request')
+        : i18nT('components.confirmDialog.cancel'),
+    }))
+  }
+
   beforeEach(() => {
     // `shouldAdvanceTime` is load-bearing, not a tuning knob. `timeAgo` needs a
     // frozen `now` to assert a stable label, but Testing Library's `waitFor`
@@ -153,8 +164,6 @@ describe('DesignTweakPage — history, archive, states', () => {
     vi.useFakeTimers({ now: FROZEN_NOW, shouldAdvanceTime: true })
     vi.clearAllMocks()
     mockNavigate.mockClear()
-    // Suppress window.confirm for delete tests
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
   })
 
   afterEach(() => {
@@ -388,15 +397,14 @@ describe('DesignTweakPage — history, archive, states', () => {
       i18nT('apps.designTweak.requests.delete_request'),
     )
     fireEvent.click(deleteItem)
+    await answerDeleteConfirm(true)
 
-    // window.confirm was mocked to return true
     await waitFor(() => {
       expect(mockedDeleteRequest).toHaveBeenCalledWith('req-1')
     })
   })
 
   it('does not delete when the user cancels the confirmation dialog', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false)
     setupHappyPath()
     renderWithProviders(<DesignTweak />)
 
@@ -415,9 +423,10 @@ describe('DesignTweakPage — history, archive, states', () => {
       i18nT('apps.designTweak.requests.delete_request'),
     )
     fireEvent.click(deleteItem)
+    await answerDeleteConfirm(false)
 
-    // Confirm was called but returned false — deleteRequest must NOT fire
-    expect(window.confirm).toHaveBeenCalled()
+    // Cancel resolves the ask with false — deleteRequest must NOT fire
+    await act(async () => {})
     expect(mockedDeleteRequest).not.toHaveBeenCalled()
   })
 
@@ -441,6 +450,7 @@ describe('DesignTweakPage — history, archive, states', () => {
       i18nT('apps.designTweak.requests.delete_request'),
     )
     fireEvent.click(deleteItem)
+    await answerDeleteConfirm(true)
 
     await waitFor(() => {
       expect(

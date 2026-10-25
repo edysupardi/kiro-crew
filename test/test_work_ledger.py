@@ -1421,9 +1421,17 @@ def test_is_stale_reads_an_extreme_naive_stamp_without_raising():
 #: for one int) belongs OUT of this set, mirroring the value instead.
 _PERMITTED_STORE_IMPORTERS = frozenset(
     {
-        # The four tools' HTTP routes, and the ONLY module that touches the store
-        # directly: identity comes from X-Session-Key, never from the body.
+        # The four tools' HTTP routes -- the facade and the owners their code lives
+        # in -- and the ONLY modules that touch the store directly: identity comes
+        # from X-Session-Key, never from the body.
         "dashboard/handlers/work_ledger.py",
+        "dashboard/handlers/work_ledger_caller.py",
+        "dashboard/handlers/work_ledger_conductor.py",
+        "dashboard/handlers/work_ledger_handback.py",
+        "dashboard/handlers/work_ledger_read.py",
+        "dashboard/handlers/work_ledger_recording.py",
+        "dashboard/handlers/work_ledger_refusals.py",
+        "dashboard/handlers/work_ledger_worker.py",
         # The operator-run cleanup sweep behind ``kirocrew ledger-sweep``.
         # It is a seam deliberately, and it does not weaken the rule the
         # allowlist exists for: it resolves NO caller identity — there is no
@@ -1464,6 +1472,17 @@ _PERMITTED_STORE_IMPORTERS = frozenset(
         # taken from the loop, not from a supplied key) and is read-only. This is
         # the single new store seam this PR adds.
         "probes/work_ledger.py",
+        # The undelivered-call watch. A dispatched worker whose ``work_report`` the
+        # harness never delivered (KAS answers a bare tool name with "not available"
+        # and never calls the server) has no route to the store at all: the call it
+        # meant to make is the one that failed. So the gateway, which sees that
+        # failure in the worker's own turn stream, records it. It resolves no
+        # supplied identity: the key is the one the turn consumer (dashboard turn,
+        # messaging driver) already authenticated for that turn, and the store
+        # writes only the derived undelivered-call record for an open item that
+        # key is bound to, never an item and never another session's. Reads nothing
+        # but the worker's own binding and item.
+        "undelivered_call_watch.py",
         # ``conductor_wake.py`` was listed here while it resolved a worker slot to its
         # conductor's binding for the close and turn-end triggers. Both triggers are
         # gone and the one that remains is a crew-log bus subscription whose event

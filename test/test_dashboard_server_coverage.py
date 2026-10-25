@@ -34,6 +34,8 @@ from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from conftest import make_dir_link, requires_symlinks
 from kiro_crew.dashboard import server as srv
 from kiro_crew.platform_compat import unlink_link_or_junction
+from kiro_crew.testing import wait
+from kiro_crew.testing.clock import ManualClock
 from kiro_crew.testing.wait import async_wait_until
 
 # ── helpers ─────────────────────────────────────────────────────────────
@@ -60,6 +62,34 @@ async def _sweep_once_released(path: Path, *, timeout: float | None = None) -> N
         off_loop=True,
         describe=lambda: f"{path} exists={path.exists()}",
     )
+
+
+@pytest.fixture
+def virtual_wait_clock(monkeypatch):
+    """Drive ``kiro_crew.testing.wait``'s deadline and evaluation bound in the test.
+
+    ``async_wait_until`` reaches its deadline through a :class:`ManualClock`, so a
+    timeout passes in virtual time at no wall-clock cost. Its per-evaluation bound,
+    which times each ``off_loop=True`` call against the real clock, is replaced with
+    one that awaits the evaluation to completion: the test's predicate is an instant
+    mock, so running it inline removes any dependence on how fast a worker thread
+    schedules. The verdict is then fixed by the mock, never by runner speed.
+    """
+    clock = ManualClock(monotonic_start=0.0)
+    real_asyncio_sleep = asyncio.sleep
+
+    async def virtual_asyncio_sleep(seconds: float) -> None:
+        clock.sleep(seconds)
+        await real_asyncio_sleep(0)
+
+    async def run_to_completion(awaitable, bound, predicate=None):
+        return await awaitable
+
+    monkeypatch.setattr(wait, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(wait, "_sleep", clock.sleep)
+    monkeypatch.setattr(wait, "_asyncio_sleep", virtual_asyncio_sleep)
+    monkeypatch.setattr(wait, "_bounded", run_to_completion)
+    return clock
 
 
 class _FakeInhibitor:
@@ -288,9 +318,15 @@ class TestWindowEntryHandler:
 
     @pytest.mark.asyncio
     async def test_sweep_fails_by_name_when_the_handle_is_never_released(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, virtual_wait_clock
     ) -> None:
-        """A handle that never closes is a leak: the sweep must not swallow it."""
+        """A handle that never closes is a leak: the sweep must not swallow it.
+
+        The wait's deadline runs on a manual clock and each evaluation runs inline,
+        so the only thing that decides the verdict is the always-raising ``rmtree``
+        mock: the sweep reaches the deadline and fails with its "still false"
+        message, chained to the ``PermissionError``, at no wall-clock cost.
+        """
         old = tmp_path / "old"
         old.mkdir()
 
@@ -348,11 +384,17 @@ class TestPrecomputeTelemetry:
         monkeypatch.setattr(
             hs, "_get_static_system_info", MagicMock(side_effect=RuntimeError("no os"))
         )
+        telemetry = MagicMock()
+        telemetry.record_event.side_effect = RuntimeError("sink down")
         monkeypatch.setattr(
-            srv, "current_context", MagicMock(side_effect=RuntimeError("no context"))
+            srv, "current_context", MagicMock(return_value=SimpleNamespace(telemetry=telemetry))
         )
 
         srv._precompute_telemetry(_state())  # must not raise
+
+        telemetry.record_event.assert_called_once_with(
+            "gateway_start", {"owner_id_hash": "unknown", "os_type": "", "arch": ""}
+        )
 
     def test_gateway_start_event_carries_the_precomputed_fields(
         self, monkeypatch
@@ -676,9 +718,19 @@ class TestPreventSleepShutdown:
     @pytest.mark.asyncio
     async def test_nothing_armed_is_a_clean_no_op(self) -> None:
         app = web.Application()
-        srv._register_prevent_sleep_shutdown(app, _state())
+        state = _state()
+        srv._register_prevent_sleep_shutdown(app, state)
+        ran: list[str] = []
 
-        await _run_cleanup(app)  # neither task nor inhibitor exists yet
+        async def _later_hook(_app: web.Application) -> None:
+            ran.append("later")
+
+        app.on_cleanup.append(_later_hook)
+
+        await _run_cleanup(app)
+
+        assert ran == ["later"]
+        assert vars(state) == {"_background_tasks": set()}
 
     @pytest.mark.asyncio
     async def test_cancels_the_poll_and_releases_the_os_block(self) -> None:
@@ -704,11 +756,19 @@ class TestPreventSleepShutdown:
         """``on_cleanup`` hooks run in sequence and a raise aborts the rest, so a
         stubborn OS inhibitor must never propagate."""
         app = web.Application()
-        srv._register_prevent_sleep_shutdown(
-            app, _state(_sleep_inhibitor=_FakeInhibitor(raise_on=False))
-        )
+        inhibitor = _FakeInhibitor(raise_on=False)
+        srv._register_prevent_sleep_shutdown(app, _state(_sleep_inhibitor=inhibitor))
+        ran: list[str] = []
+
+        async def _later_hook(_app: web.Application) -> None:
+            ran.append("later")
+
+        app.on_cleanup.append(_later_hook)
 
         await _run_cleanup(app)
+
+        assert inhibitor.states == [False]
+        assert ran == ["later"]
 
 
 # ── _arm_prevent_sleep_poll ─────────────────────────────────────────────

@@ -161,6 +161,47 @@ describe('CrewChatWindow', () => {
     await waitFor(() => expect(posted()).toContainEqual(['api/chat/slots/k1/stop', undefined]))
   })
 
+  // The header must never leak the internal slot key. An untitled session shows
+  // a localized label; once a title arrives it replaces the label. Reverting the
+  // `|| key` fallback fails the first assertion (the raw key would show instead).
+  it('shows a localized label, not the slot key, for an untitled session, and swaps in a title once it arrives', async () => {
+    slotRow = { key: 'k1', title: '', running: false, interrupted: false }
+    detail = { running: false, messages: [{ role: 'user', content: 'hi', ts: 't1' }] }
+    renderWindow()
+    // The header reads the untitled label, and the routing key never appears there.
+    expect(await screen.findByText('Untitled session', {}, PEER_ROW_WAIT)).toBeTruthy()
+    expect(screen.queryByText('k1')).toBeNull()
+    // Once resolved, the "On devbox" subtitle names the crew under the label.
+    expect(screen.getByText('On devbox')).toBeTruthy()
+    // A title arriving on the live slot feed replaces the label; routing is unchanged.
+    await waitFor(() => expect(FakeEventSource.all.length).toBeGreaterThan(0))
+    const es = FakeEventSource.all[0]
+    act(() => es.emit('slots', [{ ...slotRow, title: 'Named now' }]))
+    expect(await screen.findByText('Named now')).toBeTruthy()
+    expect(screen.queryByText('Untitled session')).toBeNull()
+  })
+
+  // When the slot/detail reads are gated off (version mismatch) they never
+  // resolve, so there is no title to trust. The header falls back to the crew's
+  // own name — never the raw key, and never a false "Untitled session" for what
+  // may be a titled session we simply could not read, and never a blank header.
+  it('falls back to the crew name, not the slot key, while a session title could not be read', async () => {
+    slotRow = { key: 'k1', title: '', running: false, interrupted: false }
+    detail = { running: false, messages: [] }
+    mocks.instancesCapabilities.mockResolvedValue({ version_match: false, version: '0.8.0', local_version: '0.9.0' })
+    renderWindow()
+    // The version-mismatch notice confirms the gated (unresolved) state is active.
+    await screen.findByText(/runs .* but this machine runs/, {}, PEER_ROW_WAIT)
+    // The header title span shows the crew name, not the label and not the key.
+    const titleEl = document.querySelector('span.font-semibold.min-w-0')
+    expect(titleEl?.textContent).toBe('devbox')
+    // The "On devbox" subtitle is dropped here: it would only repeat the title.
+    expect(screen.queryByText('On devbox')).toBeNull()
+    expect(screen.queryByText('Untitled session')).toBeNull()
+    expect(screen.queryByText('k1')).toBeNull()
+  })
+
+
   it('makes the covered local pane inert, so an unseen local approval is unreachable', async () => {
     const store = createTestStore({
       instances: { warm: { 'cd-1': { local_port: 1, token: 't' } } } as unknown as RootState['instances'],
@@ -748,12 +789,15 @@ describe('CrewChatWindow', () => {
     // through the store-free default instead of reading this hub's own state.
     const ids = createTranscriptRenderers({}).map(r => r.id)
     // A guide offer row reads the local guide store, which a peer's window has none of.
-    const decided = new Set([...PEER_SAFE_ROWS, 'workflow_run_tool', 'subagent_run_tool', 'file', 'conversation_card'])
+    // An elicitation card answers through THIS hub's slot route; the peer's ask lives
+    // on the peer, so the window leaves it to the SDK default, which draws it read-only.
+    const decided = new Set([...PEER_SAFE_ROWS, 'workflow_run_tool', 'subagent_run_tool', 'file', 'conversation_card', 'elicitation'])
     expect(ids.filter(id => !decided.has(id))).toEqual([])
     const crew = createCrewWindowRenderers({ instanceId: 'cd-1', key: 'k1', name: 'devbox', canRewind: () => false, onRewind: () => {}, rewindDisabled: false }).map(r => r.id)
     expect(crew).not.toContain('workflow_run_tool')
     expect(crew).not.toContain('subagent_run_tool')
     expect(crew).not.toContain('conversation_card')
+    expect(crew).not.toContain('elicitation')
   })
 
   it('draws a peer code fence copy-only, with no Run into this machine', async () => {

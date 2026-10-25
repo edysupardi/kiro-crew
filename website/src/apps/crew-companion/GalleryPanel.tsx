@@ -28,6 +28,7 @@ import { buildSpritePackData, firstFramePreview } from './petdexImport'
 import { ColorCustomizerPanel } from './ColorCustomizerPanel'
 import { GHOST_ACCESSORIES, type GhostAccessory } from './ghostAccessories'
 import { i18nT } from '../../i18n/t'
+import { useConfirm } from '../../components/ConfirmDialog'
 // The built-in ghost's body art. Bundled with the frontend and imported as a URL
 // by the bundler — the SAME asset PetAvatar renders — so the gallery card and the
 // live companion can never show a different ghost.
@@ -932,6 +933,7 @@ function DetailPanel({ detail, isActive, onClose, onApply, onExport, onEdit, onD
  * tools need.
  */
 export const GalleryPanel: React.FC = () => {
+  const { confirm, confirmDialog, confirmOpen } = useConfirm()
   const [packs, setPacks] = useState<PackMeta[]>([])
   const [activePackId, setActivePackId] = useState<string>('')
   const [selectedPackId, setSelectedPackId] = useState<string | null>(null)
@@ -1110,7 +1112,11 @@ export const GalleryPanel: React.FC = () => {
 
   const handleDelete = useCallback(async () => {
     if (!detail) return
-    if (!confirm(i18nT('apps.crewCompanion.gallery.deleteConfirm', { name: detail.meta.name }))) return
+    if (!(await confirm({
+      title: i18nT('apps.crewCompanion.gallery.deleteConfirm', { name: detail.meta.name }),
+      confirmLabel: i18nT('apps.crewCompanion.gallery.delete'),
+      danger: true,
+    }))) return
     try {
       const wasActive = detail.meta.id === activePackId
       if (wasActive) {
@@ -1138,7 +1144,7 @@ export const GalleryPanel: React.FC = () => {
     } catch (err) {
       setError(errorText(err) || i18nT('apps.crewCompanion.gallery.deleteFailed'))
     }
-  }, [detail, fetchPacks, activePackId])
+  }, [detail, fetchPacks, activePackId, confirm])
 
   const handleCreateNew = useCallback(() => {
     setEditingPack(undefined)
@@ -1191,11 +1197,12 @@ export const GalleryPanel: React.FC = () => {
   // affordance the panel provides.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') api?.closeGallery?.()
+      // While the delete confirm is open, its Escape cancels the dialog only.
+      if (e.key === 'Escape' && !confirmOpen) api?.closeGallery?.()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [confirmOpen])
 
   useEffect(() => {
     if (!showImport) return
@@ -1387,6 +1394,7 @@ export const GalleryPanel: React.FC = () => {
           lang={lang}
         />
       )}
+      {confirmDialog}
     </div>
   )
 }

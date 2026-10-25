@@ -19,12 +19,12 @@ import { i18nT } from '../i18n/t'
  * which the page owns.
  *
  * Session lifecycle (binding resolution, create, archive) lives in
- * ArtifactDetailPage; this component activates whatever bound slot it is handed
+ * useArtifactDetailPageCompanion.ts (the open path in ArtifactDetailPage.tsx); this component activates whatever bound slot it is handed
  * via the global active-session pointer. That global switch is deliberate: the
  * companion session IS your active session while you work on the artifact, so
  * /chat lands on it afterwards.
  *
- * Composer staging ("Ask agent to address") rides the existing `writePrefill`
+ * Composer staging ("Draft a prompt in chat") rides the existing `writePrefill`
  * sessionStorage channel that ChatPage already consumes when the slot
  * activates — no ChatPage fork needed.
  *

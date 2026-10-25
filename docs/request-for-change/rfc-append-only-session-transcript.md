@@ -34,7 +34,7 @@ numbers, because every line reference taken from a checkout 962 commits behind h
 moved.
 
 - **The hot path re-serializes the whole window to record a one-row state change.**
-  `src/kiro_crew/dashboard/chat_persistence.py::_save_slot_to_history` keeps a frozen
+  `src/kiro_crew/dashboard/chat_persistence_parts/save_transaction.py::_save_slot_to_history` keeps a frozen
   prefix of `slot._disk_older_count` lines verbatim and rewrites the in-memory window.
   The module says so itself, twice, in capitals — "re-serializes the WHOLE in-memory
   window on every flush" — and sets
@@ -48,7 +48,7 @@ moved.
   rewrite mode (`rewrite=True`, explicit `messages`, or `slot._pending_rewrite`)
   truncates the window tail, archiving the dropped lines through
   `transcript_merge.py::_archive_dropped_lines`. Archives are then hard-deleted by
-  `src/kiro_crew/history.py::_cleanup_old_archives` after
+  `src/kiro_crew/history_files.py::_cleanup_old_archives` after
   `session.archive_retention_days` (default 30), so a row can become silently
   unrecoverable after a month.
 - **Other rewriting paths, for completeness.** `history_rewrite.py::_maybe_rotate`
@@ -60,7 +60,7 @@ moved.
   orphan transcript and atomic-writes the result.
 - **Dead code advertises a capability nothing uses.** `history.py::rewrite_session`
   (implemented in `history_rewrite.py` with `_rewrite_session_locked`) and
-  `history.py::sliding_window` (implemented in `history_projection.py`) have no
+  `history.py::sliding_window` (implemented in `history_projection_reads.py`) have no
   production caller anywhere under `src/` — their call sites are tests
   (`test/test_ephemeral_sessions.py`, `test/test_archive_pagination.py`,
   `test/test_history.py` and other history suites), plus a docstring reference in
@@ -87,7 +87,7 @@ string**, built by `src/kiro_crew/context.py::ContextBuilder.build_message` (via
 native ACP session, reached through `session/load`. Kiro Crew's JSONL is a *parallel
 durable transcript*, injected back only at session start, replay, and provider switch.
 Compaction likewise happens inside the provider —
-`src/kiro_crew/session.py::check_context_usage` → `_compact_session` sends kiro-cli an
+`src/kiro_crew/session_parts/turn_context.py::check_context_usage` → `_compact_session` sends kiro-cli an
 in-place `/compact` and watches its status; it mutates no Kiro Crew record.
 
 Adopting DSH's derivation model would mean Kiro Crew holding the message array and
@@ -108,7 +108,7 @@ Instead of editing a row in place, append a revision that targets it:
 {"_type":"revision","target_ts":"<ts of the target row>","patch":{"cls":"…"},"ts":"…"}
 ```
 
-`target_ts` is the addressing key because `history.py::monotonic_transcript_ts`
+`target_ts` is the addressing key because `history_schema.py::monotonic_transcript_ts`
 already guarantees a strictly increasing `ts` per file, making it a stable identity
 that survives rotation bookkeeping better than a line index. The read path folds
 revisions over base rows in file order; the last revision for a target wins.
@@ -122,7 +122,7 @@ need no migration** and a new reader handles them unchanged.
 
 ### 3.2 What must not be lost
 
-`history.py::_redact_at_write_boundary` runs on the append path for non-user roles. It
+`history_append.py::_redact_at_write_boundary` runs on the append path for non-user roles. It
 is the most valuable property of this subsystem and precisely what DSH lacks — DSH's
 session-telemetry plugin ships zero record rules and its own README concedes records
 leave the process "including any credentials embedded in file contents or command
@@ -207,6 +207,6 @@ Measurable, and to be asserted in tests rather than claimed in prose:
    ~48 known session event types. Larger than the problem. Kiro Crew already has
    role-typed rows (`history_consolidation_skills.py::_TOOL_ROLES` covering `tool`/`tool_call`/`tool_result`,
    alongside `user`, `assistant`, `system`, `error`, `notice`, `inject`, `subagent`) plus
-   `dashboard/state.py::_TRANSIENT_ROLES` (imported by `chat_persistence.py`) that are
+   `dashboard/state_parts/transcript_rows.py::_TRANSIENT_ROLES` (imported by `chat_persistence.py`) that are
    never persisted. The gap is
    mutability, not vocabulary.

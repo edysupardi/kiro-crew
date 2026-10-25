@@ -36,7 +36,8 @@ from kiro_crew.acp.session_handle import (
 )
 from kiro_crew.acp.types import (
     ACP_BACKENDS_EFFORT_FROM_ADVERTISED_OPTION,
-    ACP_BACKENDS_KIRO_SLASH_COMMANDS,
+    ACP_BACKENDS_EFFORT_OVERLAY,
+    ACP_BACKENDS_KIRO_FAMILY,
     effort_config_option_id,
     effort_config_option_value,
 )
@@ -168,7 +169,7 @@ async def _bind_unbound_effort(self: AcpProvider) -> None:
 
         self._effort_per_model[model] = level
         if self._resolve_effort():
-            if stored != level and self._client.backend in ACP_BACKENDS_KIRO_SLASH_COMMANDS:
+            if stored != level and self._client.backend in ACP_BACKENDS_KIRO_FAMILY:
                 # change_effort stores the level itself once the overlay
                 # write and the live push have both landed, and rolls back
                 # to the entry it found when either fails. That entry must
@@ -400,11 +401,11 @@ async def _set_effort_config_option(self: AcpProvider, level: str) -> None:
 async def change_effort(self: AcpProvider, level: str) -> bool:
     """Change effort live for the current model. Returns True on success.
 
-    Persists the slot override and (kiro family) rewrites the overlay so a
-    later respawn keeps the level, then pushes the change to the running
-    session: the ``/effort`` slash command for
-    ``ACP_BACKENDS_KIRO_SLASH_COMMANDS``, ``session/set_config_option`` for
-    ``ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION``. Returns False when the current
+    Persists the slot override and (``ACP_BACKENDS_EFFORT_OVERLAY``) rewrites the
+    overlay so a later respawn keeps the level, then pushes the change to the running
+    session down the channel ``SessionCapabilities`` names: the ``/effort`` slash
+    command for ``ACP_BACKENDS_KIRO_SLASH_COMMANDS``, ``session/set_config_option``
+    for ``ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION``. Returns False when the current
     model does not support effort, or when this harness is in neither set and
     so has no effort channel at all.
     """
@@ -416,8 +417,8 @@ async def change_effort(self: AcpProvider, level: str) -> bool:
             model,
         )
         return False
-    # The capability answers, not raw set membership: KAS sits in both sets
-    # and the capability layer is where the config option wins for it.
+    # The capability answers, not raw set membership: the capability layer is the
+    # one place that names a harness's effort channel.
     via_config_option = self.capabilities.effort_via_config_option
     via_slash_command = self.capabilities.effort_via_slash_command
     if not (via_config_option or via_slash_command):
@@ -484,7 +485,7 @@ async def change_effort(self: AcpProvider, level: str) -> bool:
         # Roll back to the prior state before propagating to the caller.
         if _prev is None:
             self._effort_per_model.pop(model, None)
-            if self._client.backend in ACP_BACKENDS_KIRO_SLASH_COMMANDS:
+            if self._client.backend in ACP_BACKENDS_EFFORT_OVERLAY:
                 if not await asyncio.to_thread(
                     _clear_cli_overlay_effort, self._client._work_dir, model
                 ):
@@ -607,7 +608,7 @@ async def clear_effort(self: AcpProvider) -> bool | None:
     if not self.supports_effort():
         return False
     cleared = self._effort_per_model.pop(model, None)
-    if self._client.backend not in ACP_BACKENDS_KIRO_SLASH_COMMANDS:
+    if self._client.backend not in ACP_BACKENDS_KIRO_FAMILY:
         # No live "reset to default" — caller must reset the session. Scoped
         # by membership so a harness that reads neither the overlay nor the
         # slash command is not sent down the kiro path below, which would
@@ -617,7 +618,8 @@ async def clear_effort(self: AcpProvider) -> bool | None:
             POLICY_ID_BY_BACKEND.get(self._client.backend, self._client.backend),
         )
         return False
-    # kiro family: clear/rewrite the overlay so a respawn doesn't re-apply it.
+    # kiro family: push a workspace default live, else clear the overlay for
+    # the harness that reads it and ask for a reset.
     level = self._resolve_effort()  # workspace default, or None
     if level:
         # Persist before pushing live, as change_effort does: the FILE is what
@@ -645,8 +647,11 @@ async def clear_effort(self: AcpProvider) -> bool | None:
         logger.info("ACP effort cleared to workspace default %s (kiro)", level)
         return True
     # No default to push live — clear the overlay and let the caller reset
-    # so kiro respawns at the model's built-in default.
-    if not await asyncio.to_thread(_clear_cli_overlay_effort, self._client._work_dir, model):
+    # so kiro respawns at the model's built-in default. A harness that never
+    # reads the file has no entry of its own there, and its cold start reads none.
+    if self._client.backend in ACP_BACKENDS_EFFORT_OVERLAY and not await asyncio.to_thread(
+        _clear_cli_overlay_effort, self._client._work_dir, model
+    ):
         # NOTHING changed: not the file, and not this map once the entry
         # goes back. Neither bool can say that -- False resets (and the reset
         # re-reads the same level), True reports a live update, and BOTH make

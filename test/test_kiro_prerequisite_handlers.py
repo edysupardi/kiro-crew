@@ -2,13 +2,14 @@
 
 The status, update and repair routes and who may read what, and the contract that Kiro
 Crew detects Kiro CLI but never installs it or signs in for the user (including the
-read-only-probe tripwire over ``kiro_prerequisite.py``'s source).
+read-only-probe tripwire over the source of ``kiro_prerequisite.py`` and its owners).
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
+import importlib
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,7 @@ from kiro_crew.kiro_prerequisite import (
     ProcessResult,
     _run_process,
 )
+from kiro_crew.testing.wait import await_until, finished
 
 
 class TestKiroPrerequisiteHandlers:
@@ -691,6 +693,8 @@ class TestKiroPrerequisiteHandlers:
             # because the hazard the comment above names is not hypothetical -- this
             # branch is hand-built, so the key has to be added by hand with it.
             assert body["probe_timed_out"] is False
+            # Whether the host has unzip is host state too, redacted the same way.
+            assert body["unzip_missing"] is False
             # The pre-upgrade-tab shim is served to every caller, so the payload
             # shape does not vary by who asks.
             assert body["operation"]["status"] == "idle"
@@ -704,6 +708,43 @@ class TestKiroPrerequisiteHandlers:
             ):
                 response = await getattr(client, method)(path)
                 assert response.status == 403
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("owner_id", "expect_hints"),
+        [("test-user", True), ("configured-owner", False)],
+        ids=["owner", "non-owner"],
+    )
+    async def test_config_set_hints_reach_only_the_owner(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        owner_id: str,
+        expect_hints: bool,
+    ) -> None:
+        from kiro_crew import kiro_prerequisite_service as service_module
+        from kiro_crew.kiro_prerequisite_status import config_set_hints_for_launcher
+
+        hints = config_set_hints_for_launcher(r"C:\Kiro Crew\bin\kirocrew.cmd", "win32")
+        monkeypatch.setattr(service_module, "_resolve_config_set_hints", lambda: hints)
+        service = KiroPrerequisiteService(
+            platform_name="linux",
+            environ={"HOME": str(tmp_path), "PATH": ""},
+            home=tmp_path,
+            audit_writer=_no_audit,
+            assume_ready=True,
+        )
+        app = self._app(service, app_claim="", user="test-user", owner_id=owner_id)
+
+        async with TestClient(TestServer(app)) as client:
+            response = await client.get("/api/kiro-prerequisite")
+            assert response.status == 200
+            body = await response.json()
+
+        if expect_hints:
+            assert body["config_set_hints"] == hints
+        else:
+            assert "config_set_hints" not in body
 
     @pytest.mark.asyncio
     async def test_probe_failure_backstop_preserves_returning_user_state(
@@ -907,16 +948,16 @@ class TestKiroCrewNeverSetsUpKiroCli:
         clock["now"] += prerequisite_module._FORCED_PROBE_FLOOR_SECS + 1
         slow["active"] = True
         in_flight = asyncio.create_task(service.snapshot(force=True, coalesce=True))
-        await asyncio.wait_for(probe_entered.wait(), timeout=2)
+        await await_until(probe_entered, what="the slow probe entering whoami")
 
         # Machine polls answer promptly from the latch, spawning nothing.
         spawns_before = len(calls)
-        polled = await asyncio.wait_for(service.snapshot(force=True, coalesce=True), timeout=1)
+        polled = await finished(service.snapshot(force=True, coalesce=True), "the latched poll")
         assert polled["ready"] is True
         assert len(calls) == spawns_before
 
         release_probe.set()
-        await asyncio.wait_for(in_flight, timeout=2)
+        await await_until(in_flight, what="the released probe finishing")
 
     @pytest.mark.asyncio
     async def test_auto_poll_is_coalesced_but_check_again_always_probes(
@@ -1054,7 +1095,14 @@ class TestKiroCrewNeverSetsUpKiroCli:
     def test_every_spawn_is_a_read_only_probe(self) -> None:
         # Only --version and whoami remain, so no spawn can mutate the user's
         # machine or write a credential.
-        source = Path(prerequisite_module.__file__).read_text(encoding="utf-8")
+        # The facade composes its owners, so its code is the facade's text plus theirs.
+        source = "\n".join(
+            Path(module.__file__).read_text(encoding="utf-8")
+            for module in (
+                prerequisite_module,
+                *map(importlib.import_module, prerequisite_module._OWNERS),
+            )
+        )
         assert '"--version"' in source
         assert '"whoami"' in source
         # Matched as a STANDALONE QUOTED TOKEN, the shape a flag has when it is an

@@ -45,10 +45,10 @@ in the **same commit** when you change what it documents.
 | `acp/`, kiro-cli transport, providers | [acp-client](docs/system-specs/modules/acp-client.md) + [providers](docs/system-specs/modules/providers.md) |
 | picking or defaulting a model anywhere | [model-selection](docs/system-specs/common/model-selection.md) + [model-fallback](docs/system-specs/modules/model-fallback.md) |
 | adding or adapting an agent harness (BYO, KAS, claude) | [harness-parity](docs/system-specs/modules/harness-parity.md) (invariants) + [harness-parity-gate](docs/ci/harness-parity-gate.md) (CI) |
-| an agent spec: `agent_discovery.py`, `agent_spec_format.py`, `agent.py`'s spec writers and `agent_materialization/`, `acp/kas_agents.py`, or any field a spec carries | [agent-spec-fields](src/kiro_crew/docs/agent-spec-fields.md) (what each field does, per backend) + [agent-host-contract](docs/system-specs/modules/agent-host-contract.md) (the per-harness table) |
+| an agent spec: `agent_discovery.py` and its `agent_discovery_parts/` owners, `agent_spec_format.py`, `agent.py`'s spec writers, its `agent_parts/` owners and `agent_materialization/`, `acp/kas_agents.py`, or any field a spec carries | [agent-spec-fields](src/kiro_crew/docs/agent-spec-fields.md) (what each field does, per backend) + [agent-host-contract](docs/system-specs/modules/agent-host-contract.md) (the per-harness table) |
 | the publicly selectable Claude backend | [claude-code-provider](docs/system-specs/modules/claude-code-provider.md) |
 | sessions, slots, session keys, PIDs | [session](docs/system-specs/modules/session.md) + [history](docs/system-specs/modules/history.md) |
-| killing a runtime, leases and tenancies, sweeps and reapers, `runtime_ownership.py`, `runtime_reconcile.py`, `session_pid.py`'s kill paths | [runtime-ownership](docs/system-specs/modules/runtime-ownership.md) |
+| killing a runtime, leases and tenancies, sweeps and reapers, `runtime_ownership.py`, `runtime_reconcile.py`, the kill paths of `session_pid.py` and its `session_pid_*.py` owners | [runtime-ownership](docs/system-specs/modules/runtime-ownership.md) |
 | session summaries, the chat summary panel, intent extraction | [session-summary](docs/system-specs/modules/session-summary.md) |
 | memory, embeddings, vectors, lessons, skills, hooks | [memory-skills-hooks](docs/system-specs/modules/memory-skills-hooks.md) |
 | `context.py`, `context_blocks.py`, `context_assembly/`, what reaches the model's context | [context-management](docs/architecture/context-management.md) + [memory-skills-hooks: Context Builder](docs/system-specs/modules/memory-skills-hooks.md#context-builder-contextpy) (module ownership) |
@@ -70,7 +70,7 @@ in the **same commit** when you change what it documents.
 | tests: flakes, hangs, speed, memory, fixtures, sharding, side effects, host state (`~/.kiro`, `Path.home()`, the systemd user manager), conftest isolation, `monkeypatch.undo()`, env-var leaks, host-dependent tests (Windows, Python 3.13, per-user tools, version-manager shims), spawning a real child or reaping one, `.worktrees/` in a repo-wide scan, what `TMPDIR` must not be, what a worker costs, collection-time probes that build a singleton, a `MagicMock` the code converts with `int()`, sizing a ReDoS / complexity guard, clocks and time, sleeps, ordering and timestamp ties, ports, timezone and locale, randomness, repeat and shuffle proof, a flaky CI red | [testing-conventions](docs/system-specs/common/testing-conventions.md) + the [writing-tests](src/kiro_crew/builtin_skills/kirocrew-dev/writing-tests/SKILL.md) skill; frontend and Electron tests: [website/docs/testing.md](website/docs/testing.md) |
 | browser E2E | [e2e-gate](docs/ci/e2e-gate.md) |
 | proving a worktree change against an isolated running gateway | [worktree-verification-recipes](docs/guides/worktree-verification-recipes.md) |
-| CI, PR flow, review gates, commit messages | [ci-and-reviews](docs/ci/ci-and-reviews.md) + [CONTRIBUTING.md](CONTRIBUTING.md) |
+| CI, PR flow, review gates (a lane says PASS or BLOCK, with a Trigger and an Outcome), commit messages | [ci-and-reviews](docs/ci/ci-and-reviews.md) + [CONTRIBUTING.md](CONTRIBUTING.md) |
 | a PR that hides, deletes, tightens or migrates something (the `Reader:` list) | [take-away-changes](docs/system-specs/common/take-away-changes.md) |
 | constants, comments, lint, code style, the brand name | [code-style](docs/system-specs/common/code-style.md) |
 | connections, connectors, an external account link | [connections](docs/system-specs/modules/connections.md) |
@@ -179,8 +179,8 @@ Detail and rationale: [security](docs/system-specs/modules/security.md),
 fallback fails at runtime for anyone not entitled to it, silently until the first
 prompt. The default is `"auto"`; resolve a substitute choice through
 `acp.client.resolve_usable_model`; pin a cheaper model for the worker roles only
-via `agent.role_models.<role>` (and, for one crewmate's dispatched sessions, via
-that crewmate's `worker_model`). `code-review.yml` fails on a newly added hardcoded
+via `agent.role_models.<role>` (and, for one mate's dispatched sessions, via
+that mate's `worker_model`). `code-review.yml` fails on a newly added hardcoded
 literal. Rules and the one exception:
 [model-selection](docs/system-specs/common/model-selection.md).
 
@@ -253,6 +253,16 @@ goal. A defect in code this PR adds or changes is always in scope and gets fixed
 PR does not need. Edit them only when a human explicitly asks, and say why in a PR
 comment.
 
+### A review finding is a class, not a line
+
+Before you edit for a review finding, name the class it belongs to and list every
+site of it. Fix or test all of them in the same push. When the same finding comes
+back a second time, change the approach instead of patching a third spelling:
+remove the second writer, narrow the scope, or defer it with an issue and a
+pinning test. On the fifth fix only narrowing or deferral remain. Keep going; no
+one needs to approve that. Details:
+[kirocrew-prepare-pr](src/kiro_crew/builtin_skills/kirocrew-dev/kirocrew-prepare-pr/SKILL.md).
+
 ## CHANGELOG.md
 
 - **Your feature PR does not touch `CHANGELOG.md`.** The release PR writes the
@@ -286,6 +296,10 @@ bounded worker count; the full suite is CI's job and never runs locally unless a
 human passes `--full`. See
 [kirocrew-prepare-pr](src/kiro_crew/builtin_skills/kirocrew-dev/kirocrew-prepare-pr/references/gate-floor.md).
 
+To run the cheap CI gates in one go and record that you did, use the optional
+[pre-push gate](src/kiro_crew/builtin_skills/kirocrew-dev/kirocrew-prepare-pr/references/pre-push-gate.md).
+It is advisory: nothing refuses a push without it.
+
 - **On macOS, run `mypy --platform linux src/kiro_crew`.** Without it a local run
   reports errors you did not cause and MISSES the Linux-only errors CI fails on, so
   a clean local run is a false green.
@@ -297,12 +311,15 @@ human passes `--full`. See
   --max-worker-restart=2`; a bare override silently drops `--dist loadgroup` and
   scatters `@pytest.mark.xdist_group` tests into flaky races.
 
-**No hand-written file over 2,000 lines; put new code in a new module.** When a
-file nears the cap, move whole definitions into a sibling module and keep the
+**No hand-written file over 2,000 lines; put new code in a new module.** A new
+responsibility gets a new module, never a new section in a large file, and a change
+that takes a code file past 1,600 lines splits it in the same PR or in one before it.
+Split by responsibility, moving whole definitions into a sibling module, and keep the
 original path as the import path callers use. `scripts/check_file_line_cap.py`
-enforces it in CI's lint jobs; run it before you push. The files already over are
-listed in `.github/file-line-cap-baseline.txt`, which only shrinks, so never add a
-row. Details: [code-style](docs/system-specs/common/code-style.md).
+enforces the cap in CI's lint jobs; run it before you push. The files already over
+are listed in `.github/file-line-cap-baseline.txt`, which only shrinks, so never add
+a row. How to split without losing a patch seam:
+[code-style § Splitting a file](docs/system-specs/common/code-style.md#splitting-a-file).
 
 Gates, the seven flake classes, the conftest isolation floor and the traps that are
 invisible when reading a test: [code-style](docs/system-specs/common/code-style.md) +
@@ -320,8 +337,9 @@ job's `semgrep/test-determinism.yaml` refuses the commonest on a new line, and
 `test/test_flake_pattern_ratchet.py` counts per file the clock, wait, port, environment
 and module-cache shapes those patterns miss, failing a change that adds one to a file
 (measured against its merge-base; a deliberate one carries `# flake-ok: <reason>`).
-It is a local, pre-push gate (why: testing-conventions.md "Determinism contract"):
-run `python -m pytest -n0 test/test_flake_pattern_ratchet.py` before pushing.
+Fast Gate's `flake-pattern-ratchet` job runs it on every pull request and fails when it
+compares nothing (why: testing-conventions.md "Determinism contract"); run
+`python -m pytest -n0 test/test_flake_pattern_ratchet.py` before pushing to see it first.
 Contract:
 [testing-conventions § Determinism contract](docs/system-specs/common/testing-conventions.md#determinism-contract-read-this-first).
 

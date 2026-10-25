@@ -16,6 +16,7 @@ import {
 } from '../lib/sessionTabs'
 import { offlineProps } from '../utils/offline'
 import { i18nT } from '../i18n/t'
+import { isUntitledSession, sessionDisplayTitle } from '../utils/sessionDisplayTitle'
 
 /**
  * Status → catalog key. A STATIC table, not a computed `status_${s}` key: the
@@ -229,7 +230,10 @@ export default function SessionTabStrip({ tabs, activeKey, cue, connected = true
       >
         {tabs.map(key => {
           const slot = slots.find(s => s.key === key)
-          const title = slot?.title || key
+          // An untitled tab reads "Untitled session", never its key; the key
+          // stays in the hover title, where it tells untitled tabs apart.
+          const title = sessionDisplayTitle({ key, title: slot?.title })
+          const hoverTitle = isUntitledSession({ key, title: slot?.title }) ? `${title} · ${key}` : title
           const active = key === activeKey
           const status = tabStatus(slot, unreadSlots, key)
           // The dot is decorative (aria-hidden) and colour is its only channel,
@@ -243,6 +247,9 @@ export default function SessionTabStrip({ tabs, activeKey, cue, connected = true
           const accessibleName = statusWord
             ? i18nT('components.sessionTabStrip.tab_name_with_status', { name: title, status: statusWord })
             : title
+          const tooltip = statusWord
+            ? i18nT('components.sessionTabStrip.tab_name_with_status', { name: hoverTitle, status: statusWord })
+            : hoverTitle
           return (
             <div
               key={key}
@@ -255,19 +262,26 @@ export default function SessionTabStrip({ tabs, activeKey, cue, connected = true
               aria-label={accessibleName}
               data-testid={`session-tab-${key}`}
               data-cued={flash?.key === key ? 'true' : undefined}
-              title={accessibleName}
+              title={tooltip}
               // Offline, activating a tab is withheld because the switch would
               // clear the transcript — so the tab says so instead of swallowing
               // the click. Spread AFTER the online title/aria-label, per this
               // helper's own contract: last prop wins, so spreading it first
               // would leave the refused click showing only the session name and
               // no reason. Closing still works: it is local.
-              {...offlineProps(connected, i18nT('utils.offline.switch_sessions'), accessibleName)}
+              {...offlineProps(connected, i18nT('utils.offline.switch_sessions'), tooltip)}
               onClick={() => onSelect(key)}
               // Middle-click closes, the other half of the convention this PR
               // already imports for OPENING on a sidebar row. A user who learned
               // the open gesture will try it here, and getting nothing reads as
               // the strip being broken rather than the gesture being unbound.
+              // Chromium on Windows enters middle-click autoscroll on the
+              // middle-button MOUSEDOWN when the target sits in a scroll
+              // container (this strip is overflow-x-auto), and then `auxclick`
+              // never fires, so the close below never runs. Cancelling the
+              // mousedown is the only place that stops it, the same guard the
+              // sidebar rows carry.
+              onMouseDownCapture={e => { if (e.button === 1) e.preventDefault() }}
               onAuxClick={e => {
                 if (e.button !== 1) return
                 e.preventDefault()

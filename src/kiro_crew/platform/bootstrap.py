@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Sequence
 
 from kiro_crew.platform.context import (
     CONTRACT_VERSION,
@@ -35,6 +35,7 @@ from kiro_crew.platform.defaults import (
     DefaultDeniedRuleProvider,
     DefaultEmbeddingSource,
     DefaultExternalAccessPolicy,
+    DefaultFeedbackTrackerProvider,
     DefaultGatewayLifecycleProvider,
     DefaultIdentityProvider,
     DefaultImportSourceProvider,
@@ -51,6 +52,7 @@ from kiro_crew.platform.defaults import (
     DefaultSandboxPolicy,
     DefaultSkillDiscoveryProvider,
     DefaultSlackEnterpriseGate,
+    DefaultSpeechProviderRegistry,
     DefaultTelemetryProvider,
     DefaultTipsProvider,
     DefaultTunnelProvider,
@@ -66,6 +68,7 @@ from kiro_crew.platform.security_authority import PolicyAuthority, assert_securi
 
 if TYPE_CHECKING:
     from kiro_crew.config.loader import KiroCrewConfig
+    from kiro_crew.platform.interfaces import TelemetryProvider
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +106,65 @@ def boot_platform(cfg: "KiroCrewConfig") -> PlatformContext:
         ctx = bootstrap_context(cfg)
         _BOOTED = True
         return ctx
+
+
+def compose_telemetry_provider(cfg: "KiroCrewConfig") -> "TelemetryProvider":
+    """Compose ONLY the edition's telemetry provider, installing no context.
+
+    For a Kiro Crew process that deliberately does not boot the platform -- the
+    MCP gateway daemon -- but must still send its metrics where the edition's
+    collector is. Without it such a process resolves OTLP destinations through
+    ``current_context()``, which on a non-standalone profile raises
+    ``PlatformCompositionError`` (nothing was installed), so its metrics stay in
+    the local sink and never reach the edition's collector.
+
+    Nothing is installed: ``set_context`` is not called, so every other
+    ``current_context()`` reader in the calling process keeps exactly the
+    behavior it had (fail-closed on a non-standalone profile). Discovery still
+    runs the fleet admission gate before any companion code loads, and the
+    contract version is checked, and the security floor is asserted exactly as
+    boot asserts it, so this accepts only a companion boot itself would accept
+    (the calling process does not use its security authority, but a companion
+    that fails the floor is refused here too rather than trusted for egress).
+
+    Raises ``PlatformCompositionError`` the same way boot does; the caller
+    decides what that means for it (the daemon degrades to local-only).
+    """
+    eps = plugin_entry_points()
+    profile = resolve_profile(cfg, entry_points=eps)
+    if profile == PROFILE_STANDALONE:
+        return DefaultTelemetryProvider()
+    companion = _checked_companion(profile, cfg, eps)
+    assert_security_floor(companion.security)
+    return companion.telemetry
+
+
+def _checked_companion(
+    profile: str, cfg: "KiroCrewConfig", eps: "Sequence[Any]"
+) -> PlatformContext:
+    """Discover the companion for a non-standalone *profile* and check its contract.
+
+    The one copy of these steps, shared by :func:`bootstrap_context` and
+    :func:`compose_telemetry_provider` so the two cannot drift. Discovery runs the
+    fleet admission gate before any companion code loads and builds the
+    companion's full context; it raises ``PlatformCompositionError`` fail-closed.
+    """
+    companion = discover_companion_context(
+        profile, cfg, entry_points=eps
+    )  # may raise (fail-closed)
+    if companion is None:
+        # Defense in depth: discovery is expected to raise rather than return
+        # None for a non-standalone profile.  If it ever returns None (e.g. a
+        # future "present but disabled" path), refuse to boot here too -- never
+        # silently install an edition-labeled context with open defaults and no
+        # security overlay.  The fail-closed guarantee must not depend solely
+        # on discovery's raising behavior.
+        raise PlatformCompositionError(
+            f"profile={profile!r} resolved no companion context; refusing to "
+            "boot with open-source defaults (fail-closed)."
+        )
+    _assert_contract(companion)
+    return companion
 
 
 def _reset_boot_state() -> None:
@@ -164,6 +226,8 @@ def build_default_context(
         jail=DefaultJailProvider(),
         mobile_connect=DefaultMobileConnectProvider(),
         remote_provisioners=DefaultRemoteProvisionerProvider(),
+        feedback=DefaultFeedbackTrackerProvider(),
+        speech=DefaultSpeechProviderRegistry(),
         feature_apps=(),
         governance=governance,
     )
@@ -175,6 +239,33 @@ def _assert_contract(ctx: PlatformContext) -> None:
         raise PlatformCompositionError(
             f"companion contract_version={ctx.contract_version} != core "
             f"CONTRACT_VERSION={CONTRACT_VERSION}; rebuild the companion against this core."
+        )
+
+
+def _refresh_stt_for_edition(cfg: "KiroCrewConfig") -> None:
+    """Re-resolve ``stt.provider`` once an edition's speech registry is installed.
+
+    The config every boot path is handed was loaded BEFORE any context existed,
+    so its ``stt.provider`` was resolved against the built-ins alone: a stored
+    registered name degraded to ``off`` and an absent key took ``local``. The
+    validated-config cache holds that same answer. Drop the cache and re-read the
+    section so this ``cfg`` and every later load see the edition's providers. A
+    no-op for the Default registry, so a standalone boot does nothing here.
+    Best-effort: a failure leaves the built-in answer, which is a working
+    (conservative) setting, rather than aborting boot.
+    """
+    from kiro_crew.speech_providers import edition_changes_stt
+
+    if not edition_changes_stt():
+        return
+    try:
+        from kiro_crew.config.loader import KiroCrewConfig, _invalidate_config_cache
+
+        _invalidate_config_cache()
+        cfg.stt = KiroCrewConfig.load().stt
+    except Exception:
+        logger.warning(
+            "re-resolving stt.provider for the edition failed; continuing", exc_info=True
         )
 
 
@@ -190,19 +281,7 @@ def bootstrap_context(cfg: "KiroCrewConfig") -> PlatformContext:
     ctx = build_default_context(cfg, profile=profile)
 
     if profile != PROFILE_STANDALONE:
-        companion = discover_companion_context(profile, cfg)  # may raise (fail-closed)
-        if companion is None:
-            # Defense in depth: discovery is expected to raise rather than return
-            # None for a non-standalone profile.  If it ever returns None (e.g. a
-            # future "present but disabled" path), refuse to boot here too — never
-            # silently install an amazon-labeled context with open defaults and no
-            # security overlay.  The fail-closed guarantee must not depend solely
-            # on discovery's raising behavior.
-            raise PlatformCompositionError(
-                f"profile={profile!r} resolved no companion context; refusing to "
-                "boot with open-source defaults (fail-closed)."
-            )
-        _assert_contract(companion)
+        companion = _checked_companion(profile, cfg, eps)
         assert_security_floor(companion.security)
         ctx = companion
         logger.info("Composed %r platform context from companion", profile)
@@ -230,7 +309,20 @@ def bootstrap_context(cfg: "KiroCrewConfig") -> PlatformContext:
 
     assert_profiles_within_ceiling(ctx.governance)
 
+    # Speech providers are ADD-only: a registered name that would shadow a
+    # built-in (or ``off``), a duplicate, or a default naming no provider aborts
+    # boot here, fail-closed, before anything can select it. The Default registry
+    # passes trivially.
+    from kiro_crew.speech_providers import validate_speech_registry
+
+    validate_speech_registry(ctx.speech)
+
     set_context(ctx)
+
+    from kiro_crew.config.sections_stt import warn_deferred_stt_providers
+
+    warn_deferred_stt_providers()
+    _refresh_stt_for_edition(cfg)
 
     # Register any edition-contributed ACP backends now that the context is
     # installed.  The Default ProviderRegistry.register_acp_backends() is a
@@ -298,8 +390,15 @@ KAS_CLI_FLOOR_NOTICE = (
     "Update kiro-cli and restart Kiro Crew to use KAS."
 )
 
+#: The same notice when KAS is only the default (no backend field that names KAS is
+#: stored): the user never chose KAS, so the notice must not say they did.
+KAS_CLI_FLOOR_DEFAULT_NOTICE = (
+    "KAS is the default backend, but {reason}. Kiro Crew is using kiro-cli instead. "
+    "Update kiro-cli and restart Kiro Crew to use KAS."
+)
 
-def apply_kas_cli_floor(cfg: "KiroCrewConfig") -> str | None:
+
+def apply_kas_cli_floor(cfg: "KiroCrewConfig", *, kas_defaulted: bool = False) -> str | None:
     """Fall back to kiro-cli when KAS is configured but this kiro-cli cannot serve it.
 
     The same ``acp --help`` probe ``kirocrew doctor`` reports from, turned into a
@@ -346,6 +445,7 @@ def apply_kas_cli_floor(cfg: "KiroCrewConfig") -> str | None:
         return None
     mark_backend_unservable(ACP_BACKEND_KAS, reason)
     agent.acp_backend = resolve_selected_backend(agent.acp_backend)
-    notice = KAS_CLI_FLOOR_NOTICE.format(reason=reason)
+    template = KAS_CLI_FLOOR_DEFAULT_NOTICE if kas_defaulted else KAS_CLI_FLOOR_NOTICE
+    notice = template.format(reason=reason)
     logger.warning(notice)
     return notice

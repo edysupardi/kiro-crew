@@ -23,6 +23,7 @@ from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 
+from kiro_crew.acp import session_provider_mcp_reinject as _sp_mcp_reinject
 from kiro_crew.acp.client import (
     DEFAULT_MODEL,
     AcpAuthRequired,
@@ -54,12 +55,14 @@ from kiro_crew.acp.types import (
     ACP_BACKENDS_HARNESS_MANAGED_COMPACTION as ACP_BACKENDS_HARNESS_MANAGED,
 )
 from kiro_crew.acp.types import (
+    ACP_BACKENDS_MATE_WORKER_KIT,
     ACP_BACKENDS_MEMBER_CAPABILITIES,
     ACP_BACKENDS_MEMBER_TOOL_LIMITS,
     ACP_BACKENDS_SESSION_EVICTION,
     STOP_REASON_END_TURN,
 )
 from kiro_crew.agent_sdk import host_auth
+from kiro_crew.agent_sdk.tool_gate import ADAPTER_EXPOSED_CREDENTIAL_LEAVES
 from kiro_crew.config.paths import kiro_sessions_dir
 from kiro_crew.constants import COMPACT_WAIT_TIMEOUT_SECS
 from kiro_crew.mcp_gateway.claim import schedule_claim
@@ -93,6 +96,16 @@ class AcpSessionProvider(LLMProvider):
     """
 
     approval_withdrawable = True
+
+    # Applying a dashboard MCP config change to this live session by re-sending
+    # its projection: ``kiro_crew.acp.session_provider_mcp_reinject``.
+    mark_mcp_config_changed = _sp_mcp_reinject.mark_mcp_config_changed
+    apply_pending_mcp_reinjection = _sp_mcp_reinject.apply_pending_mcp_reinjection
+
+    @property
+    def mcp_config_wire_reinject(self) -> bool:
+        """Whether this LIVE session takes a re-sent MCP projection (H6 opt-in)."""
+        return _sp_mcp_reinject.mcp_config_wire_reinject(self)
 
     def __init__(
         self,
@@ -136,6 +149,9 @@ class AcpSessionProvider(LLMProvider):
         # identity-less for the rest of its life.
         self._session_key: str = session_key
         self._channel_id: str | None = channel_id
+        # Set by a dashboard MCP write on a re-injecting host; applied at the
+        # next turn boundary (``apply_pending_mcp_reinjection``).
+        self._mcp_reinject_pending: bool = False
 
     # ── LLMProvider interface ──
 
@@ -435,6 +451,22 @@ class AcpSessionProvider(LLMProvider):
         if hasattr(self._handle, "child_fidelity_aware"):
             self._handle.child_fidelity_aware = value
 
+    @property
+    def accepts_elicitation(self) -> bool:
+        """See AcpSessionHandle.accepts_elicitation."""
+        return getattr(self._handle, "accepts_elicitation", False)
+
+    @accepts_elicitation.setter
+    def accepts_elicitation(self, value: bool) -> None:
+        if hasattr(self._handle, "accepts_elicitation"):
+            self._handle.accepts_elicitation = bool(value)
+
+    async def answer_elicitation(
+        self, request_id: str | int, action: str, content: dict[str, Any] | None = None
+    ) -> bool:
+        """Answer a pending MCP elicitation (see AcpSessionHandle.answer_elicitation)."""
+        return await self._guarded(self._handle.answer_elicitation(request_id, action, content))
+
     async def release_runtime_lease(self) -> None:
         """Give up this provider's lease on the runtime, if it holds one.
 
@@ -616,6 +648,15 @@ class AcpSessionProvider(LLMProvider):
         except Exception:
             logger.debug("stream: stub re-claim failed", exc_info=True)
         claim = self._claim_shared_turn()
+        # A pending MCP config change is applied HERE, under the claim and before
+        # the prompt, so the turn runs on the new set and no turn is cut by the
+        # close. Replaces ``self._handle`` on success; read it after this.
+        try:
+            await self.apply_pending_mcp_reinjection()
+        except BaseException:
+            # Outside the turn's own try below, so its claim is released here.
+            await self._end_shared_turn(claim)
+            raise
         send = self._handle.prompt
         if not allow_image:
             send = functools.partial(send, allow_image=False)
@@ -636,6 +677,15 @@ class AcpSessionProvider(LLMProvider):
                 raise AcpAuthRequired(
                     host_auth.signed_out_message(self.backend), backend=self.backend
                 ) from exc
+            # A masked codex can open its session and only fail the AWS
+            # credential load at the turn; name the mask the way the start
+            # paths do. One table read, so the kiro path compares and stops (H13).
+            # The error's own text only: the stderr tail spans every turn.
+            if self.backend in ADAPTER_EXPOSED_CREDENTIAL_LEAVES:
+                # Local import: acp_runtime_start imports this module.
+                from kiro_crew.providers.acp_runtime_start import _name_credential_mask
+
+                _name_credential_mask(self._runtime, exc, read_stderr=False)
             raise
         except AcpRuntimeDead as exc:
             # Translate the shared-runtime death into the exception types
@@ -652,6 +702,13 @@ class AcpSessionProvider(LLMProvider):
             raise AcpError(str(exc)) from exc
         finally:
             await self._end_shared_turn(claim)
+
+    async def discard_unanswered_prompt(self) -> bool:
+        """Forward to the session handle: rewind KAS history to before the last prompt."""
+        discard = getattr(self._handle, "discard_unanswered_prompt", None)
+        if discard is None:
+            return False
+        return await self._guarded(discard()) is True
 
     async def steer(self, message: str) -> bool:
         """Forward a mid-turn steer to the session handle (kiro _session/steer).
@@ -926,7 +983,7 @@ class AcpSessionProvider(LLMProvider):
 
     @property
     def member_capabilities_supported(self) -> bool:
-        """Full saved member-spec loading is opt-in (harness-parity H6)."""
+        """Saved member-spec loading or projection is opt-in (harness-parity H6)."""
         return self._runtime.acp_backend in ACP_BACKENDS_MEMBER_CAPABILITIES
 
     @property
@@ -935,15 +992,25 @@ class AcpSessionProvider(LLMProvider):
         return self._runtime.acp_backend in ACP_BACKENDS_MEMBER_TOOL_LIMITS
 
     @property
+    def mate_worker_kit_supported(self) -> bool:
+        """A crewmate worker's per-session kit is carried by opt-in (H6)."""
+        return self._runtime.acp_backend in ACP_BACKENDS_MATE_WORKER_KIT
+
+    @property
     def loaded_capability_template(self) -> str:
-        if (
-            self.member_capabilities_supported
-            and self._owns_runtime
-            and self._runtime.is_alive()
-            and self._handle.active_agent == self._runtime._agent
-        ):
-            return self._handle.active_agent
-        return ""
+        if not (self._owns_runtime and self._runtime.is_alive()):
+            return ""
+        from kiro_crew.acp.types import ACP_BACKEND_KAS  # noqa: PLC0415
+
+        if self._runtime.acp_backend in (ACP_BACKEND_KIRO, ACP_BACKEND_KAS):
+            if self._handle.active_agent == self._runtime._agent:
+                return self._handle.active_agent
+            return ""
+        return self._handle.confirmed_projection_template
+
+    @property
+    def capability_projection_gaps(self) -> tuple[str, ...]:
+        return self._handle.capability_projection_gaps
 
     @property
     def exit_code(self) -> int | None:
@@ -1001,6 +1068,9 @@ class AcpSessionProvider(LLMProvider):
         # session this runtime served BEFORE the handoff; leaking them lets
         # check_context_usage() compact the new, empty session.
         self._handle.last_prompt_stats.reset_context_state()
+        # Credits held between turns belong to the session served before the
+        # claim; the claiming session's first turn must not bill them.
+        self._handle._between_turn_credits = 0.0
         # Claim-push: re-target this session's MCP stub connections under the
         # shared runtime's PID to the claiming session (see AcpClient.rekey for
         # the rationale). Fire-and-forget; no-ops without a gateway socket.
@@ -1404,6 +1474,10 @@ class AcpSessionProvider(LLMProvider):
     def mcp_session_report(self) -> McpSessionReport:
         """This session's MCP registration report."""
         return self._handle.mcp_session_report()
+
+    async def wait_for_declared_mcp(self, timeout: float) -> tuple[str, ...]:
+        """Hold the first prompt until the spec's servers report (see the handle)."""
+        return await self._handle.wait_for_declared_mcp(timeout)
 
     def get_valid_effort_levels(self) -> list[str]:
         """Valid effort levels from config options."""

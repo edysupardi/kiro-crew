@@ -4,7 +4,7 @@ Building each row with ``{**dataclasses.asdict(agent_cfg)}`` would make its
 response contract "every field ``KiroCrewAgentConfig`` has, plus every field
 anyone adds later", automatically — a field added by someone who never looked
 at this endpoint would ship to the browser by omission. Both row sources use an
-explicit allowlist instead, mirroring the rule ``handlers/members.py`` already
+explicit allowlist instead, mirroring the rule ``handlers/members_roster.py`` already
 documents for ``GET /api/members``.
 
 These tests are the half that keeps it converted. The key set is pinned as a
@@ -83,6 +83,12 @@ WITHHELD_RECORD_FIELDS = frozenset(
         # read by `session_create`, which the crew editor never shows.
         "worker_model",
         "worker_reasoning_effort",
+        # The .crewmate provenance stamp (rfc-crewmate-share.md §5.4 step 5):
+        # written once by the import's create, rendered by nothing yet.
+        "imported",
+        # Same home and same reason: the profile card's Dynamic capabilities
+        # preview switch (``kiro_crew.crewmate_dynamic_capabilities``).
+        "dynamic_capabilities",
     }
 )
 
@@ -206,7 +212,7 @@ class TestRosterRowKeySet:
         The row-level tests cover ``redact=`` directly; this one covers the
         WIRING -- that the handler reads the caller class off the request at all.
         A middleware sets ``request["app"]``, which is what ``token_auth`` does
-        for a verified app token and what ``members.py::_deny_app_caller`` reads.
+        for a verified app token and what ``members_access.py::_deny_app_caller`` reads.
         """
         probe = "AKIAIOSFODNN7EXAMPLE"
         seed = _seed_config_with_every_field_set()

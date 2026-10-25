@@ -8,10 +8,12 @@ import { framablePreviewUrl } from '../../lib/safeUrl'
 import { useCloudDeploymentEnabled } from '../../hooks/useCloudDeploymentEnabled'
 import { useAppPreview } from '../WebAppArtifactCard'
 import { buildSrcdoc, readThemeVars } from '../../lib/widgetSrcdoc'
+import { artifactFrame } from '../../lib/artifactFrame'
 import MarkdownRenderer from '../MarkdownRenderer'
 import { i18nT } from '../../i18n/t'
 import { stripMd } from '../notifications/notifMeta'
 import { useSandboxDoc } from '../../hooks/useSandboxDoc'
+import { useFrameSrc } from '../../hooks/useFrameSrc'
 import { useSilentLoadWatch } from '../../hooks/useSilentLoadWatch'
 import { useNearViewport } from '../../hooks/useNearViewport'
 import type { Artifact } from '../../types'
@@ -30,7 +32,14 @@ const THUMB_HEIGHT_SPACE = 'thumb900'
  * thumbnail: the iframe lays out at a fixed desktop width (BASE_W) so the
  * widget looks normal, then the whole frame is CSS-scaled to fit the column —
  * a minified webpage, not a cramped narrow render. */
-export function WidgetThumb({ content, slug }: { content: string; slug: string }) {
+export function WidgetThumb({ content, slug, goalReport }: {
+  content: string
+  slug: string
+  /** The artifact's server-side `goal_report`: a crewmate's report previews in
+   *  the same sandbox it opens in (lib/artifactFrame.ts). Required, so no caller
+   *  falls back to the library frame by leaving it out. */
+  goalReport: boolean
+}) {
   const BASE_W = 900
   // Fixed iframe viewport height (in BASE_W space). The iframe NEVER grows past
   // this — it only shrinks for genuinely short flow-content. This makes
@@ -41,9 +50,16 @@ export function WidgetThumb({ content, slug }: { content: string; slug: string }
   const { theme, colorTheme, themeVersion } = useTheme()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const themeVars = useMemo(() => readThemeVars(), [theme, colorTheme, themeVersion])
+  const frame = artifactFrame({ goal_report: goalReport })
   const srcdoc = useMemo(
-    () => (content ? buildSrcdoc({ html: content, themeVars, mode: theme, includeHeightReporter: true }) : null),
-    [content, themeVars, theme],
+    () => (content
+      ? buildSrcdoc({
+        html: content, themeVars, mode: theme, includeHeightReporter: true,
+        offlineScripts: frame.offlineScripts, rewriteBareLinks: false,
+        pageScripts: frame.pageScripts,
+      })
+      : null),
+    [content, themeVars, theme, frame.offlineScripts, frame.pageScripts],
   )
   // Reserve the height this content had last time, or the median of thumbnails
   // already measured, before falling back to the viewport ceiling.
@@ -85,6 +101,12 @@ export function WidgetThumb({ content, slug }: { content: string; slug: string }
   // that is megabytes, and the stash then has to refuse mints it could otherwise
   // have served. Deferring keeps the pressure proportional to what is on screen.
   const { url: blobUrl, failed } = useSandboxDoc(near ? srcdoc : null)
+  // Later documents replace the first in place (hooks/useFrameSrc.ts).
+  const frameSrc = useFrameSrc(iframeRef, blobUrl)
+  // No link bridge: every render site wraps the thumbnail in `pointer-events-none`
+  // (the card's own click opens the artifact) and the frame is `tabIndex={-1}`,
+  // so no click ever reaches it. `rewriteBareLinks: false` because the frame
+  // grants no popups.
   // Gated on the FIRST document only, and deliberately NOT reset when a new url
   // lands. A re-mint navigates the frame again, and re-hiding on every new url
   // leaves the thumb blank until the next `load` fires — long enough to read as
@@ -162,8 +184,8 @@ export function WidgetThumb({ content, slug }: { content: string; slug: string }
       {blobUrl ? (
         <iframe
           ref={iframeRef}
-          src={blobUrl}
-          sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
+          src={frameSrc}
+          sandbox={frame.sandbox}
           title={i18nT('pages.artifactsPage.preview', { slug })}
           tabIndex={-1}
           className="border-none bg-card block"

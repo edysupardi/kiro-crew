@@ -12,6 +12,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from kiro_crew.dashboard import chat, chat_voice, handlers, openai_compat
+from kiro_crew.dashboard.handlers import chat_elicitation
 from kiro_crew.dashboard.handlers import debug as debug_handlers
 
 
@@ -66,6 +67,9 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/capability/mcp/registry", handlers.api_capability_mcp_registry)
     app.router.add_post("/api/chat/slots/{slot}/resume", chat.api_chat_slot_resume)
     app.router.add_post("/api/chat/slots/{slot}/approve", chat.api_chat_slot_approve)
+    app.router.add_post(
+        "/api/chat/slots/{slot}/elicitation", chat_elicitation.api_chat_slot_elicitation
+    )
     app.router.add_post("/api/chat/mode", chat.api_chat_mode)
     app.router.add_post("/api/chat/nav/resolve-links", chat.api_chat_nav_resolve_links)
     app.router.add_post("/api/chat/slots/{slot}/generate-title", chat.api_chat_slot_generate_title)
@@ -98,6 +102,12 @@ def register(app: web.Application) -> None:
     app.router.add_patch("/api/chat/slots/{slot}/mutes-opened", chat.api_chat_slot_mutes_opened)
     app.router.add_patch("/api/chat/slots/{slot}/muted", chat.api_chat_slot_muted)
     app.router.add_patch("/api/chat/slots/{slot}/todo", chat.api_chat_slot_todo)
+    # The whole pinned-session order in one atomic write (sidebar drag and the
+    # dashboard MCP's chat_session_pin_move).
+    app.router.add_post("/api/chat/pinned-order", chat.api_chat_pinned_order)
+    # The manual order of every session (sort "Manual"): the person's browser
+    # only, no MCP tool.
+    app.router.add_post("/api/chat/manual-order", chat.api_chat_manual_order)
     app.router.add_patch("/api/chat/slots/{slot}/mode", chat.api_chat_slot_mode)
     # Message pins
     app.router.add_get("/api/chat/pins", chat.api_chat_pins_list)

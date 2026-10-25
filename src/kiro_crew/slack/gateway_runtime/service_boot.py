@@ -11,8 +11,8 @@ Orchestrator fields read: ``_background_tasks``, ``_bot_token``, ``_cfg``,
 Orchestrator fields written: ``_configured_host``, ``_dashboard_port``,
 ``_dashboard_runner``, ``_feature_video_task``, ``_local_only``, ``_marker_write_task``,
 ``_member_reconcile_task``, ``_memory_startup``, ``_persistence_watchdog_task``,
-``_profile_watch_task``, ``_sign_in_refresher_task``, ``_update_check_task``,
-``channel_history``, ``consolidator``, ``conv_log``, ``ctx_builder``,
+``_profile_watch_task``, ``_session_environments_ready``, ``_sign_in_refresher_task``,
+``_update_check_task``, ``channel_history``, ``consolidator``, ``conv_log``, ``ctx_builder``,
 ``dashboard_state``, ``sessions``, ``slack``, ``task_runner``, ``vector_memory``.
 
 Composed by :mod:`kiro_crew.slack.gateway`, whose globals its functions run on;
@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     import webbrowser
 
     from kiro_crew.slack.gateway import (
-        _PROFILE_PROJECTION_POLL_S,
         _SIGNING_KEY_PREFLIGHT_TIMEOUT_SECS,
         BOOT_RESTART_HINT,
         MAX_SESSION_TTL_SECS,
@@ -54,6 +53,7 @@ if TYPE_CHECKING:
         _live_session_work_dirs,
         _run_signing_key_preflight_bounded,
         _session_work_dir,
+        _start_coder_retention,
         _sweep_predecessor_session_work_dirs,
         build_dashboard_url,
         build_provider_factory,
@@ -68,6 +68,7 @@ if TYPE_CHECKING:
         hooks_config_from_config_dict,
         is_local_only,
         kiro_agents_dir,
+        live,
         log_probe_failure,
         logger,
         parse_dashboard_url,
@@ -255,6 +256,15 @@ async def _init_services(self: GatewayOrchestrator) -> None:
     except Exception:
         logger.debug("service config watchers not fully registered", exc_info=True)
 
+    # Session search splits Chinese runs into dictionary words in THIS process,
+    # which holds the host's one copy of the dictionary; mcp-core processes ask
+    # it over /api/search/segment. In-memory wiring only: the dictionary itself
+    # loads on the first Chinese query.
+    from kiro_crew.history_search import register_cjk_segmenter
+    from kiro_crew.history_words import segment_runs
+
+    register_cjk_segmenter(segment_runs)
+
     # Memory, skills, hooks, lessons
     memory = MemoryStore()
 
@@ -275,6 +285,13 @@ async def _init_services(self: GatewayOrchestrator) -> None:
     # skills dir — it must gate neither the event loop nor the dashboard
     # socket. Listings pick the synced skills up as soon as it completes.
     skills = SkillsLoader(install_builtins=False)
+    # The in-place restarts end in os.execv, which kills the usage ledger's
+    # daemon flush thread with up to 60 s of hits still in memory. The pre-exec
+    # seam runs this before both of them; _shutdown_and_exit flushes on its own.
+    from kiro_crew import skill_usage
+    from kiro_crew.pre_exec_stops import register_pre_exec_stop
+
+    register_pre_exec_stop("Skill-usage ledger", skill_usage.flush_all_before_exec)
 
     async def _sync_builtin_skills() -> None:
         try:
@@ -930,6 +947,10 @@ async def run(self: GatewayOrchestrator) -> None:
         }
         print(f"KIROCREW_READY:{json.dumps(ready_payload)}", flush=True)
 
+    self._session_environments_ready = True
+    if not self._test_mode:
+        _start_coder_retention(live.snapshot() or self._cfg)
+
     # The HTTP socket is bound, and the optional machine-readable marker
     # has been emitted. Background approval-state writes may start now.
     approval_ready = getattr(self, "_mcp_launch_approval_ready", None)
@@ -956,6 +977,17 @@ async def run(self: GatewayOrchestrator) -> None:
         _checkout_task = asyncio.create_task(asyncio.to_thread(warn_if_running_from_git_checkout))
         self._background_tasks.add(_checkout_task)
         _checkout_task.add_done_callback(self._background_tasks.discard)
+
+    # Disable and mark pending any app whose sessionApproval grant was never
+    # consented to. Past KIROCREW_READY (no-new-work-on-gateway-boot-path):
+    # the grant is refused on read already, so readiness need not wait.
+    # Fire-and-forget, file work off-loop, per-app lifecycle lock, never raises.
+    if not self._test_mode:
+        from kiro_crew.apps.session_consent import reconcile_after_ready
+
+        _consent_task = asyncio.create_task(reconcile_after_ready())
+        self._background_tasks.add(_consent_task)
+        _consent_task.add_done_callback(self._background_tasks.discard)
 
     # The run directories a PREDECESSOR gateway of this data home left behind
     # (session_work_dir). Ordered after ``cleanup_orphaned_sessions`` above,
@@ -1387,3 +1419,10 @@ async def run(self: GatewayOrchestrator) -> None:
     # Block until shutdown
     await shutdown_event.wait()
     await self._shutdown_and_exit(_watchdog)
+
+
+# How often the gateway re-stats the governance profiles directory and re-derives
+# the on-disk auto-approvals when a saved profile has moved the governance answer.
+# Bounds how long a profile that withdraws an auto-approved tool can be bypassed by
+# a newly started session; an unchanged tick costs a directory stat.
+_PROFILE_PROJECTION_POLL_S = 15.0

@@ -54,6 +54,7 @@ from kiro_crew.sandbox_staging import (
     _materialize_maskable_dirs,
     _materialize_md_notebook_mask_targets,
     _md_notebook_degraded_mask_dirs,
+    _migrate_md_notebook_legacy_state,
     _reconcile_auth_store_staging_links,
     _sweep_legacy_auth_store_temps,
     _sweep_legacy_md_notebook_temps,
@@ -400,6 +401,7 @@ def _spawn_plan(
     strip_python_env: bool = False,
     forward_ssh_auth_sock: bool = False,
     extra_hidden_dirs: tuple[str, ...] = (),
+    seal_hidden_dirs: bool = False,
     extra_hidden_dir_ids: tuple[tuple[str, int, int], ...] = (),
     extra_alias_credential_ids: tuple[tuple[int, int], ...] = (),
     extra_visible_dirs: tuple[str, ...] = (),
@@ -411,6 +413,7 @@ def _spawn_plan(
     required_mask_targets: tuple[str, ...] = (),
     mask_occupants: "Mapping[str, tuple[int, ...]] | None" = None,
     crew_home_aliases: tuple[tuple[str, str, int, int], ...] = (),
+    exec_cwd: str = "",
 ) -> sandbox_plan.ConfinementPlan:
     """Plan one spawn for *backend* against this host, logging what the plan refused.
 
@@ -423,6 +426,7 @@ def _spawn_plan(
         strip_python_env=strip_python_env,
         forward_ssh_auth_sock=forward_ssh_auth_sock,
         extra_hidden_dirs=tuple(extra_hidden_dirs),
+        seal_hidden_dirs=bool(seal_hidden_dirs),
         extra_hidden_dir_ids=tuple(extra_hidden_dir_ids),
         extra_alias_credential_ids=tuple(extra_alias_credential_ids),
         extra_visible_dirs=tuple(extra_visible_dirs),
@@ -434,6 +438,7 @@ def _spawn_plan(
         required_mask_targets=tuple(required_mask_targets),
         mask_occupants=tuple((mask_occupants or {}).items()),
         crew_home_aliases=tuple(crew_home_aliases),
+        exec_cwd=exec_cwd,
     )
     plan = sandbox_plan.plan_confinement(request, _live_plan_host(request))
     _log_refusals(plan.refusals)
@@ -446,6 +451,7 @@ def _build_launcher_script(
     strip_python_env: bool = False,
     forward_ssh_auth_sock: bool = False,
     extra_hidden_dirs: tuple[str, ...] = (),
+    seal_hidden_dirs: bool = False,
     extra_hidden_dir_ids: tuple[tuple[str, int, int], ...] = (),
     extra_alias_credential_ids: tuple[tuple[int, int], ...] = (),
     extra_visible_dirs: tuple[str, ...] = (),
@@ -457,6 +463,7 @@ def _build_launcher_script(
     required_mask_targets: tuple[str, ...] = (),
     mask_occupants: "Mapping[str, tuple[int, ...]] | None" = None,
     crew_home_aliases: tuple[tuple[str, str, int, int], ...] = (),
+    exec_cwd: str = "",
 ) -> str:
     """The Linux namespace launcher program for one spawn, as Python source text.
 
@@ -472,6 +479,7 @@ def _build_launcher_script(
             strip_python_env=strip_python_env,
             forward_ssh_auth_sock=forward_ssh_auth_sock,
             extra_hidden_dirs=extra_hidden_dirs,
+            seal_hidden_dirs=seal_hidden_dirs,
             extra_hidden_dir_ids=extra_hidden_dir_ids,
             extra_alias_credential_ids=extra_alias_credential_ids,
             extra_visible_dirs=extra_visible_dirs,
@@ -483,6 +491,7 @@ def _build_launcher_script(
             required_mask_targets=required_mask_targets,
             mask_occupants=mask_occupants,
             crew_home_aliases=crew_home_aliases,
+            exec_cwd=exec_cwd,
         )
     )
 
@@ -521,6 +530,7 @@ def namespace_argv(
     strip_python_env: bool = False,
     forward_ssh_auth_sock: bool = False,
     extra_hidden_dirs: tuple[str, ...] = (),
+    seal_hidden_dirs: bool = False,
     extra_hidden_dir_ids: tuple[tuple[str, int, int], ...] = (),
     extra_alias_credential_ids: tuple[tuple[int, int], ...] = (),
     extra_visible_dirs: tuple[str, ...] = (),
@@ -528,6 +538,7 @@ def namespace_argv(
     extra_private_dir_ids: tuple[tuple[str, int, int], ...] = (),
     extra_writable_dirs: tuple[str, ...] = (),
     extra_expose_files: tuple[str, ...] = (),
+    exec_cwd: str = "",
 ) -> list[str]:
     """Wrap *argv* via the Python namespace launcher.
 
@@ -553,6 +564,10 @@ def namespace_argv(
     # The mask loop has the same guard (``isdir``), so the on-demand hidden
     # directories get the same treatment for the same reason.
     _materialize_maskable_dirs(_required_targets)
+    # The Notes move runs BEFORE the stubs below: it reads real state at the bare names
+    # (and empties the legacy PAT in place), and the materialiser then plants the stub
+    # the launcher masks at any bare name left absent. A failed move is logged, not raised.
+    _migrate_md_notebook_legacy_state()
     # And the ``sensitive_files`` loop is guarded on ``isfile``, so md-notebook's state
     # leaves — creatable on a sandboxed host now that the backend carve-out exists —
     # need a mount target too.
@@ -657,6 +672,7 @@ def namespace_argv(
         strip_python_env=strip_python_env,
         forward_ssh_auth_sock=forward_ssh_auth_sock,
         extra_hidden_dirs=extra_hidden_dirs + tuple(m.path for m in alias_masks),
+        seal_hidden_dirs=seal_hidden_dirs,
         extra_hidden_dir_ids=extra_hidden_dir_ids,
         extra_alias_credential_ids=extra_alias_credential_ids,
         # The same paths again WITH the inode each one was at discovery, as the set whose
@@ -677,6 +693,7 @@ def namespace_argv(
         # builder stays free of filesystem calls and still hands the launcher one
         # name per crew directory on a symlinked home.
         crew_home_aliases=_crew_home_alias_roots(),
+        exec_cwd=exec_cwd,
     )
     run_dir = _ensure_run_dir()
     # Prefix and suffix from the module constants, not a second spelling of them: the
@@ -756,6 +773,7 @@ def sandbox_exec_argv(
     # stays on the namespace path — a Seatbelt deny is a path rule that holds for a name
     # that does not exist yet — but an orphan already on disk needs sweeping here too.
     _sweep_legacy_md_notebook_temps()
+    _migrate_md_notebook_legacy_state()
     _sweep_legacy_auth_store_temps()
     # Reconciled here as well. The stale name is a second name for the signing key either
     # way, and leaving it to accumulate on a macOS host means the first Linux spawn on a
@@ -877,10 +895,10 @@ def sandbox_exec_argv(
     os.close(fd)
     # Build env -u flags for sensitive vars present in current env. cc/strict
     # additionally scrub agent-denied credential keys (Slack tokens, owner id)
-    # since loader.py seeds them into os.environ for trusted children only.
+    # since config/loader_config.py seeds them into os.environ for trusted children only.
     unset_args = _sandbox_env_unset_args(sandbox_level, strip_python_env, forward_ssh_auth_sock)
     # Mark the sandboxed tree, exactly as the Linux namespace launcher does after
-    # its own env scrub (see ``scrub_env`` in ``sandbox_launcher_program``, the
+    # its own env scrub (see ``scrub_env`` in ``sandbox_launcher_parts/exec_lockdown.py``, the
     # program ``_build_launcher_script`` renders). Without
     # this, an in-sandbox ``wrap_argv`` call cannot tell that Kiro Crew's own
     # sandbox already confines it, tries to nest, and gets EPERM — which then
@@ -977,7 +995,7 @@ def cleanup_stale_sandbox_profiles(*, data_home: Path, legacy_dir: str | None = 
     age threshold applies — plus the orphaned bind-mount sources the namespace
     launcher stages on tmpfs (see _cleanup_stale_sandbox_mount_sources).
 
-    Called from the periodic cleanup sweep in session.py, offloaded to the
+    Called from the periodic cleanup sweep in session_parts/sweeps.py, offloaded to the
     maintenance executor (blocking I/O).  Safe to call from sync contexts too.
 
     *data_home* is the data home every path below is rooted at. The sweep runs on

@@ -195,6 +195,7 @@ from kiro_crew.dashboard.handlers.files import (  # noqa: E402, F401
     api_path_complete,
     api_project_git,
     api_project_git_log,
+    api_project_git_repos,
     api_project_git_status,
     api_project_tree,
     api_reveal_path,
@@ -477,6 +478,7 @@ from kiro_crew.dashboard.handlers.side import (  # noqa: E402, F401
     api_side_open,
     api_side_queue_cancel,
     api_side_queue_edit,
+    api_side_state,
     api_side_stop,
     api_side_tools,
     api_side_turn,
@@ -618,7 +620,7 @@ from kiro_crew.dashboard.handlers.ui_prefs import (  # noqa: E402, F401
 )
 
 # ── Updates & Logs (extracted to handlers/updates.py) ──
-# NOTE: api_stream passes update_available= to status_snapshot (see updates.py)
+# NOTE: api_stream passes update_available= to status_snapshot (see updates_streams.py)
 from kiro_crew.dashboard.handlers.updates import (  # noqa: E402, F401
     _UPDATE_CHECK_INTERVAL,
     _do_update_check,

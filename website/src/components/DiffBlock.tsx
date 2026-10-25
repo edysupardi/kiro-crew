@@ -1,4 +1,4 @@
-import { Fragment, memo, useState, useMemo } from 'react'
+import { memo, useState, useMemo } from 'react'
 import { Copy, Check, Columns2, Rows2 } from 'lucide-react'
 import { copyToClipboard } from '../utils/clipboard'
 import { usePathKind } from '../hooks/usePathKind'
@@ -13,7 +13,7 @@ import { usePlainDiff } from '../hooks/usePlainDiff'
 
 import { i18nT } from '../i18n/t'
 import { useLanguageGeneration } from '../i18n/useLanguageGeneration'
-import { pathBasename } from '../utils/pathBasename'
+import { pathBasename, decodePathForDisplay } from '../utils/pathBasename'
 
 /** Extract the target file path from unified-diff header lines.
  *
@@ -101,8 +101,13 @@ const basename = pathBasename
  *  the Open button's target; the row only has to tell the files of one patch
  *  apart. A rename that keeps its basename — a move between directories —
  *  reads as the full paths, `src/a.ts → test/a.ts`: the basenames would say
- *  `a.ts → a.ts`, which says nothing. */
+ *  `a.ts → a.ts`, which says nothing. Percent-escapes are decoded for the
+ *  title only (decodePathForDisplay); the Open target keeps the raw path. */
 function sectionTitle(section: PatchSection, fallbackPath: string | null): string {
+  return decodePathForDisplay(rawSectionTitle(section, fallbackPath))
+}
+
+function rawSectionTitle(section: PatchSection, fallbackPath: string | null): string {
   const name = section.name ?? fallbackPath
   if (name == null) return ''
   const prev = section.prevName
@@ -361,7 +366,7 @@ export default memo(function DiffBlock({ code, complete, onFileOpen, pathHint }:
         {sections.map((section, i) => {
           const words = changeWords(section)
           return (
-            <Fragment key={`${section.name ?? ''}:${i}`}>
+            <div key={`${section.name ?? ''}:${i}`} data-diff-section={i} className="contents">
               <PlainFilePairHeader
                 filename={sectionTitle(section, i === 0 ? headerPath : null)}
                 label={cardRow ? undefined : plainViewLabel}
@@ -379,7 +384,7 @@ export default memo(function DiffBlock({ code, complete, onFileOpen, pathHint }:
                   ? <PlainCodeFallback text={section.text} />
                   : <PierrePatch patch={section.text} options={options} />}
               </PlainPatchBodyContext.Provider>
-            </Fragment>
+            </div>
           )
         })}
         {!complete && <div className="px-3 py-1 text-muted text-[12px] italic animate-pulse">{i18nT('components.diffBlock.generating_diff')}</div>}

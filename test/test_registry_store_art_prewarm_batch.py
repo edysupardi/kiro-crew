@@ -12,7 +12,6 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +37,7 @@ from kiro_crew.apps.registry import (
     _blob_cache_dir,
     _copy_declared_art,
     _effective_registries,
+    _fetch_owner_tier_store_assets,
     _prewarm_owner_tier_store_assets,
     _read_manifest_cache,
     _store_art_cache_path,
@@ -45,6 +45,7 @@ from kiro_crew.apps.registry import (
 from kiro_crew.config import loader as loader_mod
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.platform.bootstrap import build_default_context
+from kiro_crew.testing.wait import LoopHop, await_until, until_parked
 
 # ---------------------------------------------------------------------------
 # Cancellation settles the copy without recording a partial run
@@ -128,10 +129,10 @@ class TestCopyCancellation:
 
         def _slow_copy(entry, mdir, manifest, cancel=None):
             started.set()
-            # Busy-wait on the cooperative cancel flag, then defer to the real copy so
+            # Wait on the cooperative cancel flag, then defer to the real copy so
             # the cancelled-path early-return is exercised.
-            while cancel is not None and not cancel.is_set():
-                time.sleep(0.01)
+            if cancel is not None:
+                cancel.wait()
             return real_copy(entry, mdir, manifest, cancel)
 
         _fake_fetch(
@@ -141,7 +142,9 @@ class TestCopyCancellation:
         monkeypatch.setattr(reg_mod, "_PREWARM_BATCH_BUDGET", 0.2)
         entry = _entry()
 
-        fetched = await asyncio.wait_for(_prewarm_owner_tier_store_assets(reg, [entry]), timeout=5)
+        fetched = await await_until(
+            asyncio.ensure_future(_prewarm_owner_tier_store_assets(reg, [entry]))
+        )
 
         assert fetched == 0, "the cancelled row is not counted as fetched"
         # No sidecar and no partial art for the cancelled row.
@@ -163,21 +166,27 @@ class TestCopyCancellation:
 
         reg = _pin_registry(monkeypatch, _TRUST_OWNER)
         loop = asyncio.get_running_loop()
+        hop = LoopHop(loop)
         copy_entered = asyncio.Event()
         returned = threading.Event()
         removal_saw_worker_returned: list[bool] = []
+
+        async def _one_loop_turn() -> None:
+            return None
+
         real_copy = reg_mod._copy_declared_art
         real_rmtree = reg_mod._rmtree_force_settled
 
         def _slow_copy(entry, mdir, manifest, cancel=None):
             loop.call_soon_threadsafe(copy_entered.set)
-            while cancel is not None and not cancel.is_set():
-                time.sleep(0.01)
-            # Linger past the flag: a caller that does not wait for the return
-            # reaches the removal while this thread is still here.
-            # flake-ok: the slow-copy stub lingers past the cancel flag so the removal races the copy thread
-            # nosemgrep: kirocrew.test-sleep-as-barrier -- slow-copy stub that lingers past the cancel flag; the comment above explains it
-            time.sleep(0.2)
+            assert cancel is not None and cancel.wait(
+                timeout=_BARRIER_CEILING_SECS
+            ), "the copy worker never saw the cancel flag"
+            # Linger past the flag until the loop has finished the step that set
+            # it. That step either parks the caller on the worker (the settle) or,
+            # for a caller that does not wait for the return, runs its ``finally``
+            # straight into the removal, which records this thread as still here.
+            hop.run(_one_loop_turn(), "a loop turn after the cancel flag was set")
             result = real_copy(entry, mdir, manifest, cancel)
             returned.set()
             return result
@@ -203,7 +212,75 @@ class TestCopyCancellation:
         with pytest.raises(asyncio.CancelledError):
             await _settled(task, "the cancelled prewarm")
 
+        hop.check()
         assert removal_saw_worker_returned == [True], removal_saw_worker_returned
+
+
+class TestScratchDirCancellation:
+    """The scratch dir is made off the loop, so a cancel can land while that thread
+    is still making it (a slow runner, where the batch budget fires during the hop).
+    The dir the thread then makes must still be removed, however many cancels land."""
+
+    @pytest.mark.asyncio
+    async def test_cancels_during_the_scratch_mkdtemp_still_remove_the_dir(self, monkeypatch):
+        """Two cancels land while the mkdtemp thread is held, and the thread makes the
+        dir only after both were delivered. Each step is queued on the loop behind
+        the one before it, so the order is fixed rather than raced against a budget."""
+        import asyncio
+        import os
+        import tempfile
+
+        from kiro_crew.apps.registry_pipeline import store_art
+
+        _pin_registry(monkeypatch, _TRUST_OWNER)
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        finished = asyncio.Event()
+        release = threading.Event()
+        made: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def _held_mkdtemp(*args, **kwargs):
+            if kwargs.get("prefix") != "kirocrew-store-art-":
+                return real_mkdtemp(*args, **kwargs)
+            try:
+                loop.call_soon_threadsafe(entered.set)
+                assert release.wait(timeout=_BARRIER_CEILING_SECS), "never released"
+                path = real_mkdtemp(*args, **kwargs)
+                made.append(path)
+                return path
+            finally:
+                loop.call_soon_threadsafe(finished.set)
+
+        _fake_fetch(monkeypatch, ART, dict(MANIFEST, screenshots=["ui/shot-1.png"]))
+        monkeypatch.setattr(store_art.tempfile, "mkdtemp", _held_mkdtemp)
+
+        def _second_cancel_then_release() -> None:
+            # Runs after the first cancel was delivered; the release is queued
+            # behind the second one, so the thread returns only after both.
+            task.cancel()
+            loop.call_soon(release.set)
+
+        task = asyncio.ensure_future(_fetch_owner_tier_store_assets(_entry(), "test"))
+        try:
+            try:
+                await _await_barrier(entered, "the mkdtemp thread", lambda: f"done={task.done()}")
+            finally:
+                task.cancel()
+                loop.call_soon(_second_cancel_then_release)
+            with pytest.raises(asyncio.CancelledError):
+                await _settled(task, "the cancelled fetch")
+            # Without the settle the thread outlives the task; wait for it to return.
+            await _await_barrier(finished, "the mkdtemp thread's return")
+
+            assert made, "the mkdtemp thread never made the scratch dir"
+            leaked = [p for p in made if os.path.exists(p)]
+            assert not leaked, f"a cancel during mkdtemp leaked the scratch dir: {leaked}"
+        finally:
+            release.set()
+            for path in made:
+                with contextlib.suppress(OSError):
+                    os.rmdir(path)
 
 
 # ---------------------------------------------------------------------------
@@ -273,15 +350,17 @@ class TestCallSites:
 
         fetched: set[str] = set()
         seen_at_prewarm: list[frozenset[str]] = []
+        official_fetched = asyncio.Event()
 
         async def _fetch(r):
-            # The slow sibling finishes last; a prewarm inside the per-registry
-            # load would run for "official" while "second" is still unfetched.
+            # The sibling finishes last, gated on the first fetch: a prewarm inside
+            # the per-registry load would run for "official" in the same loop turn
+            # its fetch returns, while "second" is still parked here, unfetched.
             if r.name == "second":
-                # flake-ok: the slow sibling finishes last so a prewarm inside the per-registry load is caught
-                # nosemgrep: kirocrew.test-sleep-as-barrier -- slow-sibling stub that finishes last; the comment above explains it
-                await asyncio.sleep(0.05)
+                await await_until(official_fetched, what="the official registry's fetch")
             fetched.add(r.name)
+            if r.name == "official":
+                official_fetched.set()
             return [dict(_entry(), _registry=r.name)]
 
         async def _prewarm(r, entries):
@@ -457,14 +536,14 @@ class TestPrewarmBatchBounds:
         monkeypatch.setattr(reg_mod, "_PREWARM_MAX_ROWS", 1000)
         live = 0
         peak = 0
+        release = asyncio.Event()
 
         async def _fetch(entry, registry_name):
             nonlocal live, peak
             live += 1
             peak = max(peak, live)
-            # flake-ok: each fake fetch stays in flight briefly so the pool's peak concurrency is observable
-            # nosemgrep: kirocrew.test-sleep-as-barrier -- stub that holds each fake fetch in flight so overlapping tasks are counted
-            await asyncio.sleep(0.005)
+            # Every fetch stays in flight until the test has seen the pool full.
+            await release.wait()
             live -= 1
             return True
 
@@ -476,10 +555,18 @@ class TestPrewarmBatchBounds:
             for i in range(40)
         ]
 
-        fetched = await _prewarm_owner_tier_store_assets(reg, rows)
+        prewarm = asyncio.ensure_future(_prewarm_owner_tier_store_assets(reg, rows))
+        try:
+            # The pool is full once three fetches are parked; a task per row would
+            # have parked all forty by the time this poll first reads.
+            await until_parked(release, count=3, describe=lambda: f"live={live} peak={peak}")
+            assert peak == 3, peak
+        finally:
+            release.set()
+        fetched = await _settled(prewarm, "the prewarm batch")
 
         assert fetched == 40
-        assert 1 < peak <= 3, peak
+        assert peak == 3, peak
 
     @pytest.mark.asyncio
     async def test_the_retained_row_drops_fields_a_fetch_does_not_read(self, monkeypatch):
@@ -805,12 +892,14 @@ class TestBoundedPostBudgetCleanup:
         import asyncio
 
         release = asyncio.Event()
+        deadline_fired = asyncio.Event()
 
         async def _worker():
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 # The pre-fix shape awaits this cleanup inline, unbounded.
+                deadline_fired.set()
                 await release.wait()
                 raise
 
@@ -818,23 +907,24 @@ class TestBoundedPostBudgetCleanup:
             # The old code: one wait_for over the gather, whose timeout cancels the
             # worker and then awaits its (hanging) cleanup before raising.
             try:
-                await asyncio.wait_for(asyncio.gather(_worker()), timeout=0.2)
+                await asyncio.wait_for(
+                    asyncio.gather(_worker()), timeout=0.2
+                )  # flake-ok: negative control simulating pre-fix bug; the timeout IS the assertion proving the old code blocked
             except asyncio.TimeoutError:
                 return 0
 
-        loop = asyncio.get_running_loop()
-        started = loop.time()
         task = asyncio.ensure_future(_prefix_wait())
-        # Give the pre-fix shape three times its 0.2 s deadline to return. Waiting on
-        # the task itself (not a bare sleep) ends the wait the moment it returns, and
-        # returning early is exactly what this control must rule out; a slow runner
-        # only lengthens the wait, it cannot make the control pass falsely.
-        done, _ = await asyncio.wait({task}, timeout=0.6)  # flake-ok: expiry is expected
-        blocked_past_deadline = task not in done
-        assert blocked_past_deadline, "the pre-fix shape should still be blocked on cleanup"
-        release.set()
-        await asyncio.wait_for(task, timeout=2)
-        assert loop.time() - started > 0.5
+        try:
+            # The deadline has fired and cancelled the worker, which is now parked in
+            # its cleanup. Nothing but ``release`` can end that cleanup, so a pre-fix
+            # shape still pending here is blocked past its deadline by construction,
+            # not by how long this test chose to look.
+            await _await_barrier(deadline_fired, "the pre-fix deadline")
+            await until_parked(release)
+            assert not task.done(), "the pre-fix shape should still be blocked on cleanup"
+        finally:
+            release.set()
+        assert await _settled(task, "the pre-fix wait") == 0
 
     @pytest.mark.asyncio
     async def test_a_quick_cleanup_settles_within_the_budget_without_detaching(self, monkeypatch):
@@ -854,8 +944,8 @@ class TestBoundedPostBudgetCleanup:
         monkeypatch.setattr(reg_mod, "_PREWARM_CLEANUP_BUDGET", 2.0)
         assert not reg_mod._PENDING_PREWARM_CLEANUPS
 
-        fetched = await asyncio.wait_for(
-            _prewarm_owner_tier_store_assets(reg, [_entry()]), timeout=5
+        fetched = await await_until(
+            asyncio.ensure_future(_prewarm_owner_tier_store_assets(reg, [_entry()]))
         )
 
         assert fetched == 0
@@ -915,10 +1005,10 @@ class TestOuterCancellationSettlesTheBatch:
         entry = _entry()
 
         task = asyncio.ensure_future(_prewarm_owner_tier_store_assets(reg, [entry]))
-        await asyncio.wait_for(started.wait(), timeout=5)
+        await await_until(started)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=5)
+            await await_until(task)
 
         # The in-flight clone was cancelled (not abandoned) and its scratch dir removed.
         assert cancelled, "the worker clone was not cancelled on outer cancellation"
@@ -934,9 +1024,11 @@ class TestOuterCancellationSettlesTheBatch:
 
         worker_cancelled: list[str] = []
         leaked: list[asyncio.Future] = []
+        worker_parked = asyncio.Event()
 
         async def _worker():
             try:
+                worker_parked.set()
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 worker_cancelled.append("w")
@@ -951,12 +1043,14 @@ class TestOuterCancellationSettlesTheBatch:
             return batch
 
         task = asyncio.ensure_future(_prefix_prewarm())
-        # flake-ok: a short yield lets the control task reach its bare wait before the cancel lands
-        # nosemgrep: kirocrew.test-sleep-as-barrier -- short yield so the control task reaches its bare wait before the cancel
-        await asyncio.sleep(0.05)
+        # The worker runs inside the batch, and the control task created the batch
+        # and went straight into its bare wait in the same turn: both are parked
+        # where the cancel must find them.
+        await _await_barrier(worker_parked, "the batch's worker")
+        assert leaked and not task.done()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=5)
+            await _settled(task, "the cancelled control")
         # The batch was NOT cancelled by the bare wait: the worker still runs.
         assert worker_cancelled == [], "the bare-wait shape should leak the running batch"
         # Clean up the leaked batch this control deliberately created.
@@ -1013,6 +1107,79 @@ class TestOuterCancellationSettlesTheBatch:
             release.set()
             if held:
                 await asyncio.wait(held, timeout=_BARRIER_CEILING_SECS)
+
+
+class TestCancelledBatchLeavesNoUnretrievedException:
+    """A cancelled batch is an outcome the prewarm handles, so it must not reach the
+    loop's exception handler. ``asyncio.gather`` records a requested cancellation with
+    ``set_exception(CancelledError())``; left unread, GC logs ``_GatheringFuture
+    exception was never retrieved`` and ``crash_guard`` writes a false ``ASYNCIO
+    UNHANDLED`` record to ``crash.log``. Both ways a batch is cancelled --
+    the budget and an outer cancel -- are covered."""
+
+    @staticmethod
+    async def _handler_reports(run) -> list[str]:
+        import asyncio
+        import gc
+
+        loop = asyncio.get_running_loop()
+        seen: list[str] = []
+        previous = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, ctx: seen.append(ctx.get("message", "")))
+        try:
+            await run()
+            # The batch is unreachable once the prewarm returned; collect it so an
+            # unread exception is reported now, inside this handler.
+            gc.collect()
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(previous)
+        return seen
+
+    @staticmethod
+    def _hang_on_fetch(monkeypatch, started):
+        import asyncio
+
+        async def _hang_fetch(git_url, branch, dest, log_lines, *, clone_env, sandbox_mode, **kw):
+            Path(dest).mkdir(parents=True, exist_ok=True)
+            started.set()
+            await asyncio.Event().wait()  # a git step that never finishes on its own
+
+        monkeypatch.setattr(reg_mod, "_git_fetch_branch", _hang_fetch)
+
+    @pytest.mark.asyncio
+    async def test_a_budget_cancelled_batch_reports_nothing(self, monkeypatch):
+        import asyncio
+
+        reg = _pin_registry(monkeypatch, _TRUST_OWNER)
+        self._hang_on_fetch(monkeypatch, asyncio.Event())
+        monkeypatch.setattr(reg_mod, "_PREWARM_BATCH_BUDGET", 0.2)
+
+        async def _run() -> None:
+            fetched = await await_until(
+                asyncio.ensure_future(_prewarm_owner_tier_store_assets(reg, [_entry()]))
+            )
+            assert fetched == 0
+
+        assert await self._handler_reports(_run) == []
+
+    @pytest.mark.asyncio
+    async def test_an_outer_cancelled_batch_reports_nothing(self, monkeypatch):
+        import asyncio
+
+        reg = _pin_registry(monkeypatch, _TRUST_OWNER)
+        started = asyncio.Event()
+        self._hang_on_fetch(monkeypatch, started)
+        monkeypatch.setattr(reg_mod, "_PREWARM_BATCH_BUDGET", 3600.0)
+
+        async def _run() -> None:
+            task = asyncio.ensure_future(_prewarm_owner_tier_store_assets(reg, [_entry()]))
+            await await_until(started)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await await_until(task)
+
+        assert await self._handler_reports(_run) == []
 
 
 # ---------------------------------------------------------------------------

@@ -56,7 +56,7 @@ from kiro_crew.agent_sdk.backends import (
     ACP_BACKEND_GOOSE,
     ACP_BACKEND_OPENCODE,
     ACP_BACKENDS_ACP_RUNTIME,
-    ACP_BACKENDS_KIRO_SLASH_COMMANDS,
+    ACP_BACKENDS_KIRO_FAMILY,
     ACP_BACKENDS_KNOWN,
 )
 from kiro_crew.config import paths as config_paths
@@ -94,6 +94,10 @@ VOLATILE_ENV = {
     "KIROCREW_RUNTIME_PYTHON": "<interpreter>",
     "KIROCREW_PI_GATE_SESSION": "<nonce>",
     "KIROCREW_DSH_GATE_SESSION": "<nonce>",
+    # The pi steer channel: a stem naming the gateway's pid and the launch nonce, and
+    # a key minted per launch (``acp.harness.pi_steer``).
+    "KIROCREW_PI_STEER": "<steer-stem>",
+    "KIROCREW_PI_STEER_KEY": "<steer-key>",
     # Minted from ``secrets`` on every client, so it can never match a golden twice.
     # That a one-session client's child RECEIVES it is the fact being pinned: it is
     # how a control-plane MCP server on that child resolves its own session.
@@ -421,6 +425,7 @@ def _stub_common(stack: list, rec: _Recorder, tmp_path: Path, backend: str = "")
             ),
             patch.object(pi_mod, "_resolve_pi_acp_bin", return_value=(_PI_ACP_ARGV, _SEARCH_PATH)),
             patch.object(pi_mod, "_resolve_pi_bin", return_value=(_PI_BIN, _SEARCH_PATH)),
+            patch.object(pi_mod, "_pi_node_choice", return_value=pi_mod.PiNodeChoice()),
             patch.object(claude_mod, "_resolve_claude_code_executable", return_value=""),
             patch.object(AcpClient, "_write_claude_local_settings", return_value=None),
             patch.object(pi_mod, "_seal_pi_gate_extension", return_value=_PI_EXTENSION),
@@ -437,6 +442,12 @@ def _stub_common(stack: list, rec: _Recorder, tmp_path: Path, backend: str = "")
             patch.object(deepseek_mod, "_verify_deepseek_gate", return_value=("", "")),
             patch.object(opencode_mod, "_verify_opencode_routing", return_value=("", "")),
             patch.object(opencode_mod, "_opencode_routing_config", return_value=_OPENCODE_CONFIG),
+            # The version gate answers in range: it spawns a child of the synthetic
+            # binary the resolver stub hands the launch, and a version child is not
+            # one of the four launch answers the golden records.
+            patch.object(
+                opencode_mod, "_opencode_version_refusal", new=AsyncMock(return_value=("", ""))
+            ),
             patch.object(launch_mod, "_unlink_readback_launcher", return_value=None),
             patch.object(
                 launch_mod,
@@ -507,7 +518,7 @@ def _reset_bin_caches() -> None:
 #: keeps a client arm for the per-session path, so it is captured through ``_spawn``
 #: like every other harness; a runtime-only host has no client arm to drive, and its
 #: launch is the plan its harness resolves at Seam 1.
-RUNTIME_ONLY_BACKENDS = frozenset(ACP_BACKENDS_ACP_RUNTIME - ACP_BACKENDS_KIRO_SLASH_COMMANDS)
+RUNTIME_ONLY_BACKENDS = frozenset(ACP_BACKENDS_ACP_RUNTIME - ACP_BACKENDS_KIRO_FAMILY)
 
 
 class _Captured(Exception):

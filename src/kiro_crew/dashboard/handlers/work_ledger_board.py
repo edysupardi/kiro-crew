@@ -232,6 +232,22 @@ def _redact_deep(value: Any) -> Any:
     return value
 
 
+def task_records(
+    slot_key: str,
+) -> tuple[work_ledger.ConductorRecord | None, list[work_ledger.WorkItem]]:
+    """Return this slot's conductor and work items for gateway-owned readers.
+
+    The slot comes from server state, never caller input. Keeping this read on the
+    existing dashboard seam preserves the store's identity boundary.
+    """
+    return work_ledger.read_conductor(slot_key), work_ledger.list_work_items(slot_key)
+
+
+def work_item_is_terminal(state: object) -> bool:
+    """Whether a stored work-item state is terminal."""
+    return state in work_ledger.TERMINAL_ITEM_STATES
+
+
 def closed_items(slot_key: str) -> list[dict[str, Any]]:
     """The closed items on thread *slot_key*'s own ledger, as this board reads them.
 
@@ -347,6 +363,11 @@ async def api_work_ledger_board(request: web.Request) -> web.Response:
 
     state: DashboardState = request.app["state"]
     conductor_alive = _slot_open(state, key)
+    # The worker's transport, not the ledger: a report the harness never delivered.
+    # Read outside the board hold because it is not part of the ledger snapshot.
+    undelivered = await asyncio.to_thread(
+        lambda: {item.item_id: work_ledger.read_undelivered(key, item) for item in items}
+    )
 
     rows: list[dict[str, Any]] = []
     for item in items:
@@ -359,6 +380,7 @@ async def api_work_ledger_board(request: web.Request) -> web.Response:
             worker_looping=_slot_looping(item.worker_session_key or ""),
         )
         row["acceptance_concrete"] = work_ledger.is_acceptance_concrete(item.acceptance)
+        row["report_undelivered"] = undelivered.get(item.item_id)
         row["events"] = _mask_events([event.to_dict() for event in event_tails[item.item_id]])
         rows.append(
             _project_item(

@@ -146,7 +146,7 @@ class TestRunAppBuild:
         build fails with an explicit error instead.
 
         Detection routes through ``platform_compat.is_bundled_interpreter()``;
-        the tests in ``test_platform_compat.py`` pin its sentinel to the
+        the tests in ``test_platform_compat_pinned_tools.py`` pin its sentinel to the
         packaging layer so a bundler rename cannot silently un-match this guard.
         """
         (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
@@ -267,7 +267,7 @@ class TestRunAppBuild:
     async def test_a_stdio_server_still_waives_beside_a_shell_entry_point(
         self, tmp_path, monkeypatch, bundled_interpreter
     ):
-        """The stdio server is a consumer the deps reach (``bridges.py`` provisions
+        """The stdio server is a consumer the deps reach (``bridges_mcp.py`` provisions
         for it at registration and launches it as Python), so it waives the file
         beside a shell entry exactly as it does beside an entry the spawn would
         refuse."""
@@ -416,7 +416,7 @@ class TestRunAppBuild:
     ):
         """A hooks value the manifest view drops is a hook that never loads.
 
-        ``manager.py`` hands the hook loaders
+        ``manager_lookup.py`` hands the hook loaders
         ``AppManifest.from_json_file(...).to_dict()``, and
         ``BackendConfig.from_dict`` drops a non-object ``hooks`` — so for a
         manifest like this one NOTHING is imported into the gateway, and the gate
@@ -439,7 +439,7 @@ class TestRunAppBuild:
     ):
         """The waiver is the runtime's OWN condition, not the entry point.
 
-        ``bridges.py::_maybe_provision_backendless_deps`` provisions a root
+        ``bridges_mcp.py::_maybe_provision_backendless_deps`` provisions a root
         requirements.txt for an app whose only Python is a stdio ``mcpServers``
         entry — the same ``pip install --target`` into the app's deps dir, so the
         same out-of-process consumer. Refusing it while waiving the entry-point
@@ -461,7 +461,7 @@ class TestRunAppBuild:
         self, tmp_path, monkeypatch, bundled_interpreter
     ):
         """A ``url`` server is remote: nothing spawns for it, so the runtime
-        provisions nothing (``bridges.py`` counts only entries WITHOUT ``url``),
+        provisions nothing (``bridges_mcp.py`` counts only entries WITHOUT ``url``),
         and the gate must agree — refused, like any requirements.txt with no
         consumer."""
         (tmp_path / "requirements.txt").write_text("mcp\n", encoding="utf-8")
@@ -502,7 +502,7 @@ class TestRunAppBuild:
 
         A dotted, extensionless ``backend.entryPoint`` with no file of that name
         runs as ``python -m`` from trusted package code; ``backend.py`` skips
-        ``provision_app_deps`` for it and ``bridges.py`` returns before provisioning
+        ``provision_app_deps`` for it and ``bridges_mcp.py`` returns before provisioning
         (trust boundary: an app-dir requirements file must never load ahead of a
         trusted module). Waiving on the entry point's mere presence would report a
         successful install whose dependencies land nowhere -- the same silent-broken
@@ -531,7 +531,7 @@ class TestRunAppBuild:
 
         A registry entry with ``resources: "app"`` is registered from its manifest
         alone: ``install_from_registry`` copies no source into the app directory,
-        ``bridges.py`` skips every registration for it, and the app launches
+        ``bridges_register.py`` skips every registration for it, and the app launches
         itself. On a source install the build step's ``pip install -r`` was the
         only thing that installed its requirements.txt, and that step is what the
         bundled interpreter cannot run -- so the very manifest that waives for a
@@ -763,7 +763,7 @@ class TestRunAppBuild:
         installs it -- so absence is let through now, nothing pip-installed either
         way, and the final pass (``final=True``, on the post-script checkout)
         refuses if the file never appeared: see the end-to-end cases in
-        ``test_apps_registry.py``.
+        ``test_apps_registry_desktop_layout.py``.
         """
         (tmp_path / "server.py").unlink()  # the fixture's entry file: this case is about its absence
         (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
@@ -791,7 +791,7 @@ class TestRunAppBuild:
         preserved previous one, so an entry file that exists here under either is
         stale or missing there -- the backend provisioner is no reason to waive,
         in either pass. The copy itself (the gate judges a real copy)
-        decides; a stdio server beside it, which `bridges.py` provisions for on
+        decides; a stdio server beside it, which `bridges_mcp.py` provisions for on
         its own, still can."""
         monkeypatch.setattr(registry, "preserved_data_awaits", lambda name: True)  # an update
         (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
@@ -1070,16 +1070,21 @@ class TestRunAppBuild:
         `file_entry_point_refusal` of the install's preview copy), so on every
         host the two agree: what the runtime accepts the final pass waives, what
         it refuses the final pass refuses. WHICH way a 60-link path goes belongs
-        to the kernel -- the POSIX symlink budget refuses it (pinned by the
-        sibling below), while Windows reparse-point resolution has no per-walk
-        budget and answers from one host image to the next by the absolute path
-        length instead -- so no single verdict is asserted here."""
+        to the host -- the POSIX symlink budget refuses it (pinned by the
+        sibling below), and on Windows the shared path screen, which reads the
+        link chain hop by hop before anything follows it, refuses a chain past
+        its own hop budget -- so no single verdict is asserted here."""
         runtime_refusal, result, final, elapsed = await self._judge_a_deep_self_link(
             tmp_path, monkeypatch, depth
         )
         # Each judge answers with a verdict it owns -- never an escape, since the
         # link points at its own directory, and never an ordinary install error.
-        assert runtime_refusal in ("", "not found", "path resolution failed"), runtime_refusal
+        assert runtime_refusal in (
+            "",
+            "not found",
+            "path resolution failed",
+            "refused by the path screen",
+        ), runtime_refusal
         assert result["ok"] or result["code"] == registry.DESKTOP_BUILD_STEP_UNSUPPORTED, result
         assert final in ("", registry._DESKTOP_BUILD_REFUSAL)
         # The final pass says exactly what the runtime's own file check says: the
@@ -1178,7 +1183,7 @@ class TestRunAppBuild:
         assert spawned == []
         assert [p.name for p in (home / "app-sources").iterdir()] == ["demo"]
         # The bare gate raises the install's own refusal; the final pass's caller
-        # converts it the same way (see test_apps_registry.py, end to end).
+        # converts it the same way (see test_apps_registry_desktop_layout.py, end to end).
         with pytest.raises(InstalledTreeRefused, match=re.escape(_DATA_IS_A_FILE)):
             registry._desktop_build_refusal(
                 source, _asgi_backend(), self_managed=False, final=True
@@ -1441,7 +1446,7 @@ class TestRunAppBuild:
     async def test_a_stdio_server_still_waives_beside_an_entry_the_spawn_would_refuse(
         self, tmp_path, monkeypatch, bundled_interpreter
     ):
-        """bridges.py provisions at registration for a stdio server whenever the
+        """bridges_mcp.py provisions at registration for a stdio server whenever the
         entry point is absent or file-style, with no existence requirement of its
         own -- the server is the consumer it provisions for -- so the file is
         installed and read even though the backend spawn would refuse."""

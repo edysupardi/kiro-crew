@@ -98,9 +98,23 @@ It needs only
 an Apple-Silicon host with Rosetta 2; the script fails fast with instructions
 otherwise, and `UNIVERSAL=0` is the opt-out.)
 
-### Bundled kiro-cli — the app carries its own agent runtime
+### Bundled kiro-cli — an opt-in, off by default
 
-By default (`BUNDLE_KIRO_CLI=1`), the build stages a pinned, sha256-verified
+The shipped app carries **no** kiro-cli. It detects the one the user installed
+(`kiro_cli.known_kiro_cli_dirs`), and the first-run gate shows the install and
+sign-in commands until it finds one; the KAS bundle route (next section) needs
+no kiro-cli at all. Bundling was the default from #5130 / #13207 until #22018,
+and it was turned off for three reasons. The bundled copy ranked above every
+system install, so the gate read it as "installed" and users who installed Kiro
+Crew in that window never installed kiro-cli themselves. The copy they ran was
+frozen at `packaging/kiro-cli-version` instead of following upstream, so kiro-cli
+fixes reached them only when someone bumped the pin. And it was the largest
+single payload: ~250 MB of the macOS universal update zip, within ~50 MiB of the
+1 GiB Squirrel cliff (#21716), 100-200 MB on every other platform. Everything
+below describes the `BUNDLE_KIRO_CLI=1` opt-in; the code paths it names stay in
+the tree and are exercised only by such a build.
+
+With `BUNDLE_KIRO_CLI=1`, the build stages a pinned, sha256-verified
 kiro-cli into the app's resources at `backend-dist/kiro-cli/`. On macOS and
 Linux, the staged payload is the single `kiro-cli-chat` binary, not upstream's
 layout: the `kiro-cli` launcher resolves `kiro-cli-chat` through `$HOME/.local/bin` and
@@ -127,12 +141,14 @@ only document naming sha256s — for `latest` alone, so a pinned build fetches t
 pinned version's own artifact URL and verifies it against the committed sha: it
 never reads the mutable manifest, a hotfix rebuild of an older tag keeps working
 after upstream releases, and a version bump without matching sha lines fails
-closed with the bump procedure in the error. `build-desktop.yml` passes the pin
-explicitly so the lane log names the release it bundled; `KIRO_CLI_VERSION=latest`
+closed with the bump procedure in the error. The two pin files have no reader
+in a default release: only a `BUNDLE_KIRO_CLI=1` build reads them (the Docker
+image resolves kiro-cli from the upstream `latest` manifest on its own), and
+they stay in the tree for that opt-in. `KIRO_CLI_VERSION=latest`
 resolves the manifest instead and takes the version and sha it names, for a local
 build that wants the newest release (still sha256-verified). Bumping both files,
-after testing the app against the new release, is the whole procedure for
-shipping a newer kiro-cli ([release](release.md), step 1). On macOS the binary is
+after testing against the new release, is the whole procedure for
+shipping a newer kiro-cli in such a build ([release](release.md), step 1). On macOS the binary is
 extracted from the universal `Kiro CLI.dmg` (one Mach-O serves both arches; the
 DMG download is ~345 MB for kiro-cli 2.27); Linux uses the matching per-arch zip
 (~150 MB); Windows uses the x64 MSI (~250 MB). Downloads are cached per user
@@ -193,15 +209,82 @@ gate refuses the
 in-place **Update** (and the gateway auto-update's `kiro-cli update`
 step, and `kirocrew update`'s) because the copy is replaced by the next app
 update. `kiro-cli login` is still the user's own step — bundling covers the
-binary, never the credential. The Windows install smoke (`scripts/smoke-windows-install.ps1`) then checks the INSTALLED tree: the staged `kiro-cli.exe` runs from where the installer put it and reports the pinned version, and the installed `kirocrew doctor` resolves that copy when `KIROCREW_BUNDLED_KIRO_DIR` names its directory. The macOS install smoke (`scripts/smoke-macos-install.sh`, job `smoke-install-macos` in `build-desktop.yml`) mounts the unsigned DMG, copies the app out, runs the installed launcher and the installed `kiro-cli-chat`, then launches the REAL app and reads the gateway child's environment back: `KIROCREW_BUNDLED_KIRO_DIR` and `KIRO_NO_AUTO_UPDATE=1` present, no probe fall-through line in `gateway-launch.log`, and the installed doctor resolving the bundled copy. That launch is the only place the shell's hand-off runs against a shipped bundle.
+binary, never the credential.
+
+The install smokes check the INSTALLED tree either way. By default (no bundle)
+both refuse a tree that carries `backend-dist/kiro-cli/`, so a payload the build
+was not asked for cannot ship unnoticed. With `BUNDLE_KIRO_CLI=1` set for the
+smoke as well, the Windows smoke (`scripts/smoke-windows-install.ps1`) checks that the staged `kiro-cli.exe` runs from where the installer put it and reports the pinned version, and that the installed `kirocrew doctor` resolves that copy when `KIROCREW_BUNDLED_KIRO_DIR` names its directory; the macOS smoke (`scripts/smoke-macos-install.sh`, job `smoke-install-macos` in `build-desktop.yml`) runs the installed `kiro-cli-chat`, then launches the REAL app and reads the gateway child's environment back: `KIROCREW_BUNDLED_KIRO_DIR` and `KIRO_NO_AUTO_UPDATE=1` present, no probe fall-through line in `gateway-launch.log`, and the installed doctor resolving the bundled copy. That launch is the only place the shell's hand-off runs against a shipped bundle. Without the flag both smokes still mount or install the artifact, run the installed launcher, launch the app and wait for `/api/health`.
 
 The payload adds one Mach-O of a few hundred MB to the macOS signing zip (about
-1 GB in total), which is what `packaging/signing/sign.sh`'s poll window is sized
-for.
+1 GB in total), which is what `packaging/signing/sign.sh`'s poll window was sized
+for; the Windows installer grows by about 190 MB before outer installer
+compression.
 
-`BUNDLE_KIRO_CLI=0 make desktop` opts a build out (the payload is large);
-the app then detects a system kiro-cli exactly as before. The Windows installer
-grows by about 190 MB before outer installer compression.
+
+### Bundled KAS engine — the `agent.kas_bundle` route with no download
+
+By default (`BUNDLE_KAS=1`), the build stages the KAS engine bundle this release
+PINS (`src/kiro_crew/acp/kas_pin.py`: `KAS_PIN_VERSION` and
+`KAS_PIN_MANIFEST_SHA256`) into the app's resources, so the built-in engine
+route runs with nothing to download and no kiro-cli at all. The staging IS the
+backend's own installer, `acp.kas_bundle.install_bundle`, run from the
+just-built backend tree's interpreter: the manifest's bytes are checked against
+the pin before parsing, every artifact is sha256+size-pinned by that manifest,
+tar extraction uses `filter="data"`, the staged Node answers `--version` on the
+build host, and the tree is published with one rename. The result is
+byte-for-byte what `kirocrew kas install` lays down under the data home, read
+back at build time through the same reader the gateway uses
+(`installed_bundle(root=…)`), so a tree the reader would reject is a build
+error, not a refusal on the user's first prompt.
+
+Every build stages one root, `backend-dist/kas/`, holding
+`<version>/{bundle,node,install.json}` plus a `BUNDLED-VERSION` file beside the
+version directory. A universal macOS build stages the engine once: its tarball
+is already `darwin-universal`, and `kas_bundle.make_universal_node` fetches the
+other architecture's pinned Node build and `lipo -create`s both into one Mach-O
+at the record's `node_bin` path, probing each slice through `arch -arm64` /
+`arch -x86_64`. The universal build then runs `kas_bundle.trim_for_shipping`:
+the Node distribution keeps only its binary and `LICENSE` (the engine never
+spawns the distribution's npm, npx or corepack), and the engine loses its C/C++
+sources, headers, source maps and web-tree-sitter's debug build. No reader
+re-hashes the extracted tree, so the record stays valid. A single-arch build
+stages the tree untrimmed, exactly as `kirocrew kas install` lays it down. The
+universal staged tree holds only regular files and directories; the universal
+macOS build fails on any symlink or hardlink in it, because the signing service
+refuses a universal bundle with shared trees.
+The Electron shell (`gateway-env.js`, `bundledKasEnvironment`) reads
+`BUNDLED-VERSION` and the install record beside it, and exports the root as
+`KIROCREW_BUNDLED_KAS_DIR` for either architecture. It runs nothing at boot: the route is off by default, the build
+already probed the staged Node, and a copy that cannot run on this machine
+fails at session spawn, only for a user who turned the switch on. A build
+without the payload or a source checkout exports nothing, and the backend then
+sees only the data home, exactly as an unbundled build does.
+The two values the shell joins onto the staged tree, the version and the
+record's `node_bin`, must be relative and free of `.`/`..`/empty segments
+(`staysWithinStagedTree`); and because that record chooses a program the gateway
+runs outside any sandbox on every bundle-route spawn, the backend seals the exported root
+read-only for every sandboxed child, the same seal as its own packaged install
+tree (`sandbox_tiers._resolved_install_root_targets`; the rules are in the
+[security spec](../system-specs/modules/security.md)).
+
+The backend (`acp.kas_bundle.installed_bundle`) reads the exported root as a
+SECOND root after the data home's `engines/kas`: an operator's own `kirocrew kas
+install` (or a `--unpinned` test install) wins over the copy the app was built
+with, the same precedence `KIROCREW_KIRO_BIN` has over the bundled kiro-cli.
+`kirocrew kas status` and `kirocrew doctor` say which one answered (`built into
+the app`), the status payload carries `installed.bundled`, and the Settings card
+names where each copy came from: "KAS engine … (included with the app)" for the
+app's copy, "KAS engine … (installed by you)" for the data home's.
+
+Bundling the engine does not turn the route on: `agent.kas_bundle` keeps its
+default (off) on every platform while the route is in shadow testing, and the
+relay route runs on the kiro-cli the user installed. Nothing in the build,
+the installer or the shell flips the switch; that stays the user's own step. `BUNDLE_KAS=0 make desktop` opts a build out (the payload is ~55 MB
+compressed, ~370 MB extracted per architecture); the switch then needs
+`kirocrew kas install` first, exactly as a pip install does. `KAS_BUNDLE_URL`
+names another manifest host (a mirror serving the same bytes; the pin refuses
+anything else).
 
 ### macOS opt-out and Linux — host-arch-only builds
 
@@ -266,9 +349,10 @@ Two properties are load-bearing and worth knowing before you touch that lane:
   than assuming it equals the runner's glibc. The AppImage links against
   it, which is why both Linux legs stay on 22.04 (glibc 2.35) rather than moving
   to 24.04 (2.39) — the newer floor would exclude AL2023, Debian 12 and RHEL 9.
-  The bundled kiro-cli 2.27.1 stays inside that floor: `kiro-cli-chat` requires
-  `GLIBC_2.34` on x86_64 and `GLIBC_2.30` on aarch64, so it does not narrow the
-  supported distro set. Re-measure both pinned zips when updating the CLI pin.
+  A `BUNDLE_KIRO_CLI=1` build adds kiro-cli to that floor: at 2.27.1
+  `kiro-cli-chat` requires `GLIBC_2.34` on x86_64 and `GLIBC_2.30` on aarch64, so
+  it does not narrow the supported distro set. Re-measure both pinned zips when
+  updating the CLI pin.
 
 **Building your own package locally.** `make desktop` needs no arch flags: it
 detects the host and emits an AppImage for it, so running it on an ARM box
@@ -351,11 +435,20 @@ x64 gate doubles as proof the bundle runs under Rosetta. In
 intentional there), and `extraResources` ships the `backend-dist/` directory
 wholesale so single- and dual-backend layouts both package.
 
+**The universal update zip must stay under 1 GiB.** The Squirrel.Mac inside every
+installed app (Electron 43 and 44.0–44.6) downloads the update zip into one
+buffer that doubles as it grows; past 1 GiB it asks for 2 GiB, Electron's
+allocator refuses, and the app dies mid-update. The installed app's updater does
+the install, so only the artifact's size protects its users. `build-desktop.sh`
+logs the universal `*-mac.zip` size and fails the build at or over 1000 MiB,
+leaving room for what signing and notarization add. Shrink the payload rather
+than raise the ceiling.
+
 > **Renaming `backend-dist/` is load-bearing at runtime.** The backend detects
 > "am I the bundled interpreter?" via
 > `platform_compat.is_bundled_interpreter()`
 > (`BUNDLED_BACKEND_DIST_DIRNAME`), which is what stops `pip` from writing
-> into the signed bundle during app builds. `test/test_platform_compat.py`
+> into the signed bundle during app builds. `test/test_platform_compat_pinned_tools.py`
 > pins that constant to both `extraResources` here and
 > `packaging/build-desktop.sh`, so a rename fails a test — update the constant
 > and the packaging layer in the same change.
@@ -498,8 +591,8 @@ The script honors these environment flags:
 | `TARGET_ARCH=arm64` / `TARGET_ARCH=x86_64` | macOS, with `UNIVERSAL=0`: build the single-arch app for the NAMED arch rather than the host's (x86_64 on Apple Silicon runs under Rosetta 2). Arch-gates the backend and the shell; the artifact always carries `-arm64` / `-x64`. Refused outside macOS or with any other value |
 | `SKIP_FRONTEND=1` | Reuse an already-built `website/dist` |
 | `SKIP_ELECTRON=1` | Stop after the bundled backend (no electron-builder) |
-| `BUNDLE_KIRO_CLI=0` | Ship without the bundled kiro-cli (default `1` stages it; see [Bundled kiro-cli](#bundled-kiro-cli--the-app-carries-its-own-agent-runtime)) |
-| `KIRO_CLI_VERSION=<version>` / `latest` | Override the `packaging/kiro-cli-version` pin; `latest` resolves the upstream manifest instead (still sha256-verified) |
+| `BUNDLE_KIRO_CLI=1` | Stage a pinned kiro-cli into the app (default `0`: the app detects the user's own install; see [Bundled kiro-cli](#bundled-kiro-cli--an-opt-in-off-by-default)) |
+| `KIRO_CLI_VERSION=<version>` / `latest` | With `BUNDLE_KIRO_CLI=1`: override the `packaging/kiro-cli-version` pin; `latest` resolves the upstream manifest instead (still sha256-verified) |
 | `KIROCREW_MANAGED_INSTALL_MARKER=<file>` | Bake that JSON file into the app as the externally-managed marker; a missing or malformed file fails the build (see [Baking the marker into the app](#baking-the-marker-into-the-app-editions)) |
 | `KIROCREW_AUTH_SERVER_ALLOWLIST=<list>` | Bake a comma-separated host list (`*.example.com,intranet.example.org`) into the app so its web contents, the Browser panel included, answer Kerberos/Negotiate challenges from those hosts; Electron gets it as its integrated-auth server switch before app ready. The switch is process-wide, so a page the agent drives in the Browser panel also signs in to those hosts as the user; list only hosts the agent may read as the user. Credential delegation is never enabled. A malformed list fails the build; unset, the app enables integrated auth for no host |
 
@@ -534,9 +627,9 @@ same way). Key details:
   fast-path (see `docs/system-specs/modules/cli.md`), so the import probe is
   the half that resolves the chain.
 - **Local dictation runtime bundled** — supported desktop builds include
-  `pywhispercpp`, the platform `imageio-ffmpeg` executable used for compressed
-  recordings, and all transitive runtime dependencies. The macOS Intel backend
-  installs no `imageio-ffmpeg`; the Intel app uses a system FFmpeg. The build
+  `pywhispercpp`, the platform's pinned audio-only FFmpeg executable
+  (`stt.decoder`) used for compressed recordings, and all transitive runtime dependencies. The macOS Intel backend
+  installs no decoder; the Intel app uses a system FFmpeg. The build
   imports the recognizer and executes the exact packaged decoder before
   publishing — and
   distinguishes a decoder that fails to AUTHENTICATE, which fails the build, from
@@ -753,7 +846,7 @@ The gateway-hosted dashboard then checks both prerequisites needed by the ACP
 provider:
 
 1. It discovers the app's own bundled copy — `kiro-cli-chat` in
-   `KIROCREW_BUNDLED_KIRO_DIR`, when built with one — then `kiro-cli` on the inherited
+   `KIROCREW_BUNDLED_KIRO_DIR`, only for a `BUNDLE_KIRO_CLI=1` build — then `kiro-cli` on the inherited
    `PATH`, `~/.local/bin`, `~/.cargo/bin`, Homebrew locations, or the macOS
    `Kiro CLI.app` bundle.
 2. It verifies the first candidate selected by the shared ACP resolver with
@@ -864,6 +957,14 @@ The View submenu's **Toggle Focus Mode** flips focus mode from the native menu,
 which is the way out that stays visible once focus mode has hidden the
 dashboard's own top-bar toggle; it is a plain item (no check mark, no
 accelerator) because the state and its rebindable chord live in the renderer.
+While focus mode hides the top bar and the nav rail they are `inert` and
+`aria-hidden`: off screen, out of the Tab order and out of the accessibility
+tree together, so a keyboard or screen-reader user never lands on an invisible
+control. Hovering an edge still peeks them; the keyboard path to a header or
+rail control is to leave focus mode first, with the toggle chord (Alt+Shift+M
+by default, rebindable on the shortcuts page) or this View menu item. While
+keyboard shortcuts are switched off the chord is dead, so the hidden chrome
+is not made inert and Tab still reveals it.
 When a remote crew is connected, the instance switcher shares the same bounded
 left region as the menu: it is a single trigger naming the crew on screen (see
 InstanceTabBar's SwitcherMenu), not a row of per-crew tabs, so it costs constant
@@ -1037,16 +1138,27 @@ unit-testable without mocking globals.
 The supervisor keeps every piece of gateway state in its own closure — the
 child, its ownership classification, the start-failure record, the liveness
 monitor and the update handoff — together with the spawn site, the port
-occupancy and identity decisions, the connect flow and recovery. It composes
-five owners under `runtime/gateway/` and hands each only the host modules and
-state getters it reads: `launch-preflight.js` (which backend binary to run,
+occupancy and identity probes, the launch and connect flows, and the choice of
+liveness recovery. It composes eleven owners under `runtime/gateway/` and hands
+each only the host modules and state getters it reads, plus a setter for each
+state slot it changes: `launch-preflight.js` (which backend binary to run,
 whether the bundle is complete, the project directory, the AppImage sandbox
 advice, the launchd `PATH`, and whether the app can relaunch itself),
 `port-holders.js` (the lsof/ps/netstat probes, trusted Windows gateway
 commands, the incumbent snapshot and exit wait, and force-stop),
 `family-takeover.js` (quitting the other release family's app),
-`token-sources.js` (the local-secret mint and the SSH token fetch), and
-`remote-crew-prompt.js` (the failure dialog's remote-crew form).
+`token-sources.js` (the local-secret mint and the SSH token fetch),
+`remote-crew-prompt.js` (the failure dialog's remote-crew form), `home-lock.js`
+(whether a pid holds this data folder's `gateway.lock`, the CLI's pid-pinned
+stop and its `gateway-pid` lock probe), `holder-decision.js` (what a launch does
+about a gateway already on its port), `successor-handoff.js` (restarting the
+app through a successor that must serve first, whether the failure dialog may
+offer Start Local Gateway, and the HTTP identity, responder and readiness
+probes), `failure-dialog.js` (the gateway-failure and restart-required dialogs
+and the reveal before them and the token prompt), `shutdown.js` (the
+graceful, pre-update and tree-kill stops), and `reconnect.js` (the liveness
+recoveries that reconnect to an external or adopted gateway instead of killing
+it).
 
 - Ensures `KIROCREW_HOME` (default `~/.kiro/crew`, overridable via the
   `KIROCREW_HOME` env var) exists, then spawns the backend with

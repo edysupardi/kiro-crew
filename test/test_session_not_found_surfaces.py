@@ -28,10 +28,39 @@ from test_cron_acp_retry import gw_and_cb  # noqa: F401  (fixture)
 from kiro_crew.acp.client import AcpError
 from kiro_crew.llm_helpers import SESSION_NOT_FOUND_GIVE_UP_TEXT, SESSION_NOT_FOUND_RETRY_NOTICE
 from kiro_crew.providers.base import EVENT_TOOL_CALL, LLMEvent
+from kiro_crew.testing.wait import async_wait_until
 
 
 def _lost() -> AcpError:
     return AcpError("Session not found: 3f2a-backend-sid")
+
+
+def _credential_dead() -> AcpError:
+    """The answer a stale-credential backend gives, raised through the real path.
+
+    The Claude-on-Bedrock process answered, but the AWS credentials it cached
+    cannot be loaded any more -- so a retry on THIS process draws the answer
+    again and the remedy is the same fresh process a lost session gets. Built
+    through ``_raise_acp_error`` because that is the path ``AcpClient`` raises
+    the real frame through; the fakes here stand in for that client.
+    """
+    from kiro_crew.acp.transport_errors import _raise_acp_error
+
+    try:
+        _raise_acp_error(
+            {
+                "code": -32603,
+                "message": (
+                    "Internal error: API Error: Could not load AWS credentials · "
+                    "Could not load credentials from any providers. Check or "
+                    "refresh your AWS credentials and try again."
+                ),
+                "data": {"errorKind": "cloud_credential_error"},
+            }
+        )
+    except AcpError as exc:
+        return exc
+    raise AssertionError("_raise_acp_error did not raise")
 
 
 # ── Slack thread ────────────────────────────────────────────────────────────
@@ -122,6 +151,55 @@ async def test_slack_lost_after_output_is_not_replayed():
     assert "reset:thread1" in sessions.removed, "the lost binding is still dropped"
 
 
+@pytest.mark.asyncio
+async def test_slack_stale_credential_error_recycles_and_replays_once():
+    """``cloud_credential_error`` rides the same replace-the-process seam.
+
+    The process is alive but its credential cache is stale: the tag
+    (``AcpError.credential_reload``, set from the structured frame field)
+    routes through ``acp_error_is_session_not_found``, so the binding is
+    dropped once and the replay's claim spawns a fresh process, which loads
+    fresh credentials and answers. One replay, never a loop -- a second
+    failure ends the turn on the give-up text.
+    """
+    from test_slack_handler import FakeSessionManager, MockSlackClient, _visible_texts
+
+    from kiro_crew.slack.handler import handle_message
+
+    slack = MockSlackClient()
+    provider = _ScriptedSlackProvider([[_credential_dead()], _answer()])
+    sessions = FakeSessionManager(provider)
+
+    await handle_message(slack, sessions, "C1", "hello", "thread1", "msg1", "U1")
+
+    assert provider.turns == 2
+    assert "reset:thread1" in sessions.removed, "the stuck process's binding is dropped"
+    texts = _visible_texts(slack)
+    assert any(SESSION_NOT_FOUND_RETRY_NOTICE in t for t in texts), texts
+    assert any("The answer is 42" in t for t in texts), texts
+    assert sessions.replay_gaps == [("open", "thread1"), ("close", "thread1")]
+
+
+@pytest.mark.asyncio
+async def test_slack_stale_credential_error_second_failure_is_not_a_loop():
+    """A fresh process that fails its own credential load ends the turn, and
+    the give-up carries the provider's remedy (a new thread would fail alike)."""
+    from test_slack_handler import FakeSessionManager, MockSlackClient, _visible_texts
+
+    from kiro_crew.slack.handler import handle_message
+
+    slack = MockSlackClient()
+    provider = _ScriptedSlackProvider([[_credential_dead()]])
+    sessions = FakeSessionManager(provider)
+
+    await handle_message(slack, sessions, "C1", "hello", "thread1", "msg1", "U1")
+
+    assert provider.turns == 2, "one replay, never a loop"
+    texts = _visible_texts(slack)
+    assert any("Check or refresh your AWS credentials" in t for t in texts), texts
+    assert not any(SESSION_NOT_FOUND_GIVE_UP_TEXT in t for t in texts), texts
+
+
 # ── channel agent ───────────────────────────────────────────────────────────
 
 
@@ -197,6 +275,34 @@ async def test_channel_second_loss_returns_none():
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_channel_broken_credential_helper_ends_on_the_providers_remedy():
+    """A helper that is really broken fails the fresh process too: the channel
+    recycles once, worded for credentials, then posts the provider's remedy."""
+    from test_channel_prompt_busy import FakeSessions, _raising_client
+
+    from kiro_crew import channel as channel_mod
+    from kiro_crew.llm_helpers import CREDENTIAL_RELOAD_RETRY_NOTICE
+
+    ch = channel_mod.Channel(id="c1", topic="review")
+    agent = ch.add_agent(role="dev", agent_name="dev")
+    assert agent is not None
+    sessions = FakeSessions(
+        [_raising_client(_credential_dead()), _raising_client(_credential_dead())]
+    )
+
+    task = asyncio.create_task(channel_mod.run_channel_agent(agent, ch, sessions))
+    await ch.post("human", "start the review")
+    await asyncio.wait_for(task, timeout=30)
+
+    posted = [m.content for m in ch.messages if m.from_id == agent.id]
+    assert agent.state == "failed"
+    assert CREDENTIAL_RELOAD_RETRY_NOTICE in posted
+    assert SESSION_NOT_FOUND_RETRY_NOTICE not in posted
+    assert any("Check or refresh your AWS credentials" in p for p in posted)
+    assert not any(SESSION_NOT_FOUND_GIVE_UP_TEXT in p for p in posted)
 
 
 # ── cron (single agent and sequence) ────────────────────────────────────────
@@ -334,19 +440,25 @@ def test_cron_sequence_step_defers_reset_when_subagents_pending(gw_and_cb):  # n
 # ── subagent run ────────────────────────────────────────────────────────────
 
 
-async def _settle(mgr, info, rounds: int = 400) -> None:
+async def _settle(mgr, info) -> None:
     """Wait for *info* to end, following any respawned task."""
-    for _ in range(rounds):
-        task = mgr._tasks.get(info.id)
-        if task is not None and not task.done():
+
+    def _live_task():
+        for key in (info.id, f"{info.id}:recovery"):
+            task = mgr._tasks.get(key)
+            if task is not None and not task.done():
+                return task
+        return None
+
+    while not info.done:
+        # Between one task ending and its respawn registering there is no task to
+        # await, so wait on the state: the end itself, or a live task to follow.
+        await async_wait_until(
+            lambda: info.done or _live_task() is not None, describe=lambda: dict(mgr._tasks)
+        )
+        task = _live_task()
+        if task is not None:
             await task
-        recovery = mgr._tasks.get(f"{info.id}:recovery")
-        if recovery is not None and not recovery.done():
-            await recovery
-            continue
-        if info.done:
-            return
-        await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio

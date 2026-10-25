@@ -397,8 +397,15 @@ async def resolve_session_choices(
     normalized = " ".join(query.casefold().split())
     if normalized:
         rows = await asyncio.to_thread(conv_log.search_sessions, query, fetch_limit)
-        needles, phrase, floor = parse_search_query(normalized)
-        multi_word = [n.text for n in needles if n.required] != [phrase]
+        # Off the loop too: the parse may ask the Chinese dictionary, whose first
+        # use loads it.
+        needles, phrase, floor = await asyncio.to_thread(parse_search_query, normalized)
+        # A Chinese run split into dictionary words counts as many words, as its
+        # characters always did, so a one-word query such as "内存" keeps the
+        # title fallback it had before the split.
+        multi_word = [n.text for n in needles if n.required] != [phrase] or any(
+            n.word for n in needles
+        )
         if not rows and multi_word:
             # search_sessions matches multi-word queries needle-wise, so out-of-order
             # words DO resolve. What it cannot reach is a session older than its scan
@@ -1192,12 +1199,11 @@ class SessionResumeController:
                     # was made by the conversation's authorized owner and binds this
                     # one session to this one location, so the link's recorded peer
                     # is signed for exactly that pair here, and the map stores the
-                    # bytes verbatim. A link naming no peer is stored unsigned.
-                    admitted = link
-                    if link.principal:
-                        admitted = dataclasses.replace(
-                            link, admission=sign_mirror_admission(choice.key, link)
-                        )
+                    # bytes verbatim. A key-named session's row is signed with or
+                    # without a peer; a dashboard-born row naming none stays unsigned.
+                    admitted = dataclasses.replace(
+                        link, admission=sign_mirror_admission(choice.key, link) or None
+                    )
                     self.sessions.set_mirror_link(choice.key, admitted, accepts_inbound=True)
                     claimed = True
                     stored_row = admitted

@@ -11,7 +11,7 @@ All selectable recognisers implement streaming (`stt_stream._STREAMING_PROVIDERS
 | `local` (default) | this process, whisper.cpp held loaded by [`kiro_crew.stt`](../../../src/kiro_crew/stt/__init__.py) | free | desktop builds include the runtime; select a model and click **Download now** |
 | `apple` | the OS, on-device SpeechAnalyzer | free | macOS 26 or later, and a Swift toolchain to build the helper |
 | `transcribe` | AWS Transcribe Streaming | billed per audio-second | the `voice` extra, and a recorded AWS consent |
-| `off` | nowhere | free | none. Every speech path answers `stt_disabled`, exactly as `stt.enabled = false` does; the live socket returns 503 because `off` is not in `_STREAMING_PROVIDERS`. Also the value an unknown stored provider degrades to ([Legacy provider values](#legacy-provider-values)) |
+| `off` | nowhere | free | none. Every speech path answers `stt_disabled`, exactly as `stt.enabled = false` does; the live socket returns a `stt_streaming_disabled` error frame because `off` is not in `_STREAMING_PROVIDERS`. Also the value an unknown stored provider degrades to ([Legacy provider values](#legacy-provider-values)) |
 
 The batch path at `POST /api/stt/transcribe` (`transcribe.transcribe_audio`)
 serves whole files instead: a Slack voice memo, a channel voice note, an upload.
@@ -26,15 +26,19 @@ notes). It is the recogniser's own artefact, so it is not applied to `apple` or
 The batch endpoint's response contract: a decode that heard nothing
 (`transcribe_audio` returns `""`) is `200 {"text": ""}`; a failed decode
 (`transcribe_audio` returns `None`) or an unexpected error is `500` with
-`code: "stt_transcription_failed"` (`handlers/core.py:_CODE_STT_FAILED`). The
+`code: "stt_transcription_failed"` (`handlers/core_stt_access.py:_CODE_STT_FAILED`). The
 meetings audio import folds both into one failure: any falsy transcript, including
 `""` and a segmented over-cap import where a segment failed or was silent, is a
 `502` with `code: "transcription_failed"`
 (`apps/builtins/meetings/backend/routes/audio_import.py`).
 
-Compressed files are decoded by the FFmpeg executable in the pinned
-`imageio-ffmpeg` wheel. It is part of the desktop voice runtime, not a desktop
-system prerequisite. The release gate resolves that exact packaged resource and
+Compressed files are decoded by a minimal audio-only FFmpeg executable
+(`scripts/build-ffmpeg.sh`, published once per bump by
+`.github/workflows/build-ffmpeg-decoder.yml` as the release
+`stt.decoder.DECODER_RELEASE`). The desktop build installs it into
+`site-packages/kirocrew_ffmpeg/bin` through `python -m kiro_crew.stt.decoder
+--install-into`, so the build and the runtime use one pin table. It is part of
+the desktop voice runtime, not a desktop system prerequisite. The release gate resolves that exact packaged resource and
 executes `ffmpeg -version`; a supported artifact cannot publish with only
 dependency metadata or an ambient PATH copy satisfying the check. Source
 environments do not read their own site-packages, because a project venv is
@@ -43,7 +47,7 @@ platform paths, and failing that the digest-verified decoder store below.
 
 **macOS Intel ships no decoder, on purpose.** `macos-x86_64` has no pin in
 `stt.decoder.ARTIFACTS`, the Intel half of the universal app installs no
-`imageio-ffmpeg` (`desktop_decoder_requirement` in `packaging/build-desktop.sh`),
+decoder (`install_desktop_decoder` in `packaging/build-desktop.sh`),
 and the store reports that platform `unsupported`. Every branch that means "a
 desktop release owns its decoder" asks `stt.decoder.bundle_carries_decoder()` —
 a bundled interpreter that is not the decoderless backend
@@ -62,13 +66,10 @@ a distribution that packages no FFmpeg (Amazon Linux, RHEL without EPEL) previou
 had no decoder it could ever reach, so batch voice was permanently broken with a
 shell command as the only remedy — and on such a host that command was an `echo`
 of the ffmpeg.org URL. `stt.decoder` closes that: it downloads the platform's
-pinned `imageio-ffmpeg==0.6.0` **wheel** from PyPI (filename, URL, size and sha256
-pinned per platform), verifies the wheel's own digest before opening it, extracts
-only `imageio_ffmpeg/binaries/<artifact>` by exact member name through a descriptor
-it opened itself (never `ZipFile.extract`, whose destination is attacker-controlled
-name data), re-verifies the extracted bytes against the SAME
-`transcribe._PACKAGED_FFMPEG_ARTIFACTS` pin, and renames it atomically into
-`<data home>/models/ffmpeg/`. Both digest tables are one table, derived in
+pinned executable from `DECODER_RELEASE` as itself (no archive), bounded by the
+pinned size and checked against the pinned sha256 — the SAME
+`transcribe._PACKAGED_FFMPEG_ARTIFACTS` pin the resolver authenticates — and
+renames it atomically into `<data home>/models/ffmpeg/`. Both digest tables are one table, derived in
 `stt.decoder`: two copies would fail as a decoder that downloads successfully and
 is then refused at exec, with nothing to say which copy was wrong.
 
@@ -90,9 +91,10 @@ it stops the build. Whether they then **execute** is a property of the build
 machine: an image lacking an OS library the executable load-time imports makes
 the loader refuse it before its entry point runs, while the identical bytes run
 correctly for a user. Windows Server Core is the case that forced the
-distinction — it carries no Video for Windows components, so it cannot load a
-Windows ffmpeg that imports `AVICAP32.dll`, and every CodeBuild Windows image is
-built on it. So an authenticated payload that will not run **warns and ships**;
+distinction — it carries no Video for Windows components, so it could not load
+the earlier full Windows ffmpeg, which imported `AVICAP32.dll`, and every
+CodeBuild Windows image is built on it. The audio-only build imports only core
+system DLLs, but the split stays because it is the right rule. So an authenticated payload that will not run **warns and ships**;
 only an unauthenticated one fails. Collapsing the two reported a build-host
 limitation as a corrupt artifact and withheld a correct release over it.
 
@@ -101,8 +103,8 @@ doing so: the Apple notary service decompresses archive members and scans what i
 inside them, so a decoder sealed as a compressed payload is rejected as an
 unsigned nested executable and fails the entire macOS release. Shipping it plain
 means the app signer rewrites its Mach-O signature, so its released bytes cannot
-match the pinned upstream digest. The runtime therefore accepts the macOS decoder
-on **either** cryptographic anchor: the pinned upstream digest (a local or
+match the pinned digest. The runtime therefore accepts the macOS decoder
+on **either** cryptographic anchor: the pinned digest (a local or
 unsigned build, and the pre-signing release gate above) or a valid Developer ID
 signature from the release team, evaluated by `codesign` against the exact
 private snapshot staged for execution. Neither anchor is a path or a
@@ -130,6 +132,28 @@ New work goes to the owner of its responsibility:
 
 Legacy provider values and the loader behavior for persisted values are in
 [Legacy provider values](#legacy-provider-values).
+
+## Retention
+
+Neither the gateway nor the user's AWS account keeps dictation audio, and
+**Settings -> Voice** answers "Is my audio kept?" in one line under the provider
+picker, with the detail in its info tip (`pages/settings/SttRetentionNote.tsx`).
+
+- **Gateway.** The live socket never writes PCM to disk. The batch endpoint
+  streams an upload to a temp file that its `finally` unlinks on every exit path,
+  and a remuxed temp is unlinked the same way (`transcribe_aws._transcribe_aws`).
+- **Browser.** The only audio copy is the failed batch capture
+  `hooks/voiceTranscriptInbox.ts` holds in memory for Retry or Save, until the
+  tab unloads.
+- **`transcribe`.** Both paths call `StartStreamTranscription`. Nothing calls
+  `StartTranscriptionJob` or writes to S3, so the user's account gets no
+  transcription job, audio file or transcript, and the Transcribe console's job
+  list stays empty. AWS itself may keep voice inputs to improve its services,
+  outside the user's account; an AWS Organizations AI services opt-out policy
+  stops that and deletes what was kept for it. The note links that policy's
+  documentation.
+- **Text.** The transcript becomes composer text and is kept with the message
+  like typed input.
 
 ## Architecture
 
@@ -286,17 +310,19 @@ surface: a spoken credential must not flash unredacted.
 
 ## Activation
 
-The endpoint answers **503** unless all three hold:
+The endpoint answers with a typed WebSocket error frame (code `stt_streaming_disabled`)
+unless all three hold — completing the upgrade first so the browser receives a
+machine-readable code rather than a bare 503 that only surfaces as `'connection'`:
 
 1. `stt.enabled`
 2. `stt.streaming`
-3. `stt.provider` is in `stt_stream._STREAMING_PROVIDERS`
+3. `stt.provider` is in `stt_stream.streaming_providers()` (the built-in `_STREAMING_PROVIDERS` plus any edition provider that declared `streaming`)
 
 The third is positive membership in a named tuple, never an inequality or a
 negation against one provider. Adding a name to that tuple grants it the
 endpointer, the caps and the `stt_stream_*` audit identity in one step, so the
 grant has to be an explicit edit to the set rather than a side effect of not
-matching some other provider. `handlers/core.py` serves the same tuple to the
+matching some other provider. `handlers/core_stt_settings.py` serves the same tuple to the
 settings page as `streaming_providers`, so the UI gates its streaming controls on
 that capability instead of on a hardcoded name.
 
@@ -755,8 +781,8 @@ therefore answerable before the first load; the redesign is out of proportion to
 The three codes join the engine's availability vocabulary (`stt.engine` re-exports
 them) and the browser's `UNAVAILABLE_CODE_KEY` has a sentence for each.
 
-It also passes `stt.idle_evict_secs` and `stt.timeout_secs` when it first reaches
-`shared_engine`, because that function is a process singleton whose bounds are set by
+It also passes `stt.idle_evict_secs`, `stt.timeout_secs` and `stt.threads` when it
+first reaches `shared_engine`, because that function is a process singleton whose bounds are set by
 its first caller; booting without them would leave the module defaults in force.
 
 **The section label is the backend name.** Easy to get backwards, and getting it
@@ -906,6 +932,38 @@ module and their stdout *is* their protocol. Neither argument may be removed.
 stderr is not quiet, so no test may assert it empty.
 
 `redirect_whispercpp_logs_to` stays at its `False` default. Its binding governs stderr rather than the log callback, and `None` redirects process-wide fd 2 during model loading, silencing unrelated threads while leaving stdout behavior unchanged.
+
+## Sending on a deliberate stop
+
+`stt.submit_on_release`, off by default, sends the message when the person
+deliberately stops dictating. It is a browser-side behaviour: the gateway only
+stores the flag and serves it with the STT config, so a change applies to the
+next recording without a restart. It is independent of `stt.endpointing` and
+works on every provider, streaming or batch.
+
+A stop may carry the `StopIntent` `'finish'` (`website/src/lib/pttSession.ts`),
+and only a `'finish'` stop can send. The push-to-talk key's release, a press
+that ends a running capture (the key, the mic, or the hold bar pressed to end a
+capture started elsewhere), the hold bar's release, and a mic click are
+`'finish'`. Keeping a draft is a stop with no intent: Shift still down at the
+key's release, pressed during a hold, or added to the press that stops a
+running capture (setting on only), and Shift-click on the mic. Shift is ignored
+for a binding that already uses it. On the touch hold bar, sliding sideways
+past `DRAFT_THRESHOLD_PX` arms keep-as-draft and sliding up still arms cancel,
+which wins when both are crossed. Both are armed until the release and read
+from the release position. The hard cap, blur, a hidden page, `pointercancel`,
+an orphaned startup and unmount also stop with no intent, and Esc and slide-up
+cancel discard, so none of them send.
+
+`useComposerVoice` arms one pending release at a `'finish'` stop over a live
+capture that no send has already ended. It sends once, through the host's
+auto-submit, after capture, drain, transcription and any polish have settled.
+It keeps the draft instead when the transcript is empty or failed, when the
+composer no longer holds exactly what the dictation last wrote (the person
+typed), when the chat changed or the transcript was delivered off screen, or
+when a new capture started. Any send, including an endpoint verdict before the
+release, clears the pending release, and endpoint verdicts are already ignored
+after a manual stop, so the two routes cannot both send.
 
 ## Tidying a finished transcript
 
@@ -1285,7 +1343,8 @@ restated here, because a copied constant goes stale silently.
 | `MAX_PHRASE_SECS` | `stt/session.py` | Phrase length before a commit is forced |
 | `PHRASE_SILENCE_MS` | `stt/session.py` | Sustained quiet needed to commit a phrase |
 | `MIN_DECODE_SECS`, `MIN_COMMIT_SECS` | `stt/session.py` | Floors below which a decode or a commit is not worth doing |
-| `THREAD_CEILING` | `stt/engine.py` | Extrapolation ceiling on the derived thread count |
+| `THREAD_CEILING` | `stt/limits.py` | Ceiling on the auto (derived) thread count; an explicit `stt.threads` is not bounded by it |
+| `MAX_THREADS` | `stt/limits.py` | A stored `stt.threads`; the engine lowers an explicit count to the cores this process may run on |
 | `DEFAULT_TIMEOUT_SECS` | `stt/engine.py` | One decode or one model load |
 | `DEFAULT_MAX_UTTERANCE_MS`, `MIN_SILENCE_MS` | `stt/vad.py` | Utterance backstop, and the floor on `stt.silence_ms` |
 
@@ -1348,9 +1407,33 @@ snapshot, so anything the user typed before speaking survives, and the caret doe
 not jump. The snapshot clears on the final, so the next utterance starts from the
 newly committed text.
 
+## Registered providers
+
+A composed edition can add STT providers through the `speech` slot on `PlatformContext` (`SpeechProviderRegistry.stt_providers()`; see `platform-context.md`). The default registry adds none, so a standalone install has exactly the built-in set.
+
+- **Collision rule.** A registered name may not be a built-in (`local`, `apple`, `transcribe`), a retired name or `off`, may not be blank and may not repeat. `speech_providers.validate_speech_registry` refuses any of these at boot with `PlatformCompositionError`, so an edition can add a provider but never replace one.
+- **Default precedence.** A stored `stt.provider` always wins. Only an absent key takes the edition's `default_stt()`, and only when that is `None` does it take core's `local`. An unusable stored value keeps its built-in fallback below, so a typo never reaches the edition default.
+- **Streaming.** A registered provider joins the streaming grant only when its `streaming` attribute is true. Positive membership stays the rule.
+
+### The capability `providers` list
+
+`GET /api/config/stt` serves `providers`, one entry per selectable provider, in `valid_stt_providers()` order: built-ins first in their usual order, then registered ones in registration order, with `off` last. A built-in entry is `{name, builtin: true}` and runs no probe; the dashboard reads built-in availability from its existing badge. A registered entry is:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | string | The `stt.provider` value. |
+| `label` | string | Display label. |
+| `builtin` | bool | Whether core ships it. |
+| `available` | bool | Whether it can run now, from the provider's `check()`. |
+| `reason` | string or null | Why it cannot run, in the provider's words. |
+| `action` | `{"kind": "login", "label": string}` or null | What the user can do. `login` names the account to sign in to. |
+| `error` | bool | True only when the provider's `check()` timed out or raised (`speech_providers.check_status`). False for a missing prerequisite such as a login or an install. |
+
+The Settings picker (`SttSettings`, through `lib/speechProviders.ts`) renders its options from this list. An unavailable registered provider stays selectable; while it is selected, `SpeechProviderNotice` shows its `reason` under the picker. An `error` row is a failure, so it renders through `ErrorNotice`, with the agent hand-off only while no AWS profile or region draft is unsaved. Any other row is status text, with a sign-in hint naming `action.label` for a `login` action. Built-ins keep the availability badge and messages above, so a standalone install shows no new text. An older gateway that serves bare names, or no list, still renders: bare names read as available built-ins, and no list falls back to `FALLBACK_PROVIDERS`.
+
 ## Legacy provider values
 
-`_validated_stt_provider` in `config/sections_stt.py` accepts `local`, `apple`, `transcribe`, and `off`. Two classes of stored value fall outside that set and degrade differently, each logging the replacement once per process rather than preventing the gateway from loading a voice setting:
+`_validated_stt_provider` in `config/sections_stt.py` accepts `local`, `apple`, `transcribe`, `off`, and any name an edition registered (see Registered providers). Two classes of stored value fall outside that set and degrade differently, each logging the replacement once per process rather than preventing the gateway from loading a voice setting:
 
 - Persisted `whisper`, `mlx`, `parakeet`, or `faster` (the retired names) degrade to `local`: each was a local recogniser the user had working, and the resident engine recognises the same speech.
 - Any other value degrades to `off`. An unknown value used to degrade to `local`, which put a typo or a guessed value onto the one provider that links a native library into the gateway; a user told to set `stt.provider off` while that library was crashing on model load got the crashing engine back, and learned it only from a WARNING line (kirodotdev/KiroCrew#13179). Failing closed is the one reading that cannot make things worse. `kirocrew config set stt.provider <value>` refuses a value outside the enum at the write, so a stored unknown value can only arrive from a hand edit or an older writer.

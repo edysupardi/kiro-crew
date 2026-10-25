@@ -21,7 +21,8 @@ did". A literal copy in this file would be a fourth copy, free to drift with
 the thing it is supposed to pin.
 
 One mirror is deliberately NOT verbatim. `sanitize.ts` omits the two-segment
-alternative's leading lookbehind because the browser cannot afford it. Vite
+alternative's leading boundary (its lookbehind and the start guard after `.`)
+because the browser cannot afford the lookbehind. Vite
 declares no `build.target`, so the default `'modules'` floor is `safari14`, and
 at that target esbuild rewrites an unsupported lookbehind literal into a
 `new RegExp(...)` call. That defers the error from parse time to run time, but
@@ -63,6 +64,8 @@ BACKEND_PKG = ROOT / "src" / "kiro_crew" / "security"
 # The module that owns the exfil URL classifier today. Named separately so a
 # guard can point at the enforcing site while the sweep stays package-wide.
 BACKEND_EXFIL = BACKEND_PKG / "exfil.py"
+# The owner beside it that declares the URL rule tables the classifier applies.
+BACKEND_EXFIL_RULES = BACKEND_PKG / "exfil_url_rules.py"
 PREPARE_PR = (
     ROOT / "src" / "kiro_crew" / "builtin_skills" / "kirocrew-dev" / "kirocrew-prepare-pr" / "scripts" / "_review_contract.py"
 )
@@ -84,18 +87,21 @@ def _jwt_alternatives() -> tuple[str, str]:
     """
     alts = [alt for alt in _CREDENTIAL_PATTERNS.pattern.split("|") if "eyJ" in alt]
     assert len(alts) == 2, f"expected 2 JWT alternatives in _CREDENTIAL_PATTERNS, found {len(alts)}: {alts}"
-    three = [a for a in alts if "(?:" in a]
-    two = [a for a in alts if "(?:" not in a]
+    three = [a for a in alts if "){2,4}" in a]
+    two = [a for a in alts if "){2,4}" not in a]
     assert len(two) == 1 and len(three) == 1, f"cannot tell the alternatives apart: {alts}"
     return three[0], two[0]
 
 
 _LEADING_LOOKBEHIND_RE = re.compile(r"^\(\?<[=!][^)]*\)")
 _ANY_LOOKBEHIND_RE = re.compile(r"\(\?<[=!]")
+#: Where the two-segment body starts: the payload floor. Everything before it is
+#: the start boundary (the lookbehind and the guard after a `.`).
+_TWO_SEGMENT_BODY_START = "eyJ[A-Za-z0-9_-]{"
 
 
 def _two_segment_split() -> tuple[str, str]:
-    """Return (leading_lookbehind, body) of the backend two-segment alternative.
+    """Return (leading_boundary, body) of the backend two-segment alternative.
 
     Both halves are sliced off the enforcing regex rather than restated, so the
     frontend's body assertion tracks a backend edit to the bounds automatically
@@ -108,7 +114,8 @@ def _two_segment_split() -> tuple[str, str]:
         "If the backend dropped it too, the mirrors are back to plain parity and "
         f"the frontend exemption below should be deleted.\ngot: {two_segment}"
     )
-    return match.group(0), two_segment[match.end() :]
+    start = two_segment.index(_TWO_SEGMENT_BODY_START)
+    return two_segment[:start], two_segment[start:]
 
 
 class TestMirrorsMatchTheBackend:
@@ -171,7 +178,7 @@ class TestBase64BlobMirror:
     SPELLING = r"[A-Za-z0-9+/]{40,}={0,2}|[A-Za-z0-9+/]{39}=|[A-Za-z0-9+/]{38}=="
 
     def test_backend_carries_the_spelling(self) -> None:
-        assert f'r"{self.SPELLING}"' in BACKEND_EXFIL.read_text(encoding="utf-8")
+        assert f'r"{self.SPELLING}"' in BACKEND_EXFIL_RULES.read_text(encoding="utf-8")
 
     def test_frontend_carries_the_spelling(self) -> None:
         text = FRONTEND.read_text(encoding="utf-8")

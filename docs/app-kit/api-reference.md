@@ -122,11 +122,38 @@ shown as text, only as the header's hover tooltip.
 | `placeholder` | `string` | localized "Message..." (`appSdk.chatEmbed.message`) | Composer placeholder while the session is idle. While a turn runs the composer shows its own "agent is working" text instead. |
 | `frameless` | `boolean` | `false` | Drops the outer border, rounding, background and title strip, and makes the input row transparent, so a host card can hold the chat flush. |
 | `startAtBottom` | `boolean` | `false` | Opens scrolled to the newest row and stays pinned there as rows arrive, until the user scrolls up; shows a jump-to-bottom button while unpinned. Without it the embed opens at the top and smooth-scrolls to each new message. |
-| `onSend` | `(message: string, meta?: ChatEmbedSendMeta) => Promise<unknown> \| void` | none | Replaces `POST /api/chat` as the send path. Use it when the app owns its slots: the generic endpoint creates a missing slot with no app ownership and no project. A send with non-image attachments passes `meta` (`{ files?: string[] }`); forward it as `meta` on your own chat POST (see [Attachments](#attachments)). |
+| `onSend` | `(message: string, meta?: ChatEmbedSendMeta) => Promise<unknown> \| void` | none | Replaces `POST /api/chat` as the send path. Use it when the app owns its slots: the generic endpoint creates a missing slot with no app ownership and no project. Every send passes `meta` (`{ sendId?: string; files?: string[]; pastes?: PasteBlock[] }`): `sendId` always, `files` and `pastes` when the send has non-image attachments or a collapsed paste. Forward it as `meta` on your own chat POST (see [Attachments](#attachments) and [Long pastes](#long-pastes)); forwarding `meta.sendId` lets the embed prove a send landed even when `onSend` rejects. |
 | `aboveComposer` | `ReactNode` | none | Content placed in normal flow directly above the composer, such as a docked quote bar. |
 | `composerMaxHeight` | `number` (px) | `240` | Cap for the composer's auto-grow (see below). |
 | `onFileOpen` | `(path: string, opts?: { line?: number; endLine?: number }) => void` | none | Opens a file the transcript names; without it the tool-row file chip is hidden and path links stay plain (see below). |
 | `onArtifactOpen` | `(slug: string) => void` | none | Opens a saved artifact from a link in a reply; without it artifact links follow their href. |
+| `hide` | `readonly ChatEmbedHideKey[]` | none | Parts of the embed not to mount (see [Hiding parts](#hiding-parts)). |
+
+### Hiding parts
+
+`hide` removes parts of the embed. A hidden part is not mounted at all.
+
+```tsx
+import { ChatEmbed, type ChatEmbedHideKey } from '@kirocrew/app-sdk'
+
+const HIDE: ChatEmbedHideKey[] = ['header', 'stop', 'toolDetails']
+
+<ChatEmbed slotKey="coder-abc123" hide={HIDE} />
+```
+
+| Key | What goes away |
+|---|---|
+| `header` | The title strip. The same strip `frameless` drops, without changing the frame. |
+| `attach` | The attach button. A pasted or dropped file is refused with the same notice an app without the upload grant shows, so nothing is uploaded. |
+| `stop` | The Stop button and its hints. Send stays in its place: it is disabled while the draft is empty and queues a typed draft. The user then has no way to halt a running turn from the embed, so hide it only where the host offers its own stop or turns are short. |
+| `queue` | The queued-message cards above the composer. A message sent while the agent works is still queued; it shows once the turn reaches it. Until then nothing in the embed shows it was kept, so a user may send it again; hide it only where the host shows its own pending state or sends while idle. |
+| `toolDetails` | The panel a tool row opens on click. Each tool row stays as a status pill. An open panel closes when the key is added. |
+| `followUps` | The follow-up suggestion chips above the composer. |
+
+Any other string is a type error. Hiding only removes: it never shows a part
+the app has no grant for (`attach` still needs `/api/upload/file`, approvals
+still need `/api/chat`), and voice input stays off either way. The transcript
+and the message box cannot be hidden.
 
 ### Required permissions and limitations
 
@@ -141,6 +168,9 @@ API-path check for each of these calls:
 
 File attachments upload to `POST /api/upload/file`, which `/api/chat` does not
 cover: it is a separate, optional grant (see [Attachments](#attachments)).
+The `/` command menu and the `@` file menu read `GET /api/slash-commands` and
+`GET /api/file-search`; each is its own optional grant (see
+[Command and file pickers](#command-and-file-pickers)).
 
 Without the API-path grant the scoped client throws before any request is sent:
 the transcript shows its load error, and sending and approving fail. Supplying
@@ -184,9 +214,10 @@ entry then takes over the same card). Once seen, it does not come back. Each
 send is held on its own, so a second send made before the poll shows the first
 leaves the first's copy in place. A send
 whose text goes back to the composer (refused, or delivery not confirmed) drops
-the row. An `onSend` handler posts on its own endpoint, so no `sendId` comes
-back; there the server copy is a new `user` row with the same text, one that
-was not in the transcript at send time.
+the row. An `onSend` handler posts on its own endpoint. If it forwards
+`meta.sendId`, the server copy is found by id as for a default send. If not,
+the server copy is a new `user` row with the same text, one that was not in
+the transcript at send time.
 
 A host that boxes the embed at a fixed height passes `composerMaxHeight` (in
 pixels) to lower that cap, so a long draft cannot take most of the box from the
@@ -325,9 +356,67 @@ A server refusal (unsupported type, over the size cap) shows the same way with
 the server's reason.
 
 A host that passes `onSend` receives the meta as a second argument on a send
-with non-image attachments, `onSend(message, { files })`, and forwards it as
-`meta` on its own chat POST. A send without attachments still calls
-`onSend(message)` alone.
+with non-image attachments, `onSend(message, { sendId, files })`, and forwards
+it as `meta` on its own chat POST. A send without attachments calls
+`onSend(message, { sendId })`.
+
+### Command and file pickers
+
+The composer offers the main chat's own `/` command menu and `@` file menu, the
+same components with the same keys: arrows move, Enter or Tab accepts, Escape
+closes. Each menu reads through the app's scoped client, and each is shown only
+when the manifest declares its endpoint; nothing grants either by default:
+
+```json
+"permissions": { "api": ["/api/chat", "/api/chat/slots", "/api/slash-commands", "/api/file-search"] }
+```
+
+| Menu | Opens on | Reads | Without the grant |
+|---|---|---|---|
+| Commands | a `/` at the start of the text | `GET /api/slash-commands` | no menu; `/text` sends as typed |
+| Files | an `@` token at the caret, two characters on | `GET /api/file-search?q=…` | no menu; `@text` sends as typed |
+
+Accepting a command puts it in the composer; the send runs it, as in the main
+chat. Each file row shows the folder it sits in, cut from the start, so files
+with the same name stay distinguishable in a narrow embed. The menu leaves out `/side`, `/btw`, `/onboarding` and `/kb`: the main
+chat runs those in the browser, and the embed has nothing to run them with.
+Accepting a file writes its `@path` token and stages the file like an
+attachment, so the send carries it in `meta.files`; removing the file's chip
+takes its `@path` token out of the text as well. A folder writes only its
+`@path/` token, which stays text (see [Attachments](#attachments)). Staging a
+picked file uploads nothing, so it needs no `/api/upload/file` grant.
+
+Both menus are opt-in: no host in this repository declares either path today,
+so they appear only in a host that does. The gateway answers the file search
+only for the dashboard owner's own requests. A builtin page mounted in the
+dashboard gets results. An installed app does not: declaring
+`/api/file-search` gives it no working `@` menu today, since its token is
+refused and the menu reports a failed search, so an installed app should not
+declare it.
+
+The main chat's `./` path completion and `$` skill menu are not offered: path
+completion resolves against a project directory the embed does not name, and
+the skill list is resolved against the chat's session key, which the scoped
+client does not let an app choose.
+
+### Long pastes
+
+A long paste collapses the way it does in the main chat. Text of four lines or
+more, or over 200 characters, goes into the draft as one
+`[ Paste #N · M lines ]` chip instead of its full text. The chip moves and
+deletes as one unit, hovering it (or putting the caret inside it) previews the
+text, and a double-click (a tap on touch) expands it back into the draft.
+Copy and cut of a selection that covers a chip copy the full text, and
+Cmd/Ctrl+Z after deleting a chip brings it back with its text.
+`Cmd/Ctrl+Shift+V` pastes in full once, and the user's **Show Pasted Text in
+Full** chat setting turns collapsing off.
+
+On send each chip is expanded in `message`, and its block rides
+`meta.pastes`, the main chat's send shape, so the transcript folds the text
+back into the same chip. A refused send hands the chip back with its block, so
+pressing Send again still sends the full text. A host that passes `onSend`
+receives that meta, `onSend(message, { sendId, pastes })`, and forwards it as `meta`
+on its own chat POST. No permission is involved: nothing is uploaded.
 
 ## Native Chat Panel
 
@@ -537,11 +626,11 @@ Three rules the registry relies on:
 
 ### Error hand-off inside the list
 
-A failed approval decision and a refused tool-output copy render an `ErrorNotice` with the "Ask the
-agent" hand-off, which navigates to the main chat. A host holding unsaved local state that the
+A failed approval decision, a refused tool-output copy and a failed MCP sign-in banner render an
+`ErrorNotice` with the "Ask the agent" hand-off, which navigates to the main chat. A host holding unsaved local state that the
 navigation would drop passes `handOff={false}` to `ChatMessageList`: those notices then render
 without the button, and renderers see `ctx.handOff === false`. `ChatEmbed` does this because its
-composer draft lives only in the embed. `ToolCallPill` takes the same switch as `askAgent`.
+composer draft lives only in the embed; `ChatPane` does too, for its staged message quote. `ToolCallPill` takes the same switch as `askAgent`.
 Default is `true`, so a host with nothing to lose keeps the hand-off.
 
 ### Exports
@@ -552,7 +641,7 @@ Default is `true`, so a host with nothing to lose keeps the hand-off.
 | `defaultMessageRenderers` | value | the built-in registry, in resolution order |
 | `mergeRenderers(extra)` | function | shape-matched defaults, then host entries, then the rest |
 | `resolveRenderer(message, renderers)` | function | first entry that claims the message |
-| `ToolCallPill` | component | the store-free tool row the default registry uses; expanded, it shows the persisted `meta.input` / `meta.output` in the main chat's Input/Output panel, and falls back to the row's `content` only when both are empty |
+| `ToolCallPill` | component | the store-free tool row the default registry uses; expanded, it shows the persisted `meta.input` / `meta.output` in the main chat's Input/Output panel, and falls back to the row's `content` only when both are empty; with a payload, its Copy control copies input and output together whichever tab is showing, and says so in a visible "Copy input and output" label, while a fallback row keeps the icon-only Copy |
 | `GROUPED_ROLES` | value | frozen array of the roles grouped before per-row resolution (see the limitation above) |
 | `MessageRenderer` | type | `{ id, roles, match?, render }` |
 | `MessageRenderContext` | type | what `render` is handed |
@@ -888,6 +977,32 @@ Editing that copy changes nothing on the record.
 return. Only the SDK call takes `params`: the HTTP start route
 (`POST /api/apps/{app}/_jobs/{kind}/start`) accepts a `dedupe_key` and no
 parameters.
+
+### Crewmate proposals (`ctx.crewmate`)
+
+> **Preview, switched off.** `ctx.crewmate` is `None` for every app, even one that declares the permission, until the dashboard view that lists an app's cards lands (#21718). The calls below describe the contract that view will switch on (`apps/crewmate_sdk.py::PREVIEW_ENABLED`).
+
+Once switched on, present when the manifest declares `permissions.proposeCrewmate: true`, and `None` otherwise. The app hands core one parsed `.crewmate` bundle ([rfc-crewmate-share.md](../request-for-change/rfc-crewmate-share.md) §5.2). Core checks it and raises one `crewmate.import` change card for the owner. The app creates nothing: only the owner's press creates the crewmate.
+
+```python
+card_id = await ctx.crewmate.propose(bundle)   # raises CrewmateProposalError(code, message)
+state = await ctx.crewmate.status(card_id)     # {"status": "pending"} ... {"status": "applied", "crew": "<key>"}
+```
+
+`bundle` is `{"crewmate": <crewmate.json>, "agent": <agent.json>, "goals"?: {"longTerm", "keyResults"}, "rules"?: {"rules"}, "crons"?: [...], "avatar"?: {"type", "size"}}`. Core refuses it before any card exists when:
+
+| Code | Cause |
+|---|---|
+| `unknown_param` | an unknown key in the bundle, `crewmate`, `agent`, `goals`, `rules`, `sender` or `avatar` (`{"type", "size"}`); crons and key results are only counted |
+| `invalid_bundle` | not `format: "kirocrew.crewmate"`, a bad shape, or a `dashboardTemplate` that is not a `builtin:` or `user:` id |
+| `newer_format` | a `formatVersion` this version does not read |
+| `grant_in_bundle` | `allowedTools`, `autoApprove` or `permissions` in `agent.json` |
+| `needs_mate_config` | any `mcpServers` or `skills` entry, until the mate-owned agent file exists (RFC §5.7) |
+| `rules_unsupported` | non-empty rules, which this version cannot import yet |
+
+The card creates the crewmate from the `kirocrew` template with a fresh member id, its own empty memory and workspace, and `approval_mode: "normal"` in the create. It writes the long-term goal when the bundle has one. It lists the crons, key results, picture or face, model or effort hints and dashboard template a bundle carries under "Not brought over", as codes the dashboard words, and memory, history, credentials and the sender's approval settings under "Stays with the sender". A taken name becomes the first free `<name> 2` to `<name> 9`, and the owner can edit it.
+
+The card is stored under the key `app:<name>` with no conversation, so an app's open cards count against one per-app cap. `status` reads only this app's own cards. The dashboard view where the owner presses an app card is not built yet.
 
 ### Gateway Application (`ctx.http_app`)
 
@@ -1293,14 +1408,14 @@ dashboard, app, or internal credential; a bare `curl` request is not authenticat
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/apps` | List all installed apps |
+| GET | `/api/apps` | List all installed apps, each with cached `update` state |
 | GET | `/api/apps/registry` | List available apps from registry |
 | GET | `/api/apps/blob?repo=&path=&ref=` | Proxy images from a registry app's git repo |
 | POST | `/api/apps/install` | Install from local path (owner only) |
 | POST | `/api/apps/register` | Register a self-managed app (owner only) |
 | POST | `/api/apps/registry/install` | Install from registry (owner only) |
 | POST | `/api/apps/registry/install-stream` | Install from registry with an SSE progress stream (owner only) |
-| GET | `/api/apps/{name}` | Get app details |
+| GET | `/api/apps/{name}` | Get app details, including cached `update` state |
 | GET | `/api/apps/{name}/manifest` | Get app manifest |
 | GET/PUT | `/api/apps/{name}/config` | Read/write app config (PUT from a dashboard subject: owner only) |
 | POST | `/api/apps/{name}/update` | Update installed app (owner only) |

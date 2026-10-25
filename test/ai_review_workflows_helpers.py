@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from git_maintenance_helpers import git_global_config_text
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -138,6 +139,9 @@ def _flat(text: str) -> str:
 
 
 def _step_script(workflow: str, step_name: str) -> str:
+    # A Windows checkout can hand over CRLF text (autocrlf); a `\r` left in the
+    # extracted script ends up inside every quoted string and shebang.
+    workflow = workflow.replace("\r\n", "\n").replace("\r", "\n")
     step_start = workflow.index(f"      - name: {step_name}")
     run_start = workflow.index("        run: |\n", step_start) + len("        run: |\n")
     # The next step may begin with `- uses:` rather than `- name:`; stopping only
@@ -148,6 +152,18 @@ def _step_script(workflow: str, step_name: str) -> str:
         line[10:] if line.startswith("          ") else line
         for line in workflow[run_start:step_end].splitlines()
     )
+
+
+def _script_file(tmp_path: Path, script: str, name: str = "step.sh") -> str:
+    """Write an extracted workflow script as LF text and return its path.
+
+    Run it as ``[bash, "-e", path]``, not ``[bash, "-e", "-c", script]``: a long,
+    multi-line script handed through the Windows command line is re-parsed by the
+    MSYS runtime on the way in, and a script file is read by bash itself.
+    """
+    path = tmp_path / name
+    path.write_text(script.replace("\r\n", "\n"), encoding="utf-8", newline="\n")
+    return str(path)
 
 
 def _shell_function(script: str, function_name: str) -> str:
@@ -294,8 +310,22 @@ def _step(workflow_name: str, step_name: str) -> dict:
     raise AssertionError(f"{workflow_name}: no step named {step_name!r}")
 
 
+#: The redactor the reviewer lanes stage from the base commit. A test that
+#: runs a step holding a scrub hands it the REAL script, so the step's scrub and its
+#: refusal branch are exercised against the code that ships, not a stand-in.
+REDACTOR_PATH = str(ROOT / "scripts" / "scope_redact.py")
+
+#: How a reviewer lane calls that redactor, for a test that locates the scrub.
+SCRUB_CALL = 'python3 "$REDACTOR" --mode text'
+
+#: The expression a lane uses to hand its staged redactor to a step.
+_STAGED_REDACTOR = "${{ steps.redactor.outputs.redactor }}"
+
+
 def _step_env(workflow_name: str, step_name: str) -> dict[str, str]:
-    return {k: str(v) for k, v in (_step(workflow_name, step_name).get("env") or {}).items()}
+    """The step's literal env block, with the staged redactor resolved to the real one."""
+    env = {k: str(v) for k, v in (_step(workflow_name, step_name).get("env") or {}).items()}
+    return {k: REDACTOR_PATH if v == _STAGED_REDACTOR else v for k, v in env.items()}
 
 
 def _exec_transcript(runner_temp: Path, review_text: str) -> dict[str, str]:
@@ -456,7 +486,8 @@ _GUARDED_LANES = [
         "marker": "<!-- design-review -->",
         "stamp": "[DESIGN-REVIEWED]",
         "incomplete_text": "could not complete",
-        "needs_perl": True,
+        "needs_perl": False,
+        "needs_redactor": True,
         "env": {"HUMAN_OVERRIDE": "false", "OVERRIDE_ACTOR": "", "ACTOR": "someone"},
         "completed": lambda cwd, rt, head: _exec_transcript(
             rt, f"Design-Verdict: PASS\n\nsolid reasoning\n\n[DESIGN-REVIEWED] {head}\n"
@@ -472,7 +503,8 @@ _GUARDED_LANES = [
         "marker": "<!-- ux-review -->",
         "stamp": "[UX-REVIEWED]",
         "incomplete_text": "could not complete",
-        "needs_perl": True,
+        "needs_perl": False,
+        "needs_redactor": True,
         "env": {
             "HUMAN_OVERRIDE": "false",
             "OVERRIDE_ACTOR": "",
@@ -493,7 +525,8 @@ _GUARDED_LANES = [
         "marker": "<!-- first-principles-review -->",
         "stamp": "[FIRST-PRINCIPLES-REVIEWED]",
         "incomplete_text": "could not complete",
-        "needs_perl": True,
+        "needs_perl": False,
+        "needs_redactor": True,
         "env": {
             "HUMAN_OVERRIDE": "false",
             "OVERRIDE_ACTOR": "",
@@ -536,7 +569,8 @@ _GUARDED_LANES = [
         "marker": "<!-- ux-review -->",
         "stamp": "[UX-REVIEWED]",
         "incomplete_text": "could not complete",
-        "needs_perl": True,
+        "needs_perl": False,
+        "needs_redactor": True,
         "env": {"UI_SCOPE": "true"},
         "completed": lambda cwd, rt, head: _exec_transcript(
             rt, f"UX-Verdict: PASS\n\nsolid reasoning\n\n[UX-REVIEWED] {head}\n"
@@ -1037,7 +1071,8 @@ class UxEvidenceGateHarness:
         every write below land in THAT repository despite `cwd=repo`, so every
         `GIT_*` location variable is dropped. Global and system config are
         pointed away too, so a host-wide `commit.gpgsign` or hook path cannot
-        reach the fixture.
+        reach the fixture. The global file it points at turns auto maintenance
+        off, since dropping `GIT_*` also drops the suite's own entries.
 
         `RUNNER_TEMP` is given its own per-case directory for the same reason,
         and it matters as soon as a step under test keeps anything there. The
@@ -1054,7 +1089,7 @@ class UxEvidenceGateHarness:
         """
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         gitconfig = tmp_path / "gitconfig"
-        gitconfig.touch()
+        gitconfig.write_text(git_global_config_text(), encoding="utf-8")
         env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
         env["GIT_CONFIG_NOSYSTEM"] = "1"
         runner_temp = tmp_path / "runner-temp"

@@ -262,7 +262,7 @@ export function useChatPanelModelDefaults({
   // agent") can answer for a different agent than a roster read that has not
   // caught up with a default-agent change, and the button would then clear
   // the wrong agent's pin.
-  const resolvedQ = useQuery<{ model?: string; pinned?: boolean }>({
+  const resolvedQ = useQuery<{ model?: string; pinned?: boolean; reasoning_effort?: string; effort_pinned?: boolean }>({
     queryKey: ['resolved-model', pinAgentName],
     queryFn: () => api.agentResolvedModel(pinAgentName),
     enabled: agentsQ.isSuccess,
@@ -332,11 +332,70 @@ export function useChatPanelModelDefaults({
   // enabled state tracks the trigger the user is looking at, not a value the
   // refetch has yet to replace.
   const effortSupported = modelSupportsEffort(shownDefaultModel)
-  const defaultEffortMut = useMutation(
-    optimisticConfigOpts('agent.reasoning_effort', () =>
-      i18nT('pages.settings.chatPanel.failed_to_save_default_reasoning_effort')
-    )
+  const defaultEffortOpts = optimisticConfigOpts('agent.reasoning_effort', () =>
+    i18nT('pages.settings.chatPanel.failed_to_save_default_reasoning_effort')
   )
+  const defaultEffortMut = useMutation({
+    ...defaultEffortOpts,
+    // An agent with no effort pin resolves to `agent.reasoning_effort`, so the
+    // effort notice below re-asks the resolver once the new global lands.
+    onSuccess: (data: unknown, v: string, token: number) => {
+      qc.invalidateQueries({ queryKey: ['resolved-model'] })
+      return defaultEffortOpts.onSuccess(data, v, token)
+    },
+  })
+
+  // ── Default agent's effort pin vs Default Reasoning Effort ──
+  // Same question as the model notice above, asked of the same resolver read:
+  // `reasoning_effort` is what a new chat on the default agent starts at
+  // (`KiroCrewConfig.resolve_session_effort`: the agent's own pin, then the
+  // role-aware default), and `effort_pinned` says the agent's own record won.
+  // A gateway that predates those fields leaves them unset, which shows nothing.
+  const resolvedEffortRaw = resolvedQ.data?.reasoning_effort
+  const resolvedEffort = typeof resolvedEffortRaw === 'string' ? resolvedEffortRaw.trim().toLowerCase() : null
+  // '' is a real choice here ("Model default"), not Auto: it promises the model's
+  // own effort, so a pin that replaces it is an override worth naming too. The
+  // SHOWN value is accepted for the same in-flight reason as the model notice.
+  // Effort only matters on a model that takes one, so a chat that starts on a
+  // model without it (or on the backend's own choice) shows nothing.
+  const agentEffortOverrides =
+    resolvedEffort !== null &&
+    modelSupportsEffort(resolvedModel) &&
+    resolvedEffort !== defaultEffort.trim().toLowerCase() &&
+    resolvedEffort !== shownDefaultEffort.trim().toLowerCase()
+  // The clear button erases the roster's pin, so it also requires the roster to
+  // carry the pin the resolver answered with — the same cross-check the model
+  // notice makes before it offers to erase anything.
+  const memberEffortPinOverrides = agentEffortOverrides &&
+    resolvedQ.data?.effort_pinned === true &&
+    (pinAgent?.reasoning_effort ?? '').trim().toLowerCase() === resolvedEffort
+  // Without the agent's own pin, the only other tier is the Background role
+  // effort (an agent bound to a background worker takes it), which this page
+  // sets a few rows down — so that notice names it and has no button. It shows
+  // only when the answer IS that row's value, saved or shown, so the notice
+  // never names Background Effort as the source of an effort it did not set.
+  const savedBgEffort = mcCfg?.agent?.role_efforts?.background ?? ''
+  const roleEffortAnswered = [savedBgEffort, overlay.shown('agent.role_efforts.background', savedBgEffort)]
+    .some(v => v.trim().toLowerCase() === resolvedEffort)
+  const showEffortPinNotice = agentEffortOverrides &&
+    (memberEffortPinOverrides || (resolvedQ.data?.effort_pinned !== true && roleEffortAnswered))
+  const resolvedEffortLabel = resolvedEffort
+    ? effortLabel(resolvedEffort)
+    : i18nT('pages.settings.chatPanel.model_default')
+  const clearAgentEffortPinMut = useMutation({
+    // '' is the inherit sentinel: the agent falls back to the global default.
+    mutationFn: () => api.updateKirocrewAgent(pinAgentName, { reasoning_effort: '' }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['kirocrew-agents'] })
+      qc.invalidateQueries({ queryKey: ['resolved-model'] })
+    },
+    // Rendered inline beside the button, like the model clear above.
+  })
+  const clearAgentEffortPinError = clearAgentEffortPinMut.isError
+    ? (clearAgentEffortPinMut.error instanceof Error && clearAgentEffortPinMut.error.message
+      ? i18nT('pages.settings.chatPanel.failed_to_clear_agent_effort_pin', { error: clearAgentEffortPinMut.error.message })
+      : i18nT('pages.settings.chatPanel.failed_to_clear_agent_effort_pin_no_reason'))
+    : ''
 
   // ── Per-role model defaults (agent.role_models) ──
   // Same picker as the chat default above, but NOT the same precedence:
@@ -402,9 +461,18 @@ export function useChatPanelModelDefaults({
   const bgEffortSupported = modelSupportsEffort(shownBackgroundModel !== 'auto' ? shownBackgroundModel : shownDefaultModel)
   const subEffortSupported = modelSupportsEffort(shownSubagentModel !== 'auto' ? shownSubagentModel : shownDefaultModel)
   const effortLabels = EFFORT_LEVELS.map(l => (l === '' ? i18nT('pages.settings.chatPanel.model_default') : effortLabel(l)))
-  const backgroundEffortMut = useMutation(
-    optimisticConfigOpts('agent.role_efforts.background', () => i18nT('pages.settings.chatPanel.failed_to_save_role_effort'))
+  const backgroundEffortOpts = optimisticConfigOpts(
+    'agent.role_efforts.background', () => i18nT('pages.settings.chatPanel.failed_to_save_role_effort'),
   )
+  const backgroundEffortMut = useMutation({
+    ...backgroundEffortOpts,
+    // A default agent bound to a background worker resolves to this effort, so
+    // the effort notice above names it and must re-ask once it changes.
+    onSuccess: (data: unknown, v: string, token: number) => {
+      qc.invalidateQueries({ queryKey: ['resolved-model'] })
+      return backgroundEffortOpts.onSuccess(data, v, token)
+    },
+  })
   const subagentEffortMut = useMutation(
     optimisticConfigOpts('agent.role_efforts.subagent', () => i18nT('pages.settings.chatPanel.failed_to_save_role_effort'))
   )
@@ -417,5 +485,7 @@ export function useChatPanelModelDefaults({
     backgroundModelOpts, subagentModelOpts, fallbackOpts, refusalFallbackOpts, backgroundModelMut,
     subagentModelMut, shownBackgroundEffort, shownSubagentEffort, bgEffortSupported,
     subEffortSupported, effortLabels, backgroundEffortMut, subagentEffortMut,
+    memberEffortPinOverrides, showEffortPinNotice, resolvedEffortLabel, clearAgentEffortPinMut,
+    clearAgentEffortPinError,
   }
 }

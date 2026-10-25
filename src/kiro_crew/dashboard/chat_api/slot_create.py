@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 if TYPE_CHECKING:
+    from types import TracebackType
+
     from kiro_crew.dashboard.chat_handlers import (
         _CREATABLE_MODES,
         _DEFERRED_PLAIN_CREATE_KNOWN_KEYS,
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
         dispatch_kiro_agent,
         drained_to_thread,
         effective_session_key,
+        folder_principal,
         is_owner_dashboard_request,
         is_sensitive_path,
         logger,
@@ -56,6 +59,7 @@ if TYPE_CHECKING:
         redact_exfiltration_urls,
         request_slot_origin,
         resolve_agent_bindings,
+        resolve_default_session_folder,
         resolve_folder_project_dir_off_loop,
         restore_agent_selection,
         save_slot_off_loop,
@@ -67,6 +71,7 @@ if TYPE_CHECKING:
         voice_runtime_workspace_conflict,
         wait_for_memory_preparation,
     )
+    from kiro_crew.session_agent_selection import SelectionChange
 
 
 def _default_template_stamp(cfg: KiroCrewConfig) -> str:
@@ -81,6 +86,45 @@ def _default_template_stamp(cfg: KiroCrewConfig) -> str:
     default, so it has to be the declared name from the first write.
     """
     return dispatch_kiro_agent(default_template(cfg))
+
+
+def _created_slot_row(state: Any, request: web.Request, slot: Any) -> dict[str, Any]:
+    """*slot*'s row for the create route's answer, rank-free for a scoped caller.
+
+    A create can answer with an existing, already-pinned session (an
+    idempotent retry or a raced key). Its ``pin_rank`` is a place in the
+    person's whole pinned order, which an app or member caller gets none of.
+    """
+    row = state.serialize_slot(slot)
+    if folder_principal(state, request):
+        from kiro_crew.dashboard.pinned_session_order import PIN_ORDER_FIELDS
+
+        for field in PIN_ORDER_FIELDS:
+            row.pop(field, None)
+    return row
+
+
+def _retract_failed_newborn(state: DashboardState, slot: _ChatSlot) -> bool:
+    """Withdraw a slot this create minted and is answering with a failure.
+
+    The mint runs inside the create's ``suspend_slots_push`` block, so a newborn
+    still in ``state._slots`` when a failure returns goes out in the block's owed
+    frame: every client lists a session the caller was told did not get created,
+    and each retry adds another empty row. Removed synchronously, before the
+    block exits, so that frame never lists it, together with the restricted and
+    ephemeral keys the mint registered. Retracted only while it is provably the
+    newborn: a slot replaced under its key, or one a turn started on during the
+    create's awaits, stays (liveness over tidiness). Returns whether it was
+    retracted, so the caller undoes the selection it recorded for the key only
+    when no slot holds that key any more.
+    """
+    if slot.running or slot.messages or state._slots.get(slot.key) is not slot:
+        return False
+    state._slots.pop(slot.key, None)
+    state._restricted_keys.discard(f"dashboard:{slot.key}")
+    state._ephemeral_keys.discard(f"dashboard:{slot.key}")
+    _sync_dashboard_slots(state)
+    return True
 
 
 async def api_chat_slot_create(request: web.Request) -> web.Response:
@@ -152,6 +196,38 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
         )
     existing_slot = state._slots.get(_normalize_slot_key(str(name))) if name else None
     request_app = request.get("app", "")
+    # The person's default folder, for a dashboard New chat that named none.
+    # Asked for explicitly (`default_folder: true`) so apps, crons, channels and
+    # session_create keep the placement they have today, and applied only to a
+    # fresh unnamed create, since a named one can reopen a session that already
+    # has a place. A default that does not name one of the person's folders
+    # leaves the chat unfiled; see `resolve_default_session_folder`.
+    folder_from_default = False
+    requested_agent = agent
+    if (
+        body.get("default_folder") is True
+        and not folder_id
+        and not name
+        and not request_app
+        and not body.get("ephemeral")
+        and not body.get("artifact")
+        and is_owner_dashboard_request(request)
+    ):
+        try:
+            default_cfg = await asyncio.to_thread(KiroCrewConfig.load)
+            configured = getattr(default_cfg.dashboard, "default_session_folder", "")
+        except Exception:
+            logger.warning("Failed to load config for the default folder", exc_info=True)
+            configured = ""
+        if isinstance(configured, str) and configured:
+            folder_id, folder_agent = await state.read_folders(
+                lambda folders: resolve_default_session_folder(folders, configured)
+            )
+            folder_from_default = bool(folder_id)
+            # The folder's agent pin applies as it does for New chat in that
+            # folder; an agent the caller picked still wins.
+            if folder_from_default and folder_agent and not agent:
+                agent = folder_agent
     # Ownership of a NAMED slot for an app caller, before any refusal below can
     # answer about it (get_or_create_slot's memory-mode 409 among them) and
     # before anything is written. The post-create check stays authoritative.
@@ -193,7 +269,21 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
         folder_project, folder_project_error = await resolve_folder_project_dir_off_loop(
             folder_snapshot, folder_id
         )
-        if folder_project_error:
+        if folder_project_error and folder_from_default:
+            # The person asked for no folder, so a default folder whose project
+            # directory has gone missing must not refuse the chat. Unfiled is the
+            # safe answer: filing it there with a different project would run the
+            # chat somewhere that folder says it should not.
+            logger.warning(
+                "Default folder %s has an unusable project (%s); new chat left unfiled",
+                folder_id,
+                folder_project_error,
+            )
+            folder_id = ""
+            folder_project = ""
+            folder_from_default = False
+            agent = requested_agent
+        elif folder_project_error:
             return web.json_response(
                 {
                     "error": f"invalid folder project: {folder_project_error}",
@@ -410,7 +500,7 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
                 app=request.get("app", ""),
                 origin=request_slot_origin(request.get("app", ""), cron_creator=cron_creator),
                 # Human request-layer path: the dashboard new-chat tab. The
-                # origin conjunct in state.py still excludes app-token callers.
+                # origin conjunct in state_parts/slot_directory.py still excludes app-token callers.
                 # A slot an attested cron opens is not a person's and is not
                 # counted.
                 count_user_session=not cron_creator,
@@ -425,6 +515,30 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
                     exc,
                 )
             return web.json_response({"error": str(exc)}, status=409)
+        # Set by the member assignment below once it records a pick, so a
+        # failure after that point can undo the pick with the slot.
+        assignment_key = ""
+        selection_change: SelectionChange | None = None
+        if is_new_slot:
+
+            async def _retract_newborn_on_raise(
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                tb: TracebackType | None,
+            ) -> bool:
+                # The failure returns below retract the newborn themselves. This
+                # covers everything else that can leave the block after the
+                # mint: an unexpected exception at any await, and a
+                # cancellation, which no `except Exception` catches. Registered
+                # after `suspend_slots_push`, so it unwinds first and the frame
+                # that block flushes on the way out never lists the newborn.
+                if exc_type is not None and _retract_failed_newborn(state, slot):
+                    await drained_to_thread(
+                        restore_agent_selection, assignment_key, selection_change
+                    )
+                return False
+
+            creation_stack.push_async_exit(_retract_newborn_on_raise)
         if is_new_slot and agent_kind and not slot.agent_kind:
             # The namespace the name was stated (or stamped) in travels with the
             # slot from birth, for every caller: the owner branch below re-records
@@ -473,6 +587,8 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
         # know about. The reason stays in the audit row.
         denied = deny_app_slot_session_access(request_app, slot, slot.key, "chat_slot_create")
         if denied is not None:
+            if is_new_slot:
+                _retract_failed_newborn(state, slot)
             return denied
         # Pin title if explicitly provided (prevents auto-title from overwriting).
         # A cron caller uses this route as both create and reopen. Its title names
@@ -642,7 +758,6 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
                 assignment_agent = slot.agent
                 assignment_project = slot.project
                 await creation_stack.enter_async_context(_slot_switch_session_lock(assignment_key))
-                selection_change = None
                 try:
                     # An explicit template choice is the shared template even when
                     # a member carries the same name: it never pins member memory.
@@ -677,6 +792,9 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
                 except Exception as exc:
                     from kiro_crew.dashboard.handlers.memory import _store_unavailable_response
 
+                    # The selection record returns its change only on success,
+                    # so this path has no recorded pick to restore.
+                    _retract_failed_newborn(state, slot)
                     return _store_unavailable_response(slot.memory_store, exc)
                 if (
                     state._slots.get(slot.key) is not slot
@@ -684,6 +802,7 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
                     or slot.agent != assignment_agent
                     or slot.project != assignment_project
                 ):
+                    _retract_failed_newborn(state, slot)
                     await drained_to_thread(
                         restore_agent_selection, assignment_key, selection_change
                     )
@@ -743,24 +862,16 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
             # restart would bring it back without its binding. Retracted only
             # while it is still provably the newborn: a turn that started on it
             # during the write keeps the slot (liveness over tidiness).
-            try:
-                persisted = await _persist_app_agent_owner(state, slot)
-            except asyncio.CancelledError:
-                # A shutdown mid-write is the same unbound newborn; retract it on
-                # the way out, as the twin does.
-                if not slot.running and not slot.messages and state._slots.get(slot.key) is slot:
-                    state._slots.pop(slot.key, None)
-                raise
+            # A shutdown mid-write is the same unbound newborn, retracted on the
+            # way out by the unwind callback registered at the mint.
+            persisted = await _persist_app_agent_owner(state, slot)
             if not persisted:
-                if not slot.running and not slot.messages and state._slots.get(slot.key) is slot:
-                    state._slots.pop(slot.key, None)
-                    # The pick recorded above and the dashboard-tab registry both
-                    # name a key no slot holds now; undo them with the slot, as
-                    # the `session_rebound` branch does.
+                if _retract_failed_newborn(state, slot):
+                    # The pick recorded above names a key no slot holds now;
+                    # undo it with the slot, as the `session_rebound` branch does.
                     await drained_to_thread(
                         restore_agent_selection, assignment_key, selection_change
                     )
-                    _sync_dashboard_slots(state)
                 else:
                     slot._dirty = True
                 return web.json_response(
@@ -806,7 +917,7 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
     # idle until it timed out.
     if slot.executor != "remote":
         schedule_eager_spawn(state, slot, start_priority=owner_start_priority(request))
-    created = state.serialize_slot(slot)
+    created = _created_slot_row(state, request, slot)
     if session_folder_notice:
         created["session_folder_notice"] = session_folder_notice
     return web.json_response(created)

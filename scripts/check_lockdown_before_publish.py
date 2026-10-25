@@ -87,7 +87,7 @@ CHMOD_CALLS = frozenset({"chmod_safe", "chmod"})
 #: The path is recovered through the fd map, exactly as the content-write side
 #: already does for ``os.fdopen``/``os.write``. Without these, a writer that
 #: hardened through the descriptor recorded NO lockdown at all -- and
-#: ``fchmod_safe`` is the tree's own helper (platform_compat.py), not a
+#: ``fchmod_safe`` is the tree's own helper (platform_compat_files.py), not a
 #: hypothetical spelling.
 FCHMOD_CALLS = frozenset({"fchmod_safe", "fchmod"})
 
@@ -103,7 +103,8 @@ GROUP_OTHER_BITS = 0o077
 #: exact defect (see ``workflows/store.py`` before this checker landed).
 WRITE_DESTINATION_ARG = {
     "atomic_write": 0,
-    # This repo's private JSON writer (agent.py): mkstemp + write + rename, so
+    # This repo's private JSON writer (agent_parts/spec_files.py, reached as
+    # ``kiro_crew.agent._atomic_json_write``): mkstemp + write + rename, so
     # the payload lands at the FINAL path when it returns. It is not
     # ``atomic_write`` and takes no ``restrict_to_owner``, so a lockdown after it
     # is the #5307 shape -- and it is the single most widely used writer in the
@@ -383,7 +384,7 @@ def _is_pathlib_chmod_form(node: ast.Call) -> bool:
     ``platform_compat.chmod_safe(p, 0o600)``), so the two are told apart by
     ARITY, as with the publish forms above. That is sound rather than merely
     convenient: ``mode`` is a REQUIRED parameter of both ``os.chmod`` and
-    ``chmod_safe`` (see platform_compat.py), so a one-argument attribute-form
+    ``chmod_safe`` (see platform_compat_files.py), so a one-argument attribute-form
     chmod cannot be either of them.
     """
     if not isinstance(node.func, ast.Attribute):

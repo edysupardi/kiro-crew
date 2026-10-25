@@ -5,7 +5,6 @@ import {
   formatToken,
   encodeIdInvisible,
   decodeIdInvisible,
-  makePasteId,
   nextSeq,
   findTokenRanges,
   tokenRangeAt,
@@ -23,8 +22,15 @@ import {
   type PasteBlock,
 } from '../utils/pasteTokens'
 
+let nextBlockId = 1
+
+beforeEach(() => {
+  nextBlockId = 1
+  localStorage.clear()
+})
+
 const block = (overrides: Partial<PasteBlock> = {}): PasteBlock => ({
-  id: overrides.id ?? makePasteId(),
+  id: overrides.id ?? `test-paste-${nextBlockId++}`,
   seq: overrides.seq ?? 1,
   lines: overrides.lines ?? 3,
   content: overrides.content ?? 'a\nb\nc',
@@ -209,6 +215,16 @@ describe('pasteTokens', () => {
   })
 
   describe('recollapsePastes', () => {
+    it('keeps the prefix verbatim and searches only at or after from', () => {
+      const b = block({ content: 'A\nB\nC\n' })
+      const prefix = `context ${b.content}\n`
+      expect(recollapsePastes(prefix + b.content, [b], prefix.length))
+        .toBe(prefix + formatToken(b))
+      expect(recollapsePastes(prefix + b.content.trimEnd(), [b], prefix.length))
+        .toBe(prefix + formatToken(b))
+      expect(recollapsePastes(prefix, [b], prefix.length)).toBe(prefix)
+    })
+
     it('folds a whole-message paste back to its token', () => {
       const b = block({ id: 'a', seq: 1, lines: 3, content: 'l1\nl2\nl3' })
       expect(recollapsePastes('l1\nl2\nl3', [b])).toBe(formatToken(b))
@@ -361,8 +377,6 @@ describe('pasteTokens', () => {
   // existing row carries meta.pastes AND a stable meta.sendId, carry the pastes
   // forward to any incoming row with the same sendId, independent of both.
   describe('mergePreservedPastes — id-keyed carry-forward', () => {
-    beforeEach(() => { localStorage.clear() })
-
     it('re-collapses a redacted echo by sendId instead of leaving it expanded', () => {
       const b = block({ id: 'x', seq: 1, content: 'line1\nline2\nline3' })
       // Existing row already resolved to a chip, tagged with its sendId.
@@ -623,8 +637,6 @@ describe('pasteTokens', () => {
   // mc-paste-store-v1 localStorage side table: byte/entry/TTL bounding so it
   // cannot grow unbounded and exhaust the localStorage quota.
   describe('saveStoredPaste / readStoredPaste store bounding', () => {
-    beforeEach(() => { localStorage.clear() })
-
     const storeSize = (): number => {
       const raw = localStorage.getItem(STORE_KEY)
       return raw ? Object.keys(JSON.parse(raw)).length : 0

@@ -226,6 +226,7 @@ writes.
 | `kirocrew spawn run --async "task"` | Fire-and-forget subagent |
 | `kirocrew spawn run --crew NAME "task"` | Run as a crew member (its memory and template); an unknown name is refused |
 | `kirocrew spawn run --agent NAME "task"` | Run under a named agent template; an unknown name is refused |
+| `kirocrew spawn run --model ID "task"` | Run on a model id; it outranks the member's and the template's pin |
 | `kirocrew spawn list` | List active subagents |
 
 ## Cron Jobs
@@ -344,7 +345,7 @@ keystone paths are still refused). The CLI is the stricter of the two.
 |---------|-------------|
 | `kirocrew app list` | List installed apps |
 | `kirocrew app install /path/to/app-dir` | Install app from local directory (needs app.json) |
-| `kirocrew app enable NAME` | Enable an installed app |
+| `kirocrew app enable NAME` | Enable an installed app (an app that asks to control your chats is allowed in the dashboard only) |
 | `kirocrew app disable NAME` | Disable an installed app |
 | `kirocrew app uninstall NAME` | Uninstall an app and preserve its data directory |
 | `kirocrew app uninstall NAME --purge-data` | Uninstall and explicitly delete the app data directory |

@@ -135,6 +135,7 @@ _EXPECTED_ROUTED_JOBS = {
     ("fast-gate.yml", "memory-store-seam"),
     ("fast-gate.yml", "docs-lint"),
     ("fast-gate.yml", "static-ratchets"),
+    ("fast-gate.yml", "flake-pattern-ratchet"),
     ("build.yml", "build-wheel"),
     ("build.yml", "desktop-matrix"),
     ("main-ratchet-audit.yml", "ratchet-gates"),
@@ -155,6 +156,7 @@ _EXPECTED_ROUTED_JOBS = {
     ("macos-on-demand.yml", "decide"),
     ("ci.yml", "changes"),
     ("ci.yml", "await-fast-gate"),
+    ("ci.yml", "cancel-superseded-run"),
     ("code-review.yml", "autosde-rules"),
     ("code-review.yml", "inclusive-language"),
     ("code-review.yml", "pr-hygiene"),
@@ -202,6 +204,7 @@ _CANONICAL_BOOT_MATRIX_EXPR = (
     "(needs.changes.outputs.windows_runner || 'windows-latest') || matrix.os }}"
 )
 _EXPECTED_RESOLVER_CONSUMER_JOBS = {
+    ("ci.yml", "lint-gate"): _CANONICAL_CONSUMER_EXPR,
     ("ci.yml", "backend-lint"): _CANONICAL_CONSUMER_EXPR_LARGE,
     ("ci.yml", "backend-test"): _CANONICAL_CONSUMER_EXPR_LARGE,
     ("ci.yml", "backend-test-windows"): _CANONICAL_WINDOWS_CONSUMER_EXPR,
@@ -217,6 +220,7 @@ _EXPECTED_RESOLVER_CONSUMER_JOBS = {
     ("ci.yml", "frontend-test"): _CANONICAL_CONSUMER_EXPR_LARGE,
     ("ci.yml", "frontend-coverage-merge"): _CANONICAL_CONSUMER_EXPR,
     ("ci.yml", "bundle-size"): _CANONICAL_CONSUMER_EXPR_LARGE,
+    ("ci.yml", "i18n-render"): _CANONICAL_CONSUMER_EXPR,
     ("ci.yml", "e2e"): _CANONICAL_CONSUMER_EXPR_LARGE,
     ("ci.yml", "integration"): _CANONICAL_CONSUMER_EXPR_LARGE,
     ("ci.yml", "e2e-boot-matrix"): _CANONICAL_BOOT_MATRIX_EXPR,
@@ -502,8 +506,8 @@ def test_merge_queue_readiness_rollout_values() -> None:
     job = _readiness_job()
     (step,) = job["steps"]
     values = dict(re.findall(r"^\s*(TOTAL_BUDGET|MAX_RERUNS)=(\d+)\s*$", step["run"], re.MULTILINE))
-    assert values == {"TOTAL_BUDGET": "10800"}
-    assert job["timeout-minutes"] == 185
+    assert values == {"TOTAL_BUDGET": "12000"}
+    assert job["timeout-minutes"] == 205
 
 
 def test_merge_queue_readiness_reads_runs_and_never_reruns_them() -> None:

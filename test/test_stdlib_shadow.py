@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pytest
 
-from kiro_crew import __version__, stdlib_shadow
+from kiro_crew import __version__, stdlib_shadow, version_line
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
 _BUILD_DESKTOP = _SRC.parent / "packaging" / "build-desktop.sh"
@@ -50,7 +50,7 @@ _GATEWAY_RECOVERY = _SRC.parent / "website" / "electron" / "gateway-recovery.js"
 _BUILD_YML = _SRC.parent / ".github" / "workflows" / "build.yml"
 _WIN_INSTALLER_TEST = _SRC.parent / ".github" / "scripts" / "test-windows-installer.ps1"
 _WIN_SMOKE = _SRC.parent / "scripts" / "smoke-windows-install.ps1"
-_CLI_SERVER = _SRC / "kiro_crew" / "cli_server.py"
+_CLI_SERVER = _SRC / "kiro_crew" / "cli_server_restart.py"
 SHIM_IN_BUILD_YML = "'\"%~dp0..\\python.exe\" -s -P -m kiro_crew %*'"
 
 
@@ -201,7 +201,7 @@ class TestDetection:
         assert ast.literal_eval(res.stdout.strip()) == []
         started = _run(["-m", "kiro_crew", "--version"], _stdlib_concurrent_dir(), tmp_path)
         assert started.returncode == 0, started.stderr
-        assert started.stdout == f"kirocrew {__version__}\n"
+        assert started.stdout == f"{version_line()}\n"
 
     def test_report_names_module_entry_and_fix(self) -> None:
         shadow = stdlib_shadow.ShadowedModule(
@@ -330,7 +330,7 @@ class TestEntryRefusal:
         """What the launchers' ``-P`` buys: the same directory, a normal start."""
         res = _run(["-P", "-m", "kiro_crew", "--version"], shadowing_home, tmp_path)
         assert res.returncode == 0, res.stderr
-        assert res.stdout == f"kirocrew {__version__}\n"
+        assert res.stdout == f"{version_line()}\n"
 
     def test_bootstrap_refuses_before_importing_cli(
         self, monkeypatch: pytest.MonkeyPatch, capsys
@@ -435,8 +435,8 @@ class TestLaunchersPassSafePath:
             rel = path.relative_to(_SRC).as_posix()
             text = path.read_text(encoding="utf-8")
             for m in pattern.finditer(text):
-                # Look back to the start of the same argv call (piper_runtime
-                # comments each flag on its own line), else a short window for
+                # Look back to the start of the same argv call (a launcher may
+                # comment each flag on its own line), else a short window for
                 # a bare tuple such as BACKEND_LAUNCHER.
                 call = text.rfind("isolated_python_argv(", 0, m.start())
                 window = text[call if call != -1 else max(0, m.start() - 120) : m.start()]

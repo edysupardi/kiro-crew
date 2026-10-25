@@ -172,6 +172,7 @@ if TYPE_CHECKING:  # every owner-defined name this module forwards, for type che
         _pick_audit_fields,
         _pick_fields,
         _target_busy_error,
+        apply_deferred_model_switch,
         apply_pending_model_pick,
         arm_model_switch_reset,
         effort_commit_needs_reset,
@@ -180,11 +181,16 @@ if TYPE_CHECKING:  # every owner-defined name this module forwards, for type che
         set_model_target,
     )
     from kiro_crew.dashboard.session_control_parts.session_create import (  # noqa: F401
+        _STOCK_WORKER_AGENT,
         _caller_member_workspace,
+        _conducts_for_a_worker,
         _dispatching_crewmate,
+        _hands_off_to_own_worker,
         _inherited_pin_foreign_to_child,
         _model_pin_refusal,
         _record_spawn,
+        _register_spawn_pending_edge,
+        _store_s_crewmate,
         create_session,
     )
     from kiro_crew.dashboard.session_control_parts.session_messaging import (  # noqa: F401
@@ -203,6 +209,7 @@ if TYPE_CHECKING:  # every owner-defined name this module forwards, for type che
         _DeliveryProgress,
         _neutralize_send_provenance,
         _retain_orphaned_steer_delivery,
+        _start_auto_tag,
         _timeout_delivery_observation,
         _too_many_targets,
         broadcast_audience,
@@ -225,6 +232,7 @@ if TYPE_CHECKING:  # every owner-defined name this module forwards, for type che
         _scan_archived_candidates,
         _scan_revivable_history,
         list_archived_sessions,
+        revive_own_archived_worker,
         revive_session,
     )
     from kiro_crew.dashboard.session_control_parts.session_status import (  # noqa: F401
@@ -247,6 +255,7 @@ if TYPE_CHECKING:  # every owner-defined name this module forwards, for type che
         _pending_approval_fields,
         _summary_text,
         created_session_status,
+        process_state,
         read_messages,
         read_summary,
     )
@@ -270,6 +279,8 @@ if TYPE_CHECKING:  # every owner-defined name this module forwards, for type che
         _fork_refusal,
         _freshest_sid,
         _live_sid_of,
+        _note_pending_edge,
+        _reaches_through_pending,
         _recorded_sid_of,
         _refuse_if_append_pending,
         _replay_pending,
@@ -281,6 +292,7 @@ if TYPE_CHECKING:  # every owner-defined name this module forwards, for type che
         _tree_append_waiter,
         _tree_mutation_lock,
         _tree_mutation_locks,
+        _tree_pending_edges,
         _tree_pending_slots,
         adopt_target,
         fork_session,
@@ -328,6 +340,7 @@ if TYPE_CHECKING:  # every owner-defined name this module forwards, for type che
 if TYPE_CHECKING:  # names this module re-exported from other modules
     from kiro_crew import model_registry  # noqa: F401
     from kiro_crew import model_scope  # noqa: F401
+    from kiro_crew.agent_files import WORKER_AGENT_FILENAME  # noqa: F401
     from kiro_crew.agent_sdk.backends import ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS  # noqa: F401
     from kiro_crew.agent_sdk.capabilities import MODEL_NAMESPACE_ACP  # noqa: F401
     from kiro_crew.agent_sdk.capabilities import capabilities_for  # noqa: F401
@@ -339,8 +352,10 @@ if TYPE_CHECKING:  # names this module re-exported from other modules
     from kiro_crew.config.loader import resolve_agent_bindings  # noqa: F401
     from kiro_crew.config.resolution import DEGRADED_WHOLE_CONFIG  # noqa: F401
     from kiro_crew.config.sections import DEFAULT_MODEL  # noqa: F401
+    from kiro_crew.config.sections import AutocompactPctError  # noqa: F401
     from kiro_crew.config.sections import KiroCrewAgentConfig  # noqa: F401
     from kiro_crew.config.sections import coerce_effort  # noqa: F401
+    from kiro_crew.config.sections import parse_autocompact_pct  # noqa: F401
     from kiro_crew.config.sections import worker_session_defaults  # noqa: F401
     from kiro_crew.context_assembly.markers import _apply_marker_spans  # noqa: F401
     from kiro_crew.context_assembly.markers import _marker_spans  # noqa: F401

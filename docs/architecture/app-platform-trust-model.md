@@ -107,11 +107,11 @@ where a sandbox backend applies, which does not bound the in-process modules.
 
 App tokens (minted via the `X-App-Secret` exchange at `POST /api/apps/<name>/token`)
 are **deny-by-default** confined by the dashboard auth middleware
-(`token_auth.py` `_enforce_app_scope` / `app_token_path_allowed` / `_app_owns_path` /
+(`token_auth_app_scope.py` `_enforce_app_scope` / `app_token_path_allowed` / `_app_owns_path` /
 `_app_api_allowlist`) to the app's own namespace (`/apps/<name>/*` and
 `/api/apps/<name>/*`) plus the API path prefixes the app declares in its manifest
 `permissions.api` allowlist. Every other path returns `403`, and the
-`/apps/<name>/api` reverse proxy (`apps/routes.py` `handle_app_api_proxy`)
+`/apps/<name>/api` reverse proxy (`apps/routes_proxy.py` `handle_app_api_proxy`)
 independently re-checks that the caller's token app matches the target app, since
 the proxy signs requests with the target app's secret.
 
@@ -125,7 +125,7 @@ access to its own slots is unchanged. A message the app sends runs as a turn: a
 send carrying a change to the session's agent binding, persona settings, or a
 harness slash command is refused before anything is written or queued
 (`chat_handlers._deny_app_session_settings`, pinned by
-`test_chat_mode_security`). The send cannot steer, its row is echoed to the
+`test_chat_mode_security_send`). The send cannot steer, its row is echoed to the
 user's open tabs, it neither starts nor names the session's auto-title (a
 queued send restored after a gateway restart has lost that attribution), and
 its SSE stream ends with the app's own turn. Mode changes must name a live allowed slot, which

@@ -17,7 +17,7 @@ active — and most of these call sites swallow that in a best-effort ``except``
 Off the loop there is no running loop in the worker thread, so ``_locked`` takes
 the patient poll-to-deadline path instead.
 
-``history.py`` already warns (with ``stack_info``) when append runs on the loop,
+``history_offload.py`` already warns (with ``stack_info``) when append runs on the loop,
 but a warning is only as good as someone reading logs. This gate is the
 deterministic form: a NEW Slack call site cannot persist a turn on the loop
 without failing the build.
@@ -313,6 +313,8 @@ def test_every_slack_persist_site_goes_through_the_choke_point() -> None:
     ]
     # The gateway facade's composed owners hold part of its persist sites.
     paths += sorted((root / "slack" / "gateway_runtime").glob("*.py"))
+    # So do the handler facade's.
+    paths += sorted((root / "slack" / "handler_runtime").glob("*.py"))
     for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -495,7 +497,7 @@ def test_all_candidates_corrupt_yields_no_floor(bad: str) -> None:
 # passes the function as a bare Name, which is not a call at that point.
 #
 # Scoped to an explicit allow-list of bulk-restore drivers (chat_persistence.py and
-# sessions.py), not repo-wide. Repo-wide, these three methods have many legitimate
+# the handlers/sessions family), not repo-wide. Repo-wide, these three methods have many legitimate
 # on-loop callers reading one small metadata line; the invariant being pinned is
 # about the BULK restore path, and a gate that fires everywhere would be turned
 # off rather than obeyed.
@@ -540,7 +542,21 @@ def test_no_startup_restore_read_runs_on_the_event_loop() -> None:
     """
     targets = [
         _src_root() / "dashboard" / "chat_persistence.py",
+        _src_root() / "dashboard" / "chat_persistence_parts" / "member_store.py",
+        _src_root() / "dashboard" / "chat_persistence_parts" / "restore_drivers.py",
+        _src_root() / "dashboard" / "chat_persistence_parts" / "save_transaction.py",
+        _src_root() / "dashboard" / "chat_persistence_parts" / "slot_builders.py",
         _src_root() / "dashboard" / "handlers" / "sessions.py",
+        _src_root() / "dashboard" / "handlers" / "sessions_parts" / "usage_scrape.py",
+        _src_root() / "dashboard" / "handlers" / "sessions_parts" / "app_scope.py",
+        _src_root() / "dashboard" / "handlers" / "sessions_parts" / "history_reads.py",
+        _src_root() / "dashboard" / "handlers" / "sessions_parts" / "summaries.py",
+        _src_root() / "dashboard" / "handlers" / "sessions_parts" / "delete_claim.py",
+        _src_root() / "dashboard" / "handlers" / "sessions_parts" / "slot_teardown.py",
+        _src_root() / "dashboard" / "handlers" / "sessions_parts" / "delete_routes.py",
+        _src_root() / "dashboard" / "handlers" / "sessions_parts" / "live_turn.py",
+        _src_root() / "dashboard" / "handlers" / "sessions_parts" / "tool_policy.py",
+        _src_root() / "dashboard" / "handlers" / "sessions_parts" / "restart.py",
     ]
     all_violations: list[tuple[str, int]] = []
     for target in targets:

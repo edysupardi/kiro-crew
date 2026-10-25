@@ -21,6 +21,7 @@ import {
 
 import { i18nT } from '../../i18n/t'
 import ErrorNotice from '../../components/ErrorNotice'
+import { useConfirm } from '../../components/ConfirmDialog'
 import { fmtDateFields } from '../../i18n/format'
 import Clickable from '../../components/Clickable'
 import {
@@ -163,6 +164,7 @@ export default function MeetingsPage() {
   const queryClient = useQueryClient()
   const [route, setRoute] = useState<Route>({ view: 'list' })
   const [filter, setFilter] = useState('')
+  const { confirm, confirmDialog } = useConfirm()
 
   const configQuery = useQuery({ queryKey: ['meetings', 'config'], queryFn: meetingsApi.config })
   // The backend's calendar poller refreshes the cache and pre-creates the meeting
@@ -239,9 +241,14 @@ export default function MeetingsPage() {
     setRoute({ view: 'meeting', eventId, title: i18nT('apps.meetings.list.adHocTitle') })
   }
 
-  const requestDelete = (event: MouseEvent<HTMLButtonElement>, row: Row) => {
+  const requestDelete = async (event: MouseEvent<HTMLButtonElement>, row: Row) => {
     event.stopPropagation()
-    if (window.confirm(i18nT('apps.meetings.list.deleteConfirm', { title: row.title }))) {
+    if (
+      await confirm({
+        title: i18nT('apps.meetings.list.deleteConfirm', { title: row.title }),
+        confirmLabel: i18nT('apps.meetings.list.deleteMeeting', { title: row.title }),
+      })
+    ) {
       deleteMeeting.mutate({ eventId: row.eventId, title: row.title })
     }
   }
@@ -422,6 +429,7 @@ export default function MeetingsPage() {
           )}
         </Card>
       </div>
+      {confirmDialog}
     </>
   )
 }

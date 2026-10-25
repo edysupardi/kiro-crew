@@ -32,6 +32,7 @@ import UserMessage from '../pages/chat/UserMessage'
 import { renderMcpOAuthMessage } from '../pages/chat/McpOAuthBanner'
 import SubagentCompletionCard from '../pages/chat/SubagentCompletionCard'
 import NudgeCard from '../pages/chat/NudgeCard'
+import ElicitationCard from '../pages/chat/ElicitationCard'
 import NoticeCard from '../pages/chat/NoticeCard'
 import { SystemNoticeRow, isSystemNoticeRow } from '../pages/chat/CompactionCard'
 import SkillLoadCard, { isSkillLoadRow } from '../pages/chat/SkillLoadCard'
@@ -39,6 +40,7 @@ import { ErrorCard } from '../pages/chat/ErrorCard'
 import { decisionStripFieldOf } from '../pages/chat/decisionRecord'
 import { resolveTransientNotice } from '../pages/chat/transientNotice'
 import StopEventCard from '../pages/chat/StopEventCard'
+import { warmBriefBodyOf } from '../components/chat/WarmBriefCard'
 import { ToolDetails } from '../pages/chat/ToolDetails'
 import { isSubagentCompletionMessage } from '../pages/chat/subagentCompletion'
 import { REASONING_ROLES, stripAppEnvelope } from '../pages/chat/groupDisplayItems'
@@ -101,6 +103,10 @@ export interface MessageRenderContext {
   handOff?: boolean
   /** tool_call_ids whose call a policy or hook blocked. */
   autoDeniedIds: Set<string>
+  /** Whether a tool row opens its input/output panel on click. Absent =
+   *  `true`; `false` draws the bare status pill (ChatEmbed's
+   *  `hide={['toolDetails']}`). A `renderTool` row is the host's own. */
+  toolDetails?: boolean
   /** Host-injected tool row, kept as a shorthand for replacing the tool entries. */
   renderTool?: (message: ChatMessage) => React.ReactNode
   /** Reply threads on this transcript's messages (a crewmate's chat). Absent
@@ -192,8 +198,10 @@ const TOOL_PANEL_COLLAPSED_CHARS = 800
  */
 const TOOL_PANEL_EXPANDED_MAX_H = 'max-h-[500px]'
 
-/** Prop-driven tool row. The store-connected variant is a host entry. */
-export const ToolCallPill = memo(function ToolCallPill({ message, running, onFileOpen, autoDenied, askAgent = true }: { message: ChatMessage; running: boolean; onFileOpen?: (path: string) => void; autoDenied?: boolean; askAgent?: boolean }) {
+/** Prop-driven tool row. The store-connected variant is a host entry.
+ *  `expandable={false}` draws the pill as a plain status label: no toggle and
+ *  no input/output panel. */
+export const ToolCallPill = memo(function ToolCallPill({ message, running, onFileOpen, autoDenied, askAgent = true, expandable = true }: { message: ChatMessage; running: boolean; onFileOpen?: (path: string) => void; autoDenied?: boolean; askAgent?: boolean; expandable?: boolean }) {
   useLanguageGeneration() // memo() bails out of the provider-level repaint; subscribe directly
   const [expanded, setExpanded] = React.useState(false)
   // Second axis, deliberately separate from `expanded`: the pill toggles whether
@@ -214,7 +222,7 @@ export const ToolCallPill = memo(function ToolCallPill({ message, running, onFil
   const isRejected = isRejectedDecision(message.meta?.resolved)
   const hasPendingPerm = message.role === 'permission' && !message.meta?.resolved
   // A running or opened pill never folds into its turn's fold (rowActivity).
-  useReportRowActive(!isDone || hasPendingPerm || expanded)
+  useReportRowActive(!isDone || hasPendingPerm || (expandable && expanded))
 
   // Prefer the backend-stamped purpose ("Add teams_data dict guard…") over the
   // raw command, matching the main chat. The raw label is the fallback, and is
@@ -330,24 +338,44 @@ export const ToolCallPill = memo(function ToolCallPill({ message, running, onFil
     }
     copyToClipboard(panelText).then(settle)
   }, [panelText])
+  // A payload row's Copy carries visible text, and that text is also its name.
+  // It never turns into the failure string: `ErrorNotice` below reports a
+  // refused write, and the retry control keeps saying what it copies.
   const copyTitle = copyOutcome === 'copied'
     ? i18nT('appSdk.chatMessageList.copied')
-    : copyOutcome === 'failed'
-      ? i18nT('appSdk.chatMessageList.copy_failed')
-      : hasPayload
-        ? i18nT('appSdk.chatMessageList.copy_input_and_output')
+    : hasPayload
+      ? i18nT('appSdk.chatMessageList.copy_input_and_output')
+      : copyOutcome === 'failed'
+        ? i18nT('appSdk.chatMessageList.copy_failed')
         : i18nT('appSdk.chatMessageList.copy')
 
+  const pillBody = (
+    <>
+      <Icon size={12} className={iconClass} />
+      <span className="truncate">{label}</span>
+    </>
+  )
+
+  // The two pill shapes repeat their classes inline: a class string held in a
+  // variable is read as copy by the i18n gate.
   return (
     <div className="animate-scale-in flex items-center gap-2 flex-wrap">
-      <button
-        onClick={() => setExpanded(e => !e)}
-        aria-expanded={expanded}
-        className={`inline-flex items-center gap-2 text-[13px] leading-5 font-mono px-2 py-0.5 rounded-md cursor-pointer transition-all max-w-[min(600px,90%)] hover:brightness-110 ${tone}`}
-      >
-        <Icon size={12} className={iconClass} />
-        <span className="truncate">{label}</span>
-      </button>
+      {expandable ? (
+        <button
+          onClick={() => setExpanded(e => !e)}
+          aria-expanded={expanded}
+          className={`inline-flex items-center gap-2 text-[13px] leading-5 font-mono px-2 py-0.5 rounded-md cursor-pointer transition-all max-w-[min(600px,90%)] hover:brightness-110 ${tone}`}
+        >
+          {pillBody}
+        </button>
+      ) : (
+        <span
+          className={`inline-flex items-center gap-2 text-[13px] leading-5 font-mono px-2 py-0.5 rounded-md transition-all max-w-[min(600px,90%)] ${tone}`}
+          data-testid="tool-pill-static"
+        >
+          {pillBody}
+        </span>
+      )}
       {filePath && onFileOpen && (
         <button
           onClick={() => onFileOpen(filePath)}
@@ -359,7 +387,9 @@ export const ToolCallPill = memo(function ToolCallPill({ message, running, onFil
           <PanelRight size={11} />
         </button>
       )}
-      {expanded && (hasPayload || message.content) && (
+      {/* Gated on `expandable` too, not only through the missing toggle: a
+          host that turns details off while a panel is open must close it. */}
+      {expandable && expanded && (hasPayload || message.content) && (
         <div className="w-full mt-1 ml-4" data-testid={hasPayload ? 'tool-pill-details' : undefined}>
           {/* Not `compact`: that form caps the payload at 160px, which is what
               the main transcript reserves for the composer's approval mirror.
@@ -400,9 +430,13 @@ export const ToolCallPill = memo(function ToolCallPill({ message, running, onFil
               title={copyTitle}
               aria-label={copyTitle}
               aria-live="polite"
-              className="inline-flex items-center p-0.5 rounded text-muted hover:text-text hover:bg-bg-hover cursor-pointer shrink-0 transition-colors"
+              className={`inline-flex items-center rounded text-muted hover:text-text hover:bg-bg-hover cursor-pointer transition-colors ${hasPayload ? 'gap-1 px-1 py-0.5 min-w-0 text-left text-[11px] leading-4' : 'p-0.5 shrink-0'}`}
             >
-              {copyOutcome === 'copied' ? <Check size={11} className="text-ok" /> : <Copy size={11} />}
+              {copyOutcome === 'copied' ? <Check size={11} className="text-ok shrink-0" /> : <Copy size={11} className="shrink-0" />}
+              {/* A payload row's Copy takes both halves, not the tab on screen,
+                  so it says so in words: a tooltip never reaches a touch
+                  reader. */}
+              {hasPayload && <span data-testid="tool-panel-copy-label">{copyTitle}</span>}
             </button>
             {!hasPayload && panelOverflows && (
               <button
@@ -448,7 +482,7 @@ function toolRow(m: ChatMessage, ctx: MessageRenderContext, autoDenied?: boolean
   return ctx.row(
     ctx.renderTool
       ? ctx.renderTool(m)
-      : <ToolCallPill message={m} running={ctx.running} onFileOpen={ctx.onFileOpen} autoDenied={autoDenied} askAgent={ctx.handOff !== false} />,
+      : <ToolCallPill message={m} running={ctx.running} onFileOpen={ctx.onFileOpen} autoDenied={autoDenied} askAgent={ctx.handOff !== false} expandable={ctx.toolDetails !== false} />,
     true,
   )
 }
@@ -577,6 +611,9 @@ export function renderAssistantBubble(
       bubbleClassName={bubbleClassName}
       onReplyInThread={isStreaming ? undefined : replyInThreadFor(m, ctx)}
       onQuoteMessage={quoteMessageFor(m, ctx, 'assistant')}
+      // A structured warm brief draws as a fixed card in place of the markdown,
+      // inside this same bubble, so it keeps the timestamp and row actions.
+      body={warmBriefBodyOf(m)}
     />
   )
   // The column's child is the bubble itself unless this message has a thread
@@ -737,6 +774,12 @@ export const defaultMessageRenderers: readonly MessageRenderer[] = [
     },
   },
   {
+    id: 'warm_task_brief_claim',
+    roles: ['*'],
+    match: m => m.meta?.kind === 'warm_task_brief_claim',
+    render: () => null,
+  },
+  {
     id: 'notice',
     roles: ['notice'],
     render: (m, ctx) => ctx.row(<NoticeCard content={m.content} />),
@@ -772,10 +815,18 @@ export const defaultMessageRenderers: readonly MessageRenderer[] = [
     id: 'mcp_oauth',
     roles: ['mcp_oauth'],
     render: (m, ctx) => {
-      const banner = renderMcpOAuthMessage(m, ctx.hideCardOwnedOAuth)
+      const banner = renderMcpOAuthMessage(m, ctx.hideCardOwnedOAuth, ctx.handOff !== false)
       if (!banner) return null
       return ctx.row(banner)
     },
+  },
+  {
+    // An MCP server's own question to the person. The default has no slot to
+    // answer on, so it draws the ask read-only (buttons disabled); a host that
+    // knows its slot replaces this entry by id, as ChatPage does.
+    id: 'elicitation',
+    roles: ['elicitation'],
+    render: (m, ctx) => ctx.row(<ElicitationCard message={m} slot={null} />),
   },
   {
     // Auto-nudge cycle marker. `onOpenLoop` (jump to the loop popover) is

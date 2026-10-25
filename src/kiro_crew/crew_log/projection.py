@@ -65,6 +65,7 @@ citation to follow.
 #   ``projection_values`` -- the bounded coercions every fold applies to entry data
 #   ``projection_side_panel`` -- the ``status``, ``timeline``, ``tools`` and ``approvals`` folds
 #   ``projection_usage`` -- the ``usage`` fold and the credit table it bills by
+#   ``projection_usage_measured`` -- the agent engine's per-turn measurement in ``usage``
 #   ``projection_subagents`` -- the ``subagents`` fold
 #   ``projection_ledger`` -- the ``ledger`` slot fold (a session's work ledger)
 #   ``projection_internal`` -- the ``class`` and ``outline`` folds, which no panel draws
@@ -94,14 +95,19 @@ _OWNERS = (
     "kiro_crew.crew_log.projection_catalogue",
     "kiro_crew.crew_log.projection_session_log",
     "kiro_crew.crew_log.projection_values",
+    "kiro_crew.crew_log.projection_otel_usage",
+    "kiro_crew.crew_log.projection_otel_session_tree",
     "kiro_crew.crew_log.projection_side_panel",
+    "kiro_crew.crew_log.projection_usage_measured",
     "kiro_crew.crew_log.projection_usage",
     "kiro_crew.crew_log.projection_subagents",
     "kiro_crew.crew_log.projection_ledger",
     "kiro_crew.crew_log.projection_internal",
     "kiro_crew.crew_log.projection_radar",
     "kiro_crew.crew_log.projection_dashboard",
+    "kiro_crew.crew_log.projection_crewmate",
     "kiro_crew.crew_log.projection_work",
+    "kiro_crew.crew_log.projection_workers",
     "kiro_crew.crew_log.projection_workstreams",
     "kiro_crew.crew_log.projection_worktree",
     "kiro_crew.crew_log.projection_registry",
@@ -137,17 +143,36 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _FOLD_STATE_VERSION_BASE,
         FOLD_NAMES,
         INTERNAL_PROJECTION_NAMES,
+        INTERNAL_SLOT_PROJECTION_NAMES,
         KNOWN_TYPES,
         OWNER_SERVED_SLOT_PROJECTION,
         PROJECTION_NAMES,
         SESSION_FOLD_NAMES,
         SLOT_PROJECTION_NAMES,
         TREE_PROJECTION_NAMES,
+        WORKER_FOLD_NAME,
+        WORKERS_FOLD_NAME,
         WORKSTREAMS_FOLD_NAME,
         WORKTREE_FOLD_NAME,
         Projection,
         _Fold,
         logger,
+    )
+    from kiro_crew.crew_log.projection_crewmate import (  # noqa: F401
+        _MILESTONE_TEXT_KEYS,
+        _WAITING_TEXT_KEYS,
+        _goal_render,
+        _goal_rows,
+        _goal_start,
+        _goal_step,
+        _list,
+        _options_total,
+        _rows,
+        _text,
+        _waiting_render,
+        _waiting_rows,
+        _waiting_start,
+        _waiting_step,
     )
     from kiro_crew.crew_log.projection_dashboard import (  # noqa: F401
         PANEL_SCHEMA_VERSION,
@@ -210,6 +235,32 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _ledger_start,
         _ledger_step,
     )
+    from kiro_crew.crew_log.projection_otel_session_tree import (  # noqa: F401
+        _TREE_AGENT_KIND_UNSET,
+        OTEL_SESSION_TREE_FOLD_NAME,
+        OTEL_SESSION_TREE_TYPES,
+        SESSION_SPAWNED_TYPE,
+        _otel_session_tree_copy,
+        _otel_session_tree_render,
+        _otel_session_tree_start,
+        _otel_session_tree_step,
+        _tree_count,
+    )
+    from kiro_crew.crew_log.projection_otel_usage import (  # noqa: F401
+        _AGENT_KIND_BY_STEM,
+        _AGENT_KIND_UNSET,
+        OTEL_USAGE_FOLD_NAME,
+        OTEL_USAGE_TYPES,
+        SESSION_OPENED_TYPE,
+        TURN_STARTED_TYPE,
+        _agent_kind,
+        _agent_kind_by_name,
+        _check_agent_kind_table_current,
+        _otel_usage_copy,
+        _otel_usage_render,
+        _otel_usage_start,
+        _otel_usage_step,
+    )
     from kiro_crew.crew_log.projection_radar import (  # noqa: F401
         RADAR_EVENT_LIMIT,
         RADAR_ITEM_LIMIT,
@@ -233,6 +284,12 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         radar_ci_state,
     )
     from kiro_crew.crew_log.projection_readers import (  # noqa: F401
+        _WORKERS_READ_LOCKS,
+        _WORKERS_REVISIONS,
+        _WORKERS_REVISIONS_LOCK,
+        _WORKERS_REVISIONS_MAX,
+        _read_workers,
+        _read_workers_locked,
         _slot_units_for_fold,
         _supplemental_units,
         fold_slot,
@@ -274,6 +331,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _drive_session,
         _fold_attempt,
         _HeldCheckpoints,
+        _note_session_fold_origin,
         _persisted,
         _resume_from_disk,
         _session_registry,
@@ -309,7 +367,9 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         OPEN_LIST_LIMIT,
         OPEN_RETAIN_LIMIT,
         SERVERS_PER_TOOL_LIMIT,
+        TIMELINE_DETAIL_KEYS,
         TIMELINE_LIMIT,
+        TIMELINE_MOMENT_KEYS,
         TIMELINE_TYPES,
         TOOL_NAME_LIMIT,
         _approvals_render,
@@ -344,6 +404,8 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _identity_marks,
         _minted_revision,
         _next_slot_revision,
+        _note_slot_fold_idle,
+        _note_slot_fold_origin,
         _Ordinal,
         _ordinal_seq,
         _oversize_slot_cells,
@@ -377,6 +439,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
     )
     from kiro_crew.crew_log.projection_subagents import (  # noqa: F401
         _SUBAGENT_OUTCOMES,
+        SUBAGENT_ROW_KEYS,
         SUBAGENT_TYPES,
         _subagent_credits,
         _subagents_render,
@@ -397,6 +460,30 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _usage_render,
         _usage_start,
         _usage_step,
+    )
+    from kiro_crew.crew_log.projection_usage_measured import (  # noqa: F401
+        _HISTORY_KEYS,
+        _INDEX,
+        _NORMAL_STOPS,
+        _SLOTS,
+        _TTFT_KEYS,
+        FLAG_BREAKDOWN,
+        FLAG_COMPACTED,
+        FLAG_RERUN,
+        FLAG_RESET,
+        FLAG_SCHEMA_UNKNOWN,
+        MEASURED_FIELDS,
+        MEASURED_FORMAT,
+        MEASURED_UNKNOWN_LIMIT,
+        _decode_values,
+        _encode,
+        _note_unknown,
+        decode_measured,
+        measured_start,
+        measured_step,
+        note_closed,
+        note_composed,
+        note_unit_start,
     )
     from kiro_crew.crew_log.projection_values import (  # noqa: F401
         ID_LIMIT,
@@ -439,6 +526,53 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _work_text,
         _work_units,
         work_slots_naming_board,
+    )
+    from kiro_crew.crew_log.projection_workers import (  # noqa: F401
+        _IDLE_OUTCOMES,
+        _PREAMBLE_PREFIX,
+        _RELAY_PREFIX,
+        _TASK_LABELS,
+        STATE_BLOCKED,
+        STATE_CLOSED,
+        STATE_DONE,
+        STATE_FAILED,
+        STATE_IDLE,
+        STATE_RELEASED,
+        STATE_RUNNING,
+        STATE_STARTING,
+        WORKER_ROW_KEYS,
+        WORKER_STATES,
+        WORKER_TYPES,
+        WORKERS_LIMIT,
+        WORKERS_TEXT_LIMIT,
+        WORKERS_TYPES,
+        WORKERS_UNITS_PER_CHILD,
+        _blank_row,
+        _clip,
+        _drop,
+        _first_line,
+        _labelled_task,
+        _last_line,
+        _let_go,
+        _row,
+        _turn_end_state,
+        _worker_bind_slot,
+        _worker_copy,
+        _worker_render,
+        _worker_rows,
+        _worker_start,
+        _worker_step,
+        _workers_bind_slot,
+        _workers_copy,
+        _workers_render,
+        _workers_rows,
+        _workers_start,
+        _workers_step,
+        merge_render,
+        tree_seeded,
+        worker_units,
+        workers_children,
+        workers_units,
     )
     from kiro_crew.crew_log.projection_workstreams import (  # noqa: F401
         _WORKSTREAMS_DROPPED_SLOTS,
@@ -502,6 +636,10 @@ if TYPE_CHECKING:  # names it serves from outside the fold family, from their ho
         PHASE_SESSION_START,
     )
     from kiro_crew.crew_log.entry_types import (  # noqa: F401
+        CREWMATE_OPTION_LIMIT,
+        CREWMATE_ROW_LIMIT,
+        CREWMATE_TEXT_LIMIT,
+        CREWMATE_WAITING_LIMIT,
         DASHBOARD_AGENTIC_ENTRY_TYPE,
         DASHBOARD_CODE_LIMIT,
         DASHBOARD_FIELD_LIMIT,
@@ -511,6 +649,8 @@ if TYPE_CHECKING:  # names it serves from outside the fold family, from their ho
         DASHBOARD_TYPE_LIMIT,
         DASHBOARD_VALUE_BYTES,
         DASHBOARD_VALUE_LIMIT,
+        GOAL_ENTRY_TYPE,
+        GOAL_FOLD_NAME,
         MISTAKE_CORRECTED_CODE,
         MISTAKE_CORRECTION_LIMIT,
         MISTAKE_GROUP_LIMIT,
@@ -536,11 +676,16 @@ if TYPE_CHECKING:  # names it serves from outside the fold family, from their ho
         RADAR_SKIP_SCOPES,
         RADAR_TERMINAL_PHASES,
         SESSION_ENTRY_TYPES,
+        WAITING_ENTRY_TYPE,
+        WAITING_FOLD_NAME,
         WORK_ENTRY_TYPE,
     )
     from kiro_crew.crew_log.errors import (  # noqa: F401
         CODE_BAD_DATA,
         CrewLogError,
+    )
+    from kiro_crew.crew_log.otel_session_tree_fold import (  # noqa: F401
+        depth_observation,
     )
     from kiro_crew.crew_log.schema import (  # noqa: F401
         KIND_SESSION,
@@ -562,6 +707,13 @@ if TYPE_CHECKING:  # names it serves from outside the fold family, from their ho
         session_units_for_slot,
         unit_header_created_at,
         unit_opened_previous,
+    )
+    from kiro_crew.engine_context import (  # noqa: F401
+        BREAKDOWN_SCHEMA,
+        HISTORY_PARTS,
+        KNOWN_CATEGORIES,
+        MAX_COUNT,
+        count,
     )
     from kiro_crew.projection import (  # noqa: F401
         ProjectionRegistry,

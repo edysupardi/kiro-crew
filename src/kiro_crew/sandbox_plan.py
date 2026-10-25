@@ -88,6 +88,13 @@ class SandboxRequest:
     strip_python_env: bool = False
     forward_ssh_auth_sock: bool = False
     extra_hidden_dirs: tuple[str, ...] = ()
+    #: Seal EVERY ``extra_hidden_dirs`` mask of this request read-only when it is
+    #: windowless: a data-loss mask where a silently-discarded write is the bug (a cron
+    #: whose spawn hides directories it must not read from). The caller opts in for the
+    #: whole request; a spawn that also exposes a file read-only or needs a writable
+    #: mask simply does not set this. False by default, so a spawn seals nothing unless
+    #: it asks.
+    seal_hidden_dirs: bool = False
     extra_hidden_dir_ids: tuple[tuple[str, int, int], ...] = ()
     extra_alias_credential_ids: tuple[tuple[int, int], ...] = ()
     extra_visible_dirs: tuple[str, ...] = ()
@@ -101,6 +108,12 @@ class SandboxRequest:
     #: optionally followed by the kind the name reached and the referent's dev and ino.
     mask_occupants: tuple[tuple[str, tuple[int, ...]], ...] = ()
     crew_home_aliases: tuple[tuple[str, str, int, int], ...] = ()
+    #: A directory the launcher enters after every seal and before it execs, so the
+    #: agent starts in it through the sealed mount; it must then be read-only and
+    #: empty, or the launch fails closed. Empty: the agent starts in the launcher's
+    #: own working directory (an app agent's launch copy sets it,
+    #: ``apps.agent_launch.launch_process_cwd``).
+    exec_cwd: str = ""
 
 
 @dataclass(frozen=True)
@@ -202,6 +215,15 @@ class Mask:
     windows: tuple[str, ...] = ()
     window_ancestors: tuple[str, ...] = ()
     exposed: tuple[str, ...] = ()
+    #: The CALLER explicitly opted this mask in to a read-only seal when it carries no
+    #: writable window (``SandboxRequest.seal_hidden_dirs`` seals every caller mask of the
+    #: request): a data-loss mask where a silently-discarded write is the bug (a cron
+    #: whose spawn hides directories it must not read from). Default ``False`` so NO mask
+    #: is sealed unless its creator asks -- a tier credential dir, a window-exposed mask,
+    #: and every caller mask of a request that did not opt in keep their writable
+    #: stand-in, which is what the launcher's own ``restore_exposed_files`` and the vendor
+    #: CLIs depend on. The seal is NOT inferred from exposure or path.
+    seal_readonly: bool = False
     #: An ``extra_visible_dirs`` entry at or below this path lifted the mask.
     cancelled: bool = False
     #: A lifted governance cache stays read-only: its write and hardlink denies hold.
@@ -312,11 +334,30 @@ class ConfinementPlan:
     identities: NamespaceIdentities
     cancellations: tuple[Cancellation, ...]
     refusals: tuple[Refusal, ...]
+    #: :attr:`SandboxRequest.exec_cwd`, carried to the namespace launcher.
+    exec_cwd: str = ""
 
     @property
     def sensitive_dirs(self) -> tuple[str, ...]:
         """The masked trees that stay masked, each spelling once."""
         return tuple(dict.fromkeys(m.path for m in self.masks if not m.cancelled))
+
+    @property
+    def seal_windowless_masks(self) -> tuple[str, ...]:
+        """Masked trees to seal read-only when they carry no writable window.
+
+        A mask is here ONLY because its creator opted in
+        (``SandboxRequest.seal_hidden_dirs`` seals every caller mask of the request ->
+        ``Mask.seal_readonly``): a data-loss mask where a silently-discarded write is the
+        bug, e.g. a cron whose spawn hides directories it must not read from. There is NO
+        inference -- not origin alone, not exposure, not path -- so a tier credential dir,
+        a window-exposed mask (``~/.aws`` with ``~/.aws/config`` restored into it), and
+        every caller mask of a request that did not ask keep their writable stand-in.
+        Cancelled masks (a window lifts them) are excluded.
+        """
+        return tuple(
+            dict.fromkeys(m.path for m in self.masks if not m.cancelled and m.seal_readonly)
+        )
 
     @property
     def sensitive_files(self) -> tuple[str, ...]:
@@ -776,6 +817,7 @@ def _namespace_plan(
         Mask(
             path=path,
             origin=origin,
+            seal_readonly=request.seal_hidden_dirs and origin == "caller",
             cancelled=path in unhidden,
             read_only_when_cancelled=path in unhidden and is_policy_cache_dir(path),
         )
@@ -891,6 +933,7 @@ def _namespace_plan(
         identities=identities,
         cancellations=cancellations,
         refusals=tuple(window_refusals + carveout_refusals),
+        exec_cwd=request.exec_cwd,
     )
 
 
@@ -1068,6 +1111,7 @@ def namespace_payload(plan: ConfinementPlan) -> dict[str, Any]:
         "real_uid": plan.uid,
         "real_gid": plan.gid,
         "sensitive_dirs": list(plan.sensitive_dirs),
+        "seal_windowless_masks": list(plan.seal_windowless_masks),
         "sensitive_dir_ids": {path: list(pair) for path, pair in ids.hidden_dir_ids.items()},
         "private_dirs": list(plan.windows),
         "private_dir_ids": {path: list(pair) for path, pair in ids.private_dir_ids.items()},
@@ -1076,6 +1120,7 @@ def namespace_payload(plan: ConfinementPlan) -> dict[str, Any]:
         "sensitive_files": list(plan.sensitive_files),
         "fail_closed_file_masks": [list(entry) for entry in ids.fail_closed_file_masks],
         "alias_credential_ids": [list(pair) for pair in ids.alias_credential_ids],
+        "exec_cwd": plan.exec_cwd,
         "required_mask_targets": list(ids.required_mask_targets),
         # The link flag is an INT, not a bool: this data is embedded in the launcher as
         # PYTHON SOURCE, and ``json.dumps`` spells a bool ``true``/``false``, which

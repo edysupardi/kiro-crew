@@ -124,7 +124,7 @@ Three neighbouring issues sit around this one; none asks for it:
   `asyncio.to_thread` call)). A tag-change hook rides that same gate;
   the capability surface does not widen.
 - **Dispatch from an HTTP handler with no agent turn is already supported.**
-  `api_hook_test` (`src/kiro_crew/dashboard/handlers/hooks.py`) calls
+  `api_hook_test` (`src/kiro_crew/dashboard/handlers/hooks_scripts.py`) calls
   `run_script_hook` with a synthesized payload, and `run_script_hook`
   (`src/kiro_crew/hook_runtime/script_hooks.py`) builds a default `hook_event` itself when passed
   `None`, requiring no session and no agent config. A tag-write
@@ -282,7 +282,7 @@ write `slot.tags` at HEAD `6581a04ee`:
 |---|---|---|---|
 | `api_chat_slot_tags` | `chat_tags.py` | user set-tags API | **yes** |
 | `api_chat_slot_drop` | `chat_tags.py` | user drag-to-lane API | **yes** |
-| folder inheritance | `_read_folder_tags` (`slot.tags.append`), ids from `validate_folder_tag_ids` (`chat_tags.py`) | a new slot inherits a folder's tags | **yes** |
+| folder inheritance | `_read_folder_tags` (`slot.tags.append`), ids from `validate_folder_tag_ids` (`chat_tags_store.py`) | a new slot inherits a folder's tags | **yes** |
 | channel first-file / restore | both `slot.tags.append` sites in `surface_channel_session` | channel slot filing | **yes** |
 | slot restore (bulk) | `chat_handlers.py` (`slot.tags = ...`) | reconstruct from stored value | **no** (load-time) |
 | fork | `chat_fork.py` (`new_slot.tags = list(slot.tags)`) | fork inherits parent tags | see below |
@@ -290,7 +290,7 @@ write `slot.tags` at HEAD `6581a04ee`:
 | auto-tag | `chat_auto_tag.py` | never writes status tags | **n/a**, no status delta ever |
 
 The folder-inherited path is the one the issue's two-handler framing misses:
-`validate_folder_tag_ids` (`chat_tags.py`) screens a folder tag id's **shape**
+`validate_folder_tag_ids` (`chat_tags_store.py`) screens a folder tag id's **shape**
 (must be a list of strings) and **vocabulary** (intersected with the live
 `state._tags` when authoritative) but **not** `status: true`. So an inherited
 folder status tag can put a session into a lane through
@@ -391,7 +391,7 @@ enforced suppression).
 ### Phase 3: documentation and the hook-test surface
 
 Extend the events documentation and let `api_hook_test`
-(`dashboard/handlers/hooks.py`) synthesize a `SessionTagsChanged` payload so
+(`dashboard/handlers/hooks_scripts.py`) synthesize a `SessionTagsChanged` payload so
 the event is testable through the existing test endpoint, mirroring how it
 already synthesizes the `Stop` payload.
 

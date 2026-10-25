@@ -101,7 +101,7 @@ beforeEach(() => {
   })
 })
 
-describe("a crewmate's chat", () => {
+describe("a mate's chat", () => {
   it('draws none of the machinery and says who has not spoken, not "Session ready"', async () => {
     const view = renderPane()
     const hint = await view.findByTestId('crewmate-quiet-hint')
@@ -153,7 +153,7 @@ describe("a crewmate's chat", () => {
     expect(view.queryByTestId('crewmate-quiet-hint')).toBeNull()
   })
 
-  it("rebinding the pane to another working crewmate shows THAT crewmate's step at once, never the held one", async () => {
+  it("rebinding the pane to another working mate shows THAT mate's step at once, never the held one", async () => {
     // The Members page rebinds ONE ChatPane to the newly picked crewmate
     // without remounting it. The status line holds each step briefly
     // (useHeldActivity), so without a per-slot key B's chat would open on A's
@@ -210,7 +210,7 @@ describe("a crewmate's chat", () => {
     expect(view.queryByTestId('crewmate-quiet-hint')).toBeNull()
   })
 
-  it('the motion is the typing bubble — three dots in the crewmate\'s own bubble; the chat page\'s ghost carousel is not mounted beside it', async () => {
+  it('the motion is the typing bubble — three dots in the mate\'s own bubble; the chat page\'s ghost carousel is not mounted beside it', async () => {
     const view = renderLive(liveStore({ kind: 'thinking' }))
     const line = await view.findByTestId('crewmate-live-activity')
     const bubble = view.getByTestId('crewmate-typing-bubble')
@@ -251,32 +251,55 @@ describe("a crewmate's chat", () => {
     expect(view.getByTestId('crewmate-live-activity').querySelector('[role="status"]')).toHaveAttribute('title', long)
   })
 
-  it('a BOUNDED window with no speech in it is not proof: the pane reads the whole history first', async () => {
-    // Older speech behind fifty newer machinery rows: the bounded first read
+  const detailCalls = () => (api.chatSlotDetail as ReturnType<typeof vi.fn>).mock.calls as [string, number | undefined, number | undefined][]
+
+  it('a BOUNDED window with no speech in it is not proof: the pane pages back until the speech shows', async () => {
+    // Older speech behind newer machinery rows: the bounded first read
     // (has_more) shows none of it. The pane must not say "hasn't said anything"
-    // off that window — it upgrades to the unbounded read and draws the speech.
+    // off that window. It walks older pages and draws the speech, and it never
+    // asks for the whole transcript in one read.
     const SPEECH = { role: 'assistant', content: 'Found the cause: the label was renamed.', cls: '', ts: '2026-09-21T09:00:00Z' }
-    ;(api.chatSlotDetail as ReturnType<typeof vi.fn>).mockImplementation((_key: string, limit?: number) =>
-      Promise.resolve(limit === undefined
-        ? { messages: [SPEECH, ...MACHINERY], running: false, has_more: false, total: MACHINERY.length + 1 }
-        : { messages: MACHINERY, running: false, has_more: true, total: MACHINERY.length + 1 }))
+    ;(api.chatSlotDetail as ReturnType<typeof vi.fn>).mockImplementation((_key: string, _limit?: number, before?: number) =>
+      Promise.resolve(before === undefined
+        ? { messages: MACHINERY, running: false, has_more: true, total: 207, next_before: 204 }
+        : before === 204
+          ? { messages: MACHINERY, running: false, has_more: true, total: 207, next_before: 104 }
+          : { messages: [SPEECH], running: false, has_more: false, total: 207, next_before: 0 }))
     const view = renderPane()
     await waitFor(() => expect(view.getByText(/Found the cause/)).toBeInTheDocument())
     expect(view.queryByTestId('crewmate-quiet-hint')).toBeNull()
-    const limits = (api.chatSlotDetail as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])
-    expect(limits).toContain(undefined)
+    expect(detailCalls().map((c) => c[2])).toEqual([undefined, 204, 104])
+    expect(detailCalls().every((c) => c[1] !== undefined)).toBe(true)
   })
 
-  it('…and says who has not spoken only once the WHOLE history is machinery', async () => {
-    ;(api.chatSlotDetail as ReturnType<typeof vi.fn>).mockImplementation((_key: string, limit?: number) =>
-      Promise.resolve(limit === undefined
-        ? { messages: MACHINERY, running: false, has_more: false, total: MACHINERY.length }
-        : { messages: MACHINERY, running: false, has_more: true, total: MACHINERY.length + 40 }))
+  it('…and says who has not spoken only once no older page is left', async () => {
+    ;(api.chatSlotDetail as ReturnType<typeof vi.fn>).mockImplementation((_key: string, _limit?: number, before?: number) =>
+      Promise.resolve(before === undefined
+        ? { messages: MACHINERY, running: false, has_more: true, total: 6, next_before: 3 }
+        : { messages: MACHINERY, running: false, has_more: false, total: 6, next_before: 0 }))
     const view = renderPane()
     const hint = await view.findByTestId('crewmate-quiet-hint')
     expect(hint).toHaveTextContent("Radar hasn't said anything to you yet.")
-    const limits = (api.chatSlotDetail as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])
-    expect(limits[limits.length - 1]).toBeUndefined()
+    expect(detailCalls().map((c) => c[2])).toEqual([undefined, 3])
+    expect(detailCalls().every((c) => c[1] !== undefined)).toBe(true)
+  })
+
+  it('…and stops paging on its own after a bounded number of silent pages', async () => {
+    // A patroller that never spoke, with a very long history: the automatic
+    // walk ends, the hint stays held (no proof yet) and the older-history bar
+    // is left for the reader.
+    ;(api.chatSlotDetail as ReturnType<typeof vi.fn>).mockImplementation((_key: string, _limit?: number, before?: number) =>
+      Promise.resolve({ messages: MACHINERY, running: false, has_more: true, total: 100_000, next_before: (before ?? 100_000) - 3 }))
+    const view = renderPane()
+    // The walk is over once the tenth older page has settled and the bar the
+    // reader pages from is idle again: a further automatic page would have
+    // set it busy in the same commit.
+    await waitFor(() => {
+      expect(detailCalls()).toHaveLength(11)
+      expect(view.getByTestId('load-earlier-messages')).toHaveAttribute('aria-busy', 'false')
+    })
+    expect(detailCalls()).toHaveLength(11)
+    expect(view.queryByTestId('crewmate-quiet-hint')).toBeNull()
   })
 
   it('a complete first read (no more behind it) is proof enough — no second read', async () => {
@@ -291,7 +314,7 @@ describe("a crewmate's chat", () => {
     const view = renderPane({ onOpenCrewWorkLog })
     const where = await view.findByTestId('crewmate-quiet-where')
     expect(where.tagName).toBe('BUTTON')
-    expect(where).toHaveTextContent('See the sessions it is driving.')
+    expect(where).toHaveTextContent('See what it is working on.')
     expect(where.className).toMatch(/underline/)
     fireEvent.click(where)
     expect(onOpenCrewWorkLog).toHaveBeenCalledTimes(1)
@@ -304,7 +327,7 @@ describe("a crewmate's chat", () => {
     expect(where.className).not.toMatch(/underline/)
   })
 
-  it('the composer addresses the crewmate by name, not the product', async () => {
+  it('the composer addresses the mate by name, not the product', async () => {
     const view = renderPane()
     await waitFor(() => expect(view.getByPlaceholderText(/Message Radar/)).toBeInTheDocument())
     expect(view.queryByPlaceholderText(/Message Kiro Crew/)).toBeNull()

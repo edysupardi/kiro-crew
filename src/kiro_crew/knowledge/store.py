@@ -245,8 +245,8 @@ class IngestionGate:
 # ``.github/sync-io-in-async-baseline.txt`` is now empty, and a marker is an
 # exemption, not an offload).
 #
-# ``dashboard/handlers/knowledge.py`` takes the store through a worker for every
-# take of its OWN, endpoints and background tasks alike. ``artifact_ingest.py``'s
+# The ``dashboard/handlers/knowledge_*.py`` owners take the store through a worker
+# for every take of their OWN, endpoints and background tasks alike. ``artifact_ingest.py``'s
 # job-status reads run on a worker too: ``ingest_artifact`` reads inside its
 # ``_settle`` unit under ``run_to_completion``, and ``reconcile_artifacts``
 # reads through ``asyncio.to_thread``.
@@ -256,8 +256,8 @@ class IngestionGate:
 # finalizes its job row inline on its cancellation path, where an interrupted
 # ``to_thread`` could drop the write -- ``start_rebuild_job`` sweeps a stale
 # 'processing' row to 'abandoned', so the single-flight guard recovers either
-# way. And ``dashboard/state.py`` builds this store lazily, whose migrations run
-# under ``allow_on_loop()`` below.
+# way. And ``dashboard/state_parts/dashboard_state.py`` builds this store lazily, whose migrations
+# run under ``allow_on_loop()`` below.
 #
 # * ``strict_env=STORE_STRICT_ENV`` keeps this store off the SHARED
 #   ``KIROCREW_STRICT_ON_LOOP_PERSIST`` switch, which ``setup.py``'s ``test_e2e``
@@ -266,7 +266,7 @@ class IngestionGate:
 #   e2e gateway.
 # * ``dev_mode_arms_strict=False`` keeps a developer gateway from raising on that
 #   same backlog, which would report tracked work as a regression and push the
-#   developer to unset ``KIROCREW_DEV_MODE`` -- silencing history.py's guard too.
+#   developer to unset ``KIROCREW_DEV_MODE`` -- silencing history_offload.py's guard too.
 #
 # When that baseline is empty, delete both arguments and this store joins
 # the shared switch.

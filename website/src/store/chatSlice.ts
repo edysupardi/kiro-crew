@@ -20,8 +20,9 @@ import { releaseCloseHold, awaitCloseOutcome, expireCloseHold, confirmCloseHold,
 import { isChatPageSurface } from '../utils/channelOrigin'
 import { isNoteRow } from '../lib/noteContract'
 import { gcSessionStorage } from '../utils/storageGc'
+import { isUntitledSession } from '../utils/sessionDisplayTitle'
 import type { RootState } from './index'
-import type { ChatMessage, TurnIdentityFields } from '../types'
+import type { ChatMessage, SideSnapshot, TurnIdentityFields } from '../types'
 import { SOFT_STOP_DEBOUNCE_MS } from '../pages/chat/types'
 import { mergePreservedPastes } from '../utils/pasteTokens'
 import { initialState, type ChatState } from './chat/state'
@@ -644,9 +645,22 @@ export const deleteSlot = createAsyncThunk<
       const prev = (landing !== key ? landing : null)
         || root.chat.slotHistory.filter(k => k !== key && sameSurface.has(k)).pop()
         || root.dashboard.slots.filter(s => s.key !== key && sameSurface.has(s.key)).map(s => s.key)[0]
-      dispatch({ type: 'chat/setActiveSlot', payload: null })
+      // Closing a chat is not choosing the landing: the page picks it. Both
+      // moves count as automatic, so a create or fork still pending from
+      // before the close opens its new session when it resolves, while a
+      // session the user opened during that request still wins (`forkMayOpen`).
+      dispatch({ type: 'chat/dropActiveSlot' })
       if (prev) {
-        navigation = dispatch(switchSlot(prev)).unwrap().catch(() => dispatch({ type: 'chat/clearSlotState' }))
+        // A pending create or fork can open its chat before this landing's
+        // fetch settles. A failure then belongs to a view the user has left,
+        // so it clears the pane only while this landing still owns it.
+        const landingSwitch = dispatch(switchSlot({ key: prev, automatic: true }))
+        navigation = landingSwitch.unwrap().catch(() => {
+          const chat = (getState() as RootState).chat
+          if (chat.activeSlot === prev && chat.slotSwitchLatestRequestId === landingSwitch.requestId) {
+            dispatch({ type: 'chat/clearSlotState' })
+          }
+        })
       } else {
         dispatch({ type: 'chat/clearSlotState' })
       }
@@ -690,9 +704,12 @@ export const deleteSlot = createAsyncThunk<
       dispatch(fetchSlots())
       // The row is about to come back; say why, whichever path pressed close.
       // The title is read from before the optimistic removal took the row away.
+      // An untitled row stores null, not the localized label: the notice outlives
+      // a language switch, so the sidebar localizes it at render.
+      const refusedTitle = deletedSlot ? (isUntitledSession({ key, title: deletedSlot.title }) ? null : deletedSlot.title!) : key
       dispatch({
         type: 'chat/setCloseRefused',
-        payload: { key, title: deletedSlot?.title || key, reason: closeRefusalIsHistoryWrite(err) ? 'historyWrite' : 'failed' },
+        payload: { key, title: refusedTitle, reason: closeRefusalIsHistoryWrite(err) ? 'historyWrite' : 'failed' },
       })
       throw new Error('save failed')
     } finally {
@@ -880,6 +897,20 @@ const chatSlice = createSlice({
      *  folders, scroll it into view, flash it). Consumed and cleared by
      *  ChatSidebar once it is mounted and ready — see `revealRequest`. */
     requestSlotReveal(state, action: PayloadAction<string>) { state.revealNonce += 1; state.revealRequest = { kind: 'session', target: action.payload, nonce: state.revealNonce } },
+    /** Ask the sidebar only to open the folder path of a session the user just
+     *  opened, keeping their search and filters (see `revealRequest.openFoldersOnly`).
+     *  `folder_id` comes from the create or fork response, not from the listed row,
+     *  which can lag it. Set by every fork entry that opens its child (a fork child
+     *  inherits its source's folder, which can be collapsed or inside a collapsed
+     *  parent) and by the header New tab gesture that opens the new chat in the
+     *  foreground, which creates with `activate: false` and so skips createSlot's
+     *  own request. No-op for a session filed at the top level. */
+    requestSlotFolderOpen(state, action: PayloadAction<{ key: string; folder_id?: string | null }>) {
+      const { key, folder_id: folderId } = action.payload
+      if (!folderId) return
+      state.revealNonce += 1
+      state.revealRequest = { kind: 'session', target: key, nonce: state.revealNonce, openFoldersOnly: true, folderId }
+    },
     clearSlotReveal(state) { state.revealRequest = null },
     /** Ask the sidebar to reveal a FOLDER row: make it visible, expand it and every
      *  collapsed ancestor, scroll it into view, flash it. Set by the command
@@ -983,17 +1014,163 @@ const chatSlice = createSlice({
 
 export const {
   setCloseRefused,
-  setActiveSlot, clearSlotState, setPendingInput, stageToMainComposer, setAgentSwitchNotice, clearUnresumableResume, clearUndeletableHistory, setQuestionCard, clearQuestionCard, setQuestionDraft, setQuestionNotice, setQuestionRequestInFlight, markQuestionSettled, resolveQuestionCard, setFollowupCard, clearFollowupCard, dismissFollowupItem, setFolderSuggestion, clearFolderSuggestion, ageFolderSuggestion, appendMessage, appendSlotMessage, updateStreamingMessage, finalizeAssistant,
+  setActiveSlot, dropActiveSlot, forkOpenStarted, forkOpenSettled, clearSlotState, setPendingInput, stageToMainComposer, setAgentSwitchNotice, clearUnresumableResume, clearUndeletableHistory, setQuestionCard, clearQuestionCard, setQuestionDraft, setQuestionNotice, setQuestionRequestInFlight, markQuestionSettled, resolveQuestionCard, setFollowupCard, clearFollowupCard, dismissFollowupItem, setFolderSuggestion, clearFolderSuggestion, ageFolderSuggestion, appendMessage, appendSlotMessage, updateStreamingMessage, finalizeAssistant,
   removeThinking, confirmOptimisticSend, markSendUnconfirmed, resolveOptimisticSteer, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, settleStopNotRunning, startLocalTurn, startServerTurn, endLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, clearSlotCache, truncateAfterIndex, replaceMessages, hydrateSlotMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage, reorderQueuedMessages,
   sseContextUsage, setVoicePlaying, setVoicePreparing, setVoiceAudio,
-  toggleActivity, openActivityToTab, openActivityPanel, openActivityToTool, clearFocusToolCallId, requestSlotReveal, clearSlotReveal, requestFolderReveal, clearSubagentsForSnapshot, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentTool, sseSubagentStalled, sseSubagentRetrying, sseSubagentDone, sseSubagentQueued, reconcileSubagentQueuedFromSlots,
+  toggleActivity, openActivityToTab, openActivityPanel, setSidePanelAlwaysOpen, openActivityToTool, clearFocusToolCallId, requestSlotReveal, requestSlotFolderOpen, clearSlotReveal, requestFolderReveal, clearSubagentsForSnapshot, sseSubagentPending, markSubagentApproving, markSubagentApprovalGone, reconcileSubagentApprovalGone, sseSubagentSpawn, sseSubagentTool, sseSubagentStalled, sseSubagentRetrying, sseSubagentDone, sseSubagentQueued, reconcileSubagentQueuedFromSlots,
   sseSubagentBatchUpdate, sseSubagentBatchChunks, selectSubagent, clearTerminalSubagents,
   setAutomations, sseAutomation, removeAutomation,
   sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent,
   sseMcpAppRender,
   sseWorkflowEvent, clearWorkflowRun, reconcileWorkflowRuns,
-  sseSideResult, sseSideQueue, sideSendStatus, sideReleaseConsumed, sideClose, sideOptimisticAppend, sideOptimisticRollback,
+  sseSideResult, sseSideQueue, sideSendStatus, sideReleaseConsumed, sideClose, sideRestore, sideResync, sideOptimisticAccepted, sideOptimisticAppend, sideOptimisticRollback,
 } = chatSlice.actions
+
+/** The `GET /api/spawn` read in flight, shared by every gone card that asks
+ *  while it is pending: a batch refusal, a reconnect and a tab opening on N
+ *  gone cards all dispatch together, and one inventory answers them all. */
+let spawnInventoryRead: ReturnType<typeof api.spawnList> | null = null
+const readSpawnInventory = () => (spawnInventoryRead ??= api.spawnList().finally(() => { spawnInventoryRead = null }))
+
+/**
+ * Reconcile a gone approval immediately against the backend's authoritative
+ * process inventory. A failed read deliberately leaves the card unresolved and
+ * active; SubagentProgressBar's existing reconciliation loop retries later.
+ */
+export const reconcileGoneSubagent = createAsyncThunk<void, { slot: string; id: string; approval_id: string }>(
+  'chat/reconcileGoneSubagent',
+  async ({ slot, id, approval_id }, { dispatch }) => {
+    const response = await readSpawnInventory()
+    const agent = (response.agents ?? []).find(a => a.id === id) ?? null
+    dispatch(reconcileSubagentApprovalGone({ slot, id, approval_id, agent }))
+  },
+)
+
+/** The `GET .../side` read in flight per slot, shared by the panel and the
+ *  `/side` command so one reload costs one read. */
+const sideRestoreReads = new Map<string, Promise<SideSnapshot>>()
+
+/** Reads a question stopped waiting on at its deadline, per slot, until each
+ *  lands. A later question waits on them as well as on its own read. */
+const retiredSideRestoreReads = new Map<string, Set<Promise<SideSnapshot>>>()
+
+function retireSideRead(slot: string, read: Promise<SideSnapshot>): void {
+  const retired = retiredSideRestoreReads.get(slot) ?? new Set<Promise<SideSnapshot>>()
+  retiredSideRestoreReads.set(slot, retired)
+  retired.add(read)
+  const forget = () => {
+    retired.delete(read)
+    if (!retired.size && retiredSideRestoreReads.get(slot) === retired) retiredSideRestoreReads.delete(slot)
+  }
+  read.then(forget, forget)
+}
+
+/** The slot's side read in flight, started when there is none. A 404 is nothing
+ *  to restore: the slot is gone, or the gateway predates the read. A read leaves
+ *  the map when it settles, unless a newer read has taken its place. */
+function sharedSideRead(slot: string): Promise<SideSnapshot> {
+  const inFlight = sideRestoreReads.get(slot)
+  if (inFlight) return inFlight
+  const read: Promise<SideSnapshot> = api.sideState(slot)
+    .catch((e: unknown): SideSnapshot => {
+      if (isNotFoundError(e)) return { open: false }
+      throw e
+    })
+    .finally(() => { if (sideRestoreReads.get(slot) === read) sideRestoreReads.delete(slot) })
+  sideRestoreReads.set(slot, read)
+  return read
+}
+
+/**
+ * Settle a slot's Side Chat against the gateway's copy of its side conversation,
+ * once per page (`sideRestore`). Any failure other than a 404 rejects and settles
+ * nothing, so the caller can hold a question back instead of sending it into a
+ * conversation the panel cannot show.
+ */
+export const restoreSideConversation = createAsyncThunk<void, string, { state: RootState }>(
+  'chat/restoreSideConversation',
+  async (slot, { dispatch, getState }) => {
+    if (getState().chat.slotSideRestored?.[slot]) return
+    dispatch(sideRestore({ slot, snapshot: await sharedSideRead(slot) }))
+  },
+)
+
+/**
+ * `restoreSideConversation` for a question about to be sent, which waits at most
+ * `ms`: 'restored' once the conversation is settled, 'failed' when the read fails,
+ * 'timeout' when it is still outstanding then. That read then stops being shared,
+ * so the next question asks the gateway again instead of waiting on the same
+ * request. It still lands, and the once-per-page `sideRestore` takes whichever
+ * read lands first, so the next question waits on it too: whichever lands first
+ * settles that question as well.
+ */
+export const awaitSideRestore = createAsyncThunk<'restored' | 'failed' | 'timeout', { slot: string; ms: number }, { state: RootState }>(
+  'chat/awaitSideRestore',
+  async ({ slot, ms }, { dispatch, getState }) => {
+    if (getState().chat.slotSideRestored?.[slot]) return 'restored'
+    const read = sharedSideRead(slot)
+    const landedEarlier = [...(retiredSideRestoreReads.get(slot) ?? [])].map(retired => retired.then(
+      snapshot => {
+        dispatch(sideRestore({ slot, snapshot }))
+        return 'restored' as const
+      },
+      // Only this question's own read can fail it.
+      () => new Promise<never>(() => {}),
+    ))
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const outcome = await Promise.race([
+      dispatch(restoreSideConversation(slot)).unwrap().then(() => 'restored' as const, () => 'failed' as const),
+      ...landedEarlier,
+      new Promise<'timeout'>(resolve => { timer = setTimeout(() => resolve('timeout'), ms) }),
+    ])
+    clearTimeout(timer)
+    if (outcome === 'timeout' && sideRestoreReads.get(slot) === read) {
+      sideRestoreReads.delete(slot)
+      retireSideRead(slot, read)
+    }
+    return outcome
+  },
+)
+
+/** The newest socket-open re-read sent per slot. */
+const latestSideResyncRead = new Map<string, object>()
+
+/**
+ * A side turn can end while this tab cannot hear it: before its socket first
+ * connects, when the restore read was answered first, or while the socket is
+ * down. Its final frame then reaches no socket of this tab, and a panel waiting
+ * on the turn would wait until the next reload. So each time the socket opens,
+ * every restored panel still waiting on a turn reads the gateway's copy again
+ * (`sideResync`), once any restore read still in flight has landed. A 404 means
+ * the slot is gone, so nothing of it still runs. A conversation closed and
+ * replaced while the read was out keeps to its own frames. Only the newest read
+ * sent for a slot is applied: an older one can answer after it, and would undo
+ * what the newer one learned.
+ */
+export const resyncWaitingSideConversations = createAsyncThunk<void, void, { state: RootState }>(
+  'chat/resyncWaitingSideConversations',
+  async (_, { dispatch, getState }) => {
+    const slots = new Set([...Object.keys(getState().chat.slotSide), ...sideRestoreReads.keys()])
+    await Promise.all([...slots].map(async slot => {
+      await sideRestoreReads.get(slot)?.catch(() => undefined)
+      const { slotSide, slotSideRestored } = getState().chat
+      const side = slotSide[slot]
+      if (!slotSideRestored?.[slot] || !side || !(side.pending || side.streaming || side.awaitingFinalRunId)) return
+      const thisRead = {}
+      latestSideResyncRead.set(slot, thisRead)
+      let snapshot: SideSnapshot | undefined
+      try {
+        snapshot = await api.sideState(slot)
+      } catch (e: unknown) {
+        if (isNotFoundError(e)) snapshot = { open: false }
+      }
+      const newest = latestSideResyncRead.get(slot) === thisRead
+      if (newest) latestSideResyncRead.delete(slot)
+      if (!newest || !snapshot) return
+      dispatch(sideResync({ slot, snapshot, readFor: side }))
+    }))
+  },
+)
 
 export { clampToolOutput, TOOL_OUTPUT_MAX_CHARS, normalizeQueueEntries, queueEntryAttachments, queueEntryQuote, type QueueEntryAttachments } from './chat/wire'
 export { hydrateQueuedBubbles } from './chat/queue'
@@ -1007,7 +1184,7 @@ export type { ChatState, FollowupItem, SideMessage, SideQueueEntry, SideSendStat
 export { FOLDER_SUGGESTION_MAX_TURNS, capturePendingAskId, isAnsweredQuestionEnding, pendingQuestionFor, shouldResolveAskOnSend } from './chat/composerCards'
 export { mcpAppKey } from './chat/mcpApps'
 export {
-  isAwaitingSpawnApproval, selectSidebarApprovalCounts, selectSidebarStartedSubagentCounts, selectSidebarSubagentCounts, selectSlotPendingSpawnApprovals,
+  isActiveSubagent, isAwaitingSpawnApproval, isSpawnApprovalGone, isSpawnApprovalRetired, selectSidebarApprovalCounts, selectSidebarStartedSubagentCounts, selectSidebarSubagentCounts, selectSlotPendingSpawnApprovals,
   selectSlotSubagents, selectSlotSubagentsActive, selectSubagentActivityCount,
 } from './chat/subagents'
 export { WORKFLOW_TERMINAL_STATUSES, isTerminalWorkflowStatus, selectSidebarWorkflowActive, selectSidebarWorkflowActiveKeys } from './chat/workflows'
@@ -1023,6 +1200,7 @@ export { clearSwitchSlotGone, switchSlot, switchSlotNoticeCopy, type SwitchSlotA
 export { refreshSlot, warmSlotCache } from './chat/slotRefresh'
 export { wireTurnIdentity } from './chat/runState'
 export { WINDOW_WALK_MAX_PAGES } from './chat/windowWalk'
-export { clearHistorySessions, createSlot, deleteHistorySession, fetchHistory, forkSlot, resumeFromHistory } from './chat/lifecycle'
+export { captureForkOrigin, clearHistorySessions, createSlot, deleteHistorySession, fetchHistory, forkMayOpen, forkSlot, listForkedSlot, resumeFromHistory, type ForkOrigin } from './chat/lifecycle'
+export { openCreatedSlot } from './chat/openCreatedSlot'
 
 export default withRefreshRevision(chatSlice.reducer)

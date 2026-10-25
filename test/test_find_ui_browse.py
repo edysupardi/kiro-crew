@@ -77,22 +77,22 @@ CORPUS: list[tuple[str, str, str, str]] = [
         "crewmates",
         "en",
         "How do I create my own assistant with a separate memory?",
-        "Create crewmate",
+        "Create mate",
     ),
-    ("crewmates", "zh-CN", "想建一个有独立记忆的助手，去哪里？", "Create crewmate"),
+    ("crewmates", "zh-CN", "想建一个有独立记忆的助手，去哪里？", "Create mate"),
     (
         "crewmates",
         "en",
         "Where can I change a crewmate's instructions?",
-        "Edit crewmate instructions",
+        "Edit mate instructions",
     ),
-    ("crewmates", "zh-CN", "在哪里修改助手成员的指令？", "Edit crewmate instructions"),
+    ("crewmates", "zh-CN", "在哪里修改助手成员的指令？", "Edit mate instructions"),
     ("crewmates", "en", "How do I start a chat with a particular crewmate?", "Chat with crewmate"),
     ("crewmates", "zh-CN", "怎么单独和某个助手成员聊天？", "Chat with crewmate"),
     ("crewmates", "en", "Where can I look at what a crewmate remembers?", "Crewmate memory"),
     ("crewmates", "zh-CN", "在哪看这个助手记住了什么？", "Crewmate memory"),
-    ("crewmates", "en", "How do I change a crewmate's picture?", "Crewmate avatar"),
-    ("crewmates", "zh-CN", "怎么换助手成员的头像？", "Crewmate avatar"),
+    ("crewmates", "en", "How do I change a crewmate's picture?", "Mate avatar"),
+    ("crewmates", "zh-CN", "怎么换助手成员的头像？", "Mate avatar"),
     ("schedule", "en", "Where do I set up a reminder for tomorrow?", "Create scheduled job"),
     ("schedule", "zh-CN", "想设置明天的提醒，在哪里添加？", "Create scheduled job"),
     ("schedule", "en", "How do I temporarily stop a recurring job?", "Pause scheduled job"),
@@ -226,9 +226,9 @@ TASK_LOCATION: dict[str, str] = {
     "Attach file": "composer.attach-files",
     "Session model picker": "chat.model-picker",
     "Context usage": "composer.context-usage",
-    "Create crewmate": "members.new",
-    "Edit crewmate instructions": "members.edit",
-    "Crewmate avatar": "agents.edit-avatar",
+    "Create mate": "members.new",
+    "Edit mate instructions": "members.edit",
+    "Mate avatar": "agents.edit-avatar",
     "Create scheduled job": "schedule.add-job",
     "Run job now": "schedule.run-now",
     "Artifact library": "page.artifacts",
@@ -258,8 +258,7 @@ TASK_LOCATION: dict[str, str] = {
     # Closed coverage gaps (each a registered control, checked at its render site).
     "Rename session": "chat.session-title",
     "Voice input": "composer.voice",
-    "Chat with crewmate": "agents.chat",
-    "Crewmate memory": "agents.manage-memory",
+    "Chat with crewmate": "members.roster-list",
     "Pause scheduled job": "schedule.pause",
     "Job run history": "schedule.view-executions",
     "Edit scheduled job": "schedule.edit-when",
@@ -285,7 +284,10 @@ RELATED_ONLY: dict[str, str] = {
 #: "App settings": an app's detail page has no configuration control, only a
 #: read-only Configuration card of the manifest's own guidance
 #: (AppDetailPage); an app's settings live inside that app's own page.
-COVERAGE_GAPS: frozenset[str] = frozenset({"App settings"})
+#: "Crewmate memory": the crewmate editor's Memory section shows it, but that
+#: section holds no registered control and is not registered itself (its
+#: one-word label would tie a bare "memory" question with chat.memory-mode).
+COVERAGE_GAPS: frozenset[str] = frozenset({"App settings", "Crewmate memory"})
 _NEGATIVE = "negative"
 
 

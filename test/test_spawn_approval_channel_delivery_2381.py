@@ -232,7 +232,10 @@ class TestWrappedSpawnApproval:
         """
         import kiro_crew.slack.gateway as gateway_mod
 
-        src = Path(gateway_mod.__file__).read_text(encoding="utf-8")
+        # ``_spawn_approve`` is a closure of ``_init_subagents``, which the facade
+        # composes from its subagent_wiring owner.
+        wiring = Path(gateway_mod.__file__).with_name("gateway_runtime") / "subagent_wiring.py"
+        src = wiring.read_text(encoding="utf-8")
         consult = src.index("deliver_spawn_approval(")
         fallback = src.index("return await _approve_spawn_gate(event, parent_session_key)")
         assert consult < fallback, "the channel seam must be consulted before the fallback gate"

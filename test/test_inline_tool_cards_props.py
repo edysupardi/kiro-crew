@@ -10,6 +10,7 @@ unittest.mock.patch instead.
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -69,6 +70,8 @@ class _SegmentSlotStub:
         # The flush redacts the segment's raw copy and describes credentials
         # from this turn's evidence, as on _ChatSlot.
         self.segment_raw_text: str | None = ""
+        self.segment_shown_sha = hashlib.sha256()
+        self.segment_removed: dict[str, str] = {}
         self.credential_evidence = CredentialEvidence()
         # Its allowed hosts scope the flush's link redaction.
         self.workspace = ""
@@ -153,7 +156,7 @@ class TestProperty1SegmentFlushOnInterrupt:
             slot.append("chunk", chunk, "chunk")
             assistant_text += chunk
 
-        # Flush segment (simulates what _run_chat does on EVENT_TOOL_CALL).
+        # Flush segment (simulates _on_tool_call in chat_turn/tool_rows.py on EVENT_TOOL_CALL).
         assert assistant_text != ""
         expected_text, _ = redact_exfiltration_urls(assistant_text)
         expected_text, _ = redact_credentials(expected_text)

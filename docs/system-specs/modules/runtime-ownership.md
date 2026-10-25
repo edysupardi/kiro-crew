@@ -34,6 +34,21 @@ peer check on a shared pid ([dashboard-token-auth.md](dashboard-token-auth.md) �
 `session_pid` is the pid-bookkeeping leaf and calls the gate, so an import in the
 other direction would close `session_pid → acp → acp.runtime → session_pid`.
 
+`session_pid` is a facade over sibling owners (`kiro_crew._facade_mirror`): every name still
+resolves as `kiro_crew.session_pid.<name>`, and a patch through it reaches the owner that
+reads the name. New work goes to the owner of its responsibility:
+
+| Module | Owns |
+|---|---|
+| `src/kiro_crew/session_pid.py` | the reaper's passes over the tracking files (`cleanup_orphaned_sessions`, `_sweep_pid_entries`, `_periodic_pid_sweep`, `_kill_confirmed_and_writeback`, `_cleanup_orphaned_mcp_servers`, `cleanup_orphaned_session_roots`), the kill phase of the orphan sweep (`kill_orphan_mcps`), and the two tree kills that walk descendants through the ACP layer (`_kill_pid_tree`, `_kill_orphan_work_tree`) |
+| `src/kiro_crew/session_pid_tracking.py` | `kiro_pids.txt` and `kiro_session_pids.txt`: paths, locks, reads, atomic rewrites, track and untrack; the start-token and age probes; the sweep-protected pid registry |
+| `src/kiro_crew/session_pid_harness.py` | whether a pid is a managed agent runtime, read from its command line (`_is_managed_agent_process` and the marker sets) |
+| `src/kiro_crew/session_pid_orphan_scan.py` | the untracked-orphan predicates, the environ markers they read, the tracked-pid snapshot, the untracked-runtime report, and the find phase (`find_orphan_mcp_candidates`) |
+| `src/kiro_crew/session_pid_provider_kill.py` | the synchronous teardown of a leaked provider (`_sync_kill_provider`: the gate, the commit, the identity-pinned group and descendant signals), the orphaned spawn-group signalling (`signal_orphaned_spawn_group`, `_signal_orphaned_runtime_group`), and `_tracked_child_has_runtime_identity`, the argv check that the vouched members of the ACP runtime's group signalling must pass, and so must a tracked `kiro_pids.txt` child reparented to a `systemd` subreaper in the facade's `_cleanup_orphaned_mcp_servers` |
+| `src/kiro_crew/session_pid_orphan_kill.py` | the unreachable-gatewayd, browser-daemon and MCP-subtree orphan kills, and their security event log records |
+| `src/kiro_crew/session_pid_mappings.py` | pruning stale `session_pid_<pid>` and `session_token_*` identity mappings |
+| `src/kiro_crew/session_pid_rss.py` | a session tree's resident memory |
+
 ### What the model is made of
 
 | Mechanism | Where it lives |
@@ -519,6 +534,15 @@ app backend table or the manager's in-memory union has no row in either tracking
 file. Folding those
 into the same `False` a real failure gets would publish one WARNING per stale pid
 per tick for the gateway's life — a steady state reported as a fault.
+
+The same rule sets the level of the two per-pass summaries. The dead-direction
+line (`runtime_reconcile owned_dead=... forgotten=...`) is WARNING only when the
+pass retracted a record or a retraction it owed failed, and the hook's
+`Runtime reconcile: unowned_alive=...` line is WARNING only when the pass killed,
+would have killed or retracted something. A reading made only of permanently
+withheld unowned pids and `not-mine` records repeats every tick, so both lines
+drop to DEBUG; the `session.runtime_reconcile` counter still carries every field
+on every pass.
 
 ### Platform scope
 

@@ -124,7 +124,11 @@ function WakaTimeSummaryCard({ onOpen }: { onOpen: () => void }) {
     queryKey: ['wakatime-stats', 'last_7_days'],
     queryFn: () => api.wakatimeStats('last_7_days'),
   })
-  const total = data?.stats?.total_seconds ?? 0
+  // Prefer the include-other total so this card matches the WakaTime drill-in
+  // it opens; the classified-only total_seconds drops the "Other" bucket and
+  // reads low. Fall back to total_seconds when the include-other field is null
+  // (free accounts, which do not report it).
+  const total = data?.stats?.total_seconds_including_other_language ?? data?.stats?.total_seconds ?? 0
   const fmtHm = (s: number) => {
     // Round to whole minutes first, then split, so 7199s -> 2h 0m, not 1h 60m.
     const totalMin = Math.round(Math.max(0, s) / 60)
@@ -254,7 +258,7 @@ export default function OverviewPage() {
   if (view === 'memory') {
     const selectedStore = params.get('store') || ''
     return <DrillIn title={i18nT('pages.overviewPage.memory')} hideTitle={!!selectedStore && selectedStore !== 'default'} onBack={() => setView(null)}>
-      <Suspense fallback={<ContentSkeleton rows={6} />}><MemoryTab refreshTrigger={refreshTrigger} selectedStore={selectedStore} onStoreNavigate={store => setParams(previous => {
+      <Suspense fallback={<ContentSkeleton rows={6} />}><MemoryTab refreshTrigger={refreshTrigger} selectedStore={selectedStore} focus={params.get('focus')} onStoreNavigate={store => setParams(previous => {
         const next = new URLSearchParams(previous)
         if (store) next.set('store', store)
         else next.delete('store')

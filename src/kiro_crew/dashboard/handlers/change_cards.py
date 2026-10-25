@@ -33,6 +33,7 @@ token, env value or server spec), best-effort, never failing the request.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import urllib.parse
@@ -61,6 +62,9 @@ HEADER_CARD_STEP = "X-Card-Step"
 #: between the pre-delete snapshot check and the delete-by-id. Set ONLY on the
 #: owner-authed card step; a direct DELETE never carries it.
 REQ_CARD_UNDO_CRON_EXPECT = "card_undo_cron_expect"
+#: Set on a ``crewmate.import`` Undo's rules clear: the digest of the rules the
+#: import wrote. The rules route clears only while they still hash to it.
+REQ_CARD_UNDO_RULES_EXPECT = "card_undo_rules_expect"
 
 #: Request attribute a ``folder.steering`` card's Apply and Undo steps set to
 #: the steering list the step replaces; the folder PATCH compares it under the
@@ -127,6 +131,8 @@ async def _broadcast(state: Any, card: dict[str, Any]) -> int:
     # conversation learns the new status (and the crew log the outcome).
     await chat_cards.load_conversation_window(state, card)
     chat_cards.record_change_status(state, card)
+    # A finished import card has no use for the file it was raised from.
+    await _release_staged_copy(state, card)
     deliver = getattr(state, "deliver_ws_owners", None)
     if deliver is None:
         return 0
@@ -188,6 +194,10 @@ def _slot_is_open(
 
 
 async def _settle(request: web.Request) -> None:
+    await _settle_app(request.app)
+
+
+async def _settle_app(app: web.Application) -> None:
     """Expire / prune, persist, then broadcast what changed. Raises :class:`CardError`.
 
     Persist-before-you-publish, for reads too: when the write fails, every
@@ -197,8 +207,8 @@ async def _settle(request: web.Request) -> None:
     follow from the clock and the open conversations, so the next settlement
     whose write succeeds derives them again and announces them then.
     """
-    state = request.app["state"]
-    store = _store(request)
+    state = app["state"]
+    store = card_store_for(state)
     await store.warm()
     # Retirement cancels a proposal nobody can confirm, so it must fire ONLY on
     # a slot the user actually closed -- never on one merely absent, and never
@@ -211,6 +221,7 @@ async def _settle(request: web.Request) -> None:
     # for exactly the pending cards' slots and handed in. Both skip entirely
     # until the restore has run -- there is no authoritative "closed" before it.
     closed_meta_keys = await _closed_on_disk(state, store)
+    await _sweep_staged_copies(store)
     changed, undo = store.housekeep(_slot_is_open(state, closed_meta_keys))
     try:
         await store.flush(strict=True)
@@ -473,14 +484,84 @@ async def api_cards_agent_propose(request: web.Request) -> web.Response:
             raise CardError(400, "invalid_body", f"unknown field '{unknown[0][:64]}'")
     except CardError as exc:
         return _refusal(exc)
+    kind = str(body.get("kind") or "")
+    if kind in catalog.SELF_ONLY_KINDS:
+        # A crewmate raises its own page offer through its kirocrew-mate tool, so the
+        # asked-once record is kept; propose_change never raises it.
+        return _refusal(CardError(403, "self_only", "only the crewmate itself can offer this"))
+    params = body.get("params")
+    if (
+        kind == catalog.KIND_CREWMATE_CAPABILITIES
+        and isinstance(params, dict)
+        and "origins" in params
+    ):
+        # Where each server comes from is the gateway's own record, written only
+        # by ``request_capabilities`` after it resolves the named additions
+        # (``member_self``); a caller never supplies one.
+        _audit(sk, "cards.propose", "denied", "origins_not_accepted")
+        return _refusal(
+            CardError(400, "invalid_param", "'origins' is set by the gateway, not the caller")
+        )
+    if kind == catalog.KIND_CREWMATE_CAPABILITIES and await asyncio.to_thread(
+        _crewmate_drives_capabilities_off, request.app["state"], slot_key, sk
+    ):
+        _audit(sk, "cards.propose", "denied", "dynamic_capabilities_off")
+        return _refusal(
+            CardError(
+                403,
+                "dynamic_capabilities_off",
+                "a crewmate asks for its worker's capabilities with request_capabilities, "
+                "which offers the user the Preview first; use that instead",
+            )
+        )
     return await propose_for_caller(
         request,
         slot_key,
         sk,
-        kind=str(body.get("kind") or ""),
+        kind=kind,
         params=body.get("params"),
         reason=body.get("reason"),
     )
+
+
+def _crewmate_drives_capabilities_off(state: Any, slot_key: str, sk: str) -> bool:
+    """A crewmate (its chat or its worker) asking for a capability card it may not raise.
+
+    While that crewmate's Dynamic capabilities preview is off
+    (``kiro_crew.crewmate_dynamic_capabilities``) the crewmate-driven capability
+    path is withheld, ``propose_change`` included. A worker whose crewmate
+    cannot be named counts as off. Any other caller -- the main assistant asked
+    to add a tool to a crewmate -- proposes the card as before. Blocking.
+    """
+    from kiro_crew import crewmate_dynamic_capabilities as dyn
+    from kiro_crew import members
+    from kiro_crew.dashboard.mate_thread_wakes import is_crewmate_thread
+
+    slot = state.get_slot(slot_key)
+    if is_crewmate_thread(slot):
+        return dyn.restricted_for(slot.agent)
+    if members.is_crewmate_worker_session(slot_key) or members.is_crewmate_worker_session(sk):
+        return dyn.restricted_for(_worker_crewmate(slot))
+    return False
+
+
+def _worker_crewmate(slot: Any) -> str:
+    """The crewmate a worker *slot* runs for, from its execution record, else ``""``."""
+    if slot is None:
+        return ""
+    try:
+        from kiro_crew.config.loader import KiroCrewConfig
+        from kiro_crew.dashboard.chat_utils import slot_history_key
+        from kiro_crew.dashboard.crewmate_approval import crewmate_name_for
+        from kiro_crew.execution_context import read_session_execution
+
+        record = read_session_execution(slot_history_key(slot))
+        if record is None:
+            return ""
+        return crewmate_name_for(KiroCrewConfig.load(), record) or ""
+    except Exception:  # noqa: BLE001 - an unnamed crewmate counts as off
+        logger.debug("worker crewmate unreadable for %s", getattr(slot, "key", ""), exc_info=True)
+        return ""
 
 
 async def propose_for_caller(
@@ -491,6 +572,7 @@ async def propose_for_caller(
     kind: str,
     params: Any,
     reason: Any,
+    claim: Callable[[], Awaitable[Callable[[], Awaitable[None]]]] | None = None,
 ) -> web.Response:
     """Propose one card of *kind* in the verified caller's slot. The route body.
 
@@ -499,8 +581,20 @@ async def propose_for_caller(
     so a crewmate's request for its own goal, model or tools becomes exactly
     the card ``propose_change`` would have made: same validation, same
     preview, same store, same row in the conversation.
+
+    *claim*, when given, persists what the card's existence must leave behind (the
+    page offer's asked-once record). It runs after the card is built and before it
+    is stored or shown; a :class:`CardError` from it refuses the card. It returns
+    the undo, run when the card is then not published, so nothing is claimed for a
+    card nobody saw.
     """
     try:
+        # An app's kind and an app's card key are never a chat caller's: see
+        # propose_app_card.
+        if kind in catalog.APP_ONLY_KINDS or slot_key.startswith(
+            (APP_SLOT_PREFIX, OWNER_SLOT_PREFIX)
+        ):
+            raise CardError(403, "app_only", "only the owner can propose this change")
         params = catalog.validate_params(kind, params)
         params = await cards.resolve_params(kind, params)
         cards.check_param_text(params)
@@ -508,6 +602,12 @@ async def propose_for_caller(
         state = request.app["state"]
         preview, before, context = await cards.build(kind, params, state=state, app=request.app)
         await _settle(request)
+    except (CardError, catalog.CardCatalogError) as exc:
+        return _refusal(exc)
+    undo_claim: Callable[[], Awaitable[None]] | None = None
+    try:
+        if claim is not None:
+            undo_claim = await claim()
         rec = _store(request).propose(
             slot_key=slot_key,
             session_key=sk,
@@ -519,6 +619,8 @@ async def propose_for_caller(
             context=context,
         )
     except (CardError, catalog.CardCatalogError) as exc:
+        if undo_claim is not None:
+            await undo_claim()
         return _refusal(exc)
     store = _store(request)
     try:
@@ -526,6 +628,8 @@ async def propose_for_caller(
     except CardError as exc:
         # Never shown, never in the transcript: the proposal did not happen.
         store.discard(rec["id"])
+        if undo_claim is not None:
+            await undo_claim()
         return _refusal(CardError(exc.status, exc.code, "the change card could not be saved"))
     public = store.public(rec)
     # The card is part of the conversation from here on: its row lands at this
@@ -547,6 +651,288 @@ async def api_cards_agent_status(request: web.Request) -> web.Response:
     except CardError as exc:
         return _refusal(exc)
     return web.json_response(store.public(rec))
+
+
+# ── crewmate import cards (rfc-crewmate-share.md §5.4) ──
+
+#: The card key of an app's cards, ``app:<name>``. No chat slot key carries it
+#: (``propose_for_caller`` refuses one that does), so the store's per-slot cap
+#: counts per app, and no conversation can list, report or retire the card.
+APP_SLOT_PREFIX = "app:"
+#: The reserved card keys of owner surfaces that are not a conversation. A chat
+#: slot key never takes one: every slot key is folded to the filename charset
+#: (``slot_directory._normalize_slot_key``), which has no ``:``, and
+#: ``propose_for_caller`` refuses the prefix besides.
+OWNER_SLOT_PREFIX = "owner:"
+#: Where the crewmate dropdown's Import from file keeps its card, with an empty
+#: ``session_key``; ``GET /api/cards/pending?slot=`` reopens it.
+IMPORT_SLOT_KEY = OWNER_SLOT_PREFIX + "crewmate-import"
+_FREE_NAME_TRIES = 9
+#: The card states in which an import card may still need its staged copy. A
+#: ``failed`` card can be retried (``CardStore.begin_step``), so it keeps it
+#: until it is cancelled, dismissed or expires.
+_STAGE_LIVE = frozenset({cards.STATUS_PENDING, cards.STATUS_APPLYING, cards.STATUS_FAILED})
+#: The one start-up sweep of staged copies no live card names. Shared: every
+#: caller awaits the same run to its end, so no upload stages while it scans.
+_STAGE_SWEEP: asyncio.Task[None] | None = None
+#: Digests an upload holds from before it stages its copy until its card is
+#: stored (or refused), by count: two tabs may upload the same file. A cancel
+#: of an older card that names the same digest keeps the copy meanwhile.
+_STAGE_HELD: collections.Counter[str] = collections.Counter()
+
+
+def _live_import_shas(store: CardStore) -> set[str]:
+    """The staged-copy digests a live import card or an in-flight upload names."""
+    return set(+_STAGE_HELD) | {
+        str((rec.get("params") or {}).get("bundle_sha256"))
+        for rec in store.pending(None)
+        if rec.get("kind") == catalog.KIND_CREWMATE_IMPORT
+        and rec.get("status") in _STAGE_LIVE
+        and (rec.get("params") or {}).get("bundle_sha256")
+    }
+
+
+async def _release_staged_copy(state: Any, card: dict[str, Any]) -> None:
+    """Delete a finished import card's staged copy, unless a live card still names it."""
+    from kiro_crew import crewmate_stage
+
+    sha = (card.get("params") or {}).get("bundle_sha256")
+    if card.get("kind") != catalog.KIND_CREWMATE_IMPORT or not sha:
+        return
+    if card.get("status") in _STAGE_LIVE:
+        return
+    if sha in _live_import_shas(card_store_for(state)):
+        return
+    await asyncio.to_thread(crewmate_stage.discard, str(sha))
+
+
+async def _sweep_staged_copies(store: CardStore) -> None:
+    """Once per gateway start: delete every staged copy no live import card names.
+
+    Every caller waits for the same run to finish. An upload stages only after
+    it, so the sweep's keep set can never miss a copy staged while it scanned.
+    """
+    global _STAGE_SWEEP
+    task = _STAGE_SWEEP
+    if task is None or task.get_loop() is not asyncio.get_running_loop():
+        task = _STAGE_SWEEP = asyncio.get_running_loop().create_task(_run_stage_sweep(store))
+    await asyncio.shield(task)
+
+
+async def _run_stage_sweep(store: CardStore) -> None:
+    from kiro_crew import crewmate_stage
+
+    try:
+        await store.warm()  # the store's first load is disk work, off the loop
+        await asyncio.to_thread(crewmate_stage.sweep, _live_import_shas(store))
+    except Exception:  # pragma: no cover - a sweep must never fail a card read
+        logger.debug("staged crewmate sweep failed", exc_info=True)
+
+
+async def propose_app_card(app: web.Application, app_name: str, params: Any) -> dict[str, Any]:
+    """Raise one ``crewmate.import`` card for app *app_name* (``ctx.crewmate``)."""
+    return await _propose_import_card(app, APP_SLOT_PREFIX + app_name, params)
+
+
+async def _propose_import_card(app: web.Application, slot_key: str, params: Any) -> dict[str, Any]:
+    """Raise one ``crewmate.import`` card under *slot_key*; returns the stored card.
+
+    Writes nothing but the card. Only the owner's press applies its plan, through
+    owner routes ``change_card_middleware`` refuses to an app token. A taken name
+    becomes the first free ``<name> 2`` .. ``<name> 9``; the owner may edit it.
+    Raises :class:`CardError` or :class:`catalog.CardCatalogError`.
+    """
+    kind = catalog.KIND_CREWMATE_IMPORT
+    params = await cards.resolve_params(kind, catalog.validate_params(kind, params))
+    cards.check_param_text(params)
+    base = params["name"]
+    for n in range(2, _FREE_NAME_TRIES + 2):
+        try:
+            preview, before, context = await cards.build(kind, params, state=app["state"], app=app)
+            break
+        except catalog.CardCatalogError as exc:
+            if exc.code != "already_exists" or n > _FREE_NAME_TRIES:
+                raise
+            suffix = f" {n}"
+            name = base[: catalog._CREWMATE_NAME_MAX - len(suffix)].rstrip() + suffix
+            params = catalog.validate_params(kind, {**params, "name": name})
+    await _settle_app(app)
+    store = card_store_for(app["state"])
+    rec = store.propose(
+        slot_key=slot_key,
+        session_key="",
+        kind=kind,
+        params=params,
+        reason="",
+        preview=preview,
+        before=before,
+        context=context,
+    )
+    try:
+        await store.flush(strict=True)
+    except CardError as exc:
+        store.discard(rec["id"])
+        raise CardError(exc.status, exc.code, "the change card could not be saved") from None
+    _audit(slot_key, "cards.propose", "ok")
+    return store.public(rec)
+
+
+#: ``application/zip`` is not a CORS-simple type, so a cross-origin page cannot
+#: post a file here without the browser asking first.
+_CREWMATE_CONTENT_TYPE = "application/zip"
+
+
+async def _read_crewmate_body(request: web.Request) -> bytes:
+    """The uploaded ``.crewmate`` bytes, refused past the §5.2 cap without reading the rest."""
+    from kiro_crew.crewmate_bundle import FILE_MAX_BYTES
+
+    if (request.content_type or "").lower() != _CREWMATE_CONTENT_TYPE:
+        raise CardError(400, "invalid_content_type", "send the file as application/zip")
+    if request.content_length is not None and request.content_length > FILE_MAX_BYTES:
+        raise CardError(400, "too_large", "the file is over 8 MiB")
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = await request.content.read(64 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > FILE_MAX_BYTES:
+            raise CardError(400, "too_large", "the file is over 8 MiB")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def api_members_import(request: web.Request) -> web.Response:
+    """POST /api/members/import — one ``.crewmate`` file -> one pending ``crewmate.import`` card.
+
+    Owner only: an app token, an internal-secret caller and an agent get 403. The
+    file is vetted (zip inventory first, then every §5.2 rule) before a card
+    exists, and a refusal raises no card and keeps nothing. A file that passes
+    is kept as an owner-only staged copy (:mod:`kiro_crew.crewmate_stage`), the
+    one thing raising the card writes besides the card itself; the card names
+    it by sha256 and lands under :data:`IMPORT_SLOT_KEY`. Only the owner's press
+    on it creates the crewmate.
+    """
+    denied = await _require_owner(request, "crewmate.import")
+    if denied is not None:
+        return denied
+    if request.get("app"):
+        return web.json_response({"error": "owner only", "code": "owner_only"}, status=403)
+    from kiro_crew import crewmate_stage
+    from kiro_crew.crewmate_bundle import crewmate_import_params, read_crewmate_file
+
+    def _vet(data: bytes) -> dict[str, Any]:
+        files = read_crewmate_file(data)
+        return crewmate_import_params(files.bundle, files)
+
+    params: dict[str, Any] = {}
+    held = ""
+    # The start-up sweep runs before this file is staged, never after it.
+    await _sweep_staged_copies(_store(request))
+    try:
+        data = await _read_crewmate_body(request)
+        params = await asyncio.to_thread(_vet, data)
+        if params.get("carried"):
+            held = str(params["bundle_sha256"])
+            _STAGE_HELD[held] += 1
+            await asyncio.to_thread(crewmate_stage.stage, data)
+        card = await _propose_import_card(request.app, IMPORT_SLOT_KEY, params)
+    except (CardError, catalog.CardCatalogError) as exc:
+        _unhold(held)
+        held = ""
+        sha = params.get("bundle_sha256")
+        if sha and sha not in _live_import_shas(_store(request)):
+            await asyncio.to_thread(crewmate_stage.discard, str(sha))
+        _audit("owner", "crewmate.import", "refused", exc.code)
+        return _refusal(exc)
+    except OSError:
+        _unhold(held)
+        held = ""
+        logger.warning("could not keep the checked crewmate file", exc_info=True)
+        return web.json_response(
+            {"error": "the file could not be kept for the card", "code": "stage_failed"},
+            status=500,
+        )
+    finally:
+        # Stored: the card itself now names the copy.
+        _unhold(held)
+    delivered = await _broadcast(request.app["state"], card)
+    return web.json_response({**card, "delivered_clients": delivered})
+
+
+def _unhold(sha: str) -> None:
+    if sha:
+        _STAGE_HELD[sha] -= 1
+        if _STAGE_HELD[sha] <= 0:
+            del _STAGE_HELD[sha]
+
+
+async def api_members_import_files(request: web.Request) -> web.Response:
+    """GET /api/members/import/{sha256}/files — every carried file of a live import card, in full.
+
+    Owner only. Answers only for a staged copy a pending or applying import card
+    names, re-checks it (sha256 and every bundle rule) and returns each skill and
+    script file as text, and the picture as a data URL, so the card shows what
+    the press would write. Never executes anything.
+    """
+    denied = await _require_owner(request, "crewmate.import_files.read")
+    if denied is not None:
+        return denied
+    if request.get("app"):
+        return web.json_response({"error": "owner only", "code": "owner_only"}, status=403)
+    from kiro_crew import crewmate_stage
+
+    sha = request.match_info["sha256"]
+    try:
+        await _settle(request)
+    except CardError as exc:
+        return _refusal(exc)
+    if sha not in _live_import_shas(_store(request)):
+        return web.json_response(
+            {"error": "no open import card names this file", "code": "not_found"}, status=404
+        )
+
+    def _read() -> dict[str, Any]:
+        import base64
+
+        from kiro_crew.crewmate_bundle import file_text, read_crewmate_file
+
+        files = read_crewmate_file(crewmate_stage.load(sha))
+        out: dict[str, Any] = {
+            "skills": {
+                name: {
+                    path: file_text(blob, f"skills/{name}/{path}") for path, blob in folder.items()
+                }
+                for name, folder in files.skills.items()
+            },
+            "scripts": {
+                file: file_text(blob, f"crons/{file}") for file, blob in files.scripts.items()
+            },
+        }
+        if files.avatar is not None:
+            ext, blob = files.avatar
+            mime = "image/jpeg" if ext == "jpg" else f"image/{ext}"
+            out["avatar"] = f"data:{mime};base64,{base64.b64encode(blob).decode('ascii')}"
+        return out
+
+    try:
+        return web.json_response(await asyncio.to_thread(_read))
+    except crewmate_stage.StageError as exc:
+        return web.json_response({"error": str(exc), "code": exc.code}, status=409)
+    except catalog.CardCatalogError as exc:
+        return _refusal(exc)
+
+
+async def app_card_status(app: web.Application, app_name: str, card_id: str) -> dict[str, Any]:
+    """``{status, crew?}`` of app *app_name*'s own card; ``crew`` only once applied."""
+    await _settle_app(app)
+    rec = card_store_for(app["state"]).status_for_caller(APP_SLOT_PREFIX + app_name, card_id)
+    out: dict[str, Any] = {"status": rec["status"]}
+    evidence = rec.get("evidence") or []
+    if rec["status"] == "applied" and evidence and isinstance(evidence[0].get("name"), str):
+        out["crew"] = evidence[0]["name"]
+    return out
 
 
 # ── browser half ──
@@ -633,9 +1019,15 @@ async def api_cards_dismiss(request: web.Request) -> web.Response:
         rec = store.get(request.match_info["card_id"])
         revert = store.snapshot(rec)
         store.dismiss(rec)
-        return web.json_response(await _publish(request, rec, revert))
+        public = await _publish(request, rec, revert)
     except CardError as exc:
         return _refusal(exc)
+    # A dismissed failed card leaves the waiting list, and the dismiss writes no log
+    # entry (its status stays ``failed``): tell a crewmate page's feed directly.
+    from kiro_crew.dashboard import crewmate_feed
+
+    crewmate_feed.question_retired(str(rec.get("slot_key") or ""))
+    return web.json_response(public)
 
 
 # ── the route hook ──
@@ -894,7 +1286,8 @@ def _arm_card_undo_cron_guard(
     * a crewmate DELETE in a ``crewmate.create`` Undo, against the ``member_id``
       the create returned;
     * a crewmate PUT in a ``crewmate.update`` Undo, against
-      ``after["member_id"]``.
+      ``after["member_id"]``;
+    * the rules clear in a ``crewmate.import`` Undo, against ``after["rules"]``.
 
     A ``folder.steering`` Apply or Undo carries the list it replaces: the
     folder's list before the card for Apply, the list the card wrote for Undo.
@@ -903,6 +1296,13 @@ def _arm_card_undo_cron_guard(
     parameter is added.
     """
     kind = rec["kind"]
+    if kind == catalog.KIND_CREWMATE_IMPORT and str(plan_step.get("path", "")).endswith(
+        "/import-files"
+    ):
+        from kiro_crew.dashboard.handlers.crewmate_import_files import REQ_CARD_IMPORT_FILES
+
+        # Only an admitted import card step may write (or take back) carried files.
+        request[REQ_CARD_IMPORT_FILES] = rec["id"]
     if kind == catalog.KIND_FOLDER_STEERING:
         replaced = (rec.get("params") if op == catalog.OP_UNDO else rec.get("before")) or {}
         request[REQ_CARD_FOLDER_STEERING_EXPECT] = catalog.string_items(
@@ -914,6 +1314,20 @@ def _arm_card_undo_cron_guard(
             # The user just confirmed the crewmate's milestones: the route
             # tells the crewmate so (:func:`goal_setup.schedule_milestones_nudge`).
             request[REQ_CARD_KEY_RESULTS_APPLY] = True
+        elif kind == catalog.KIND_CREWMATE_DASHBOARD_PAGE:
+            # The person said yes on the page offer: only this step may start the
+            # crewmate's write-and-apply wake (``member_page_offer``).
+            from kiro_crew.dashboard.handlers.member_page_offer import (
+                REQ_CARD_PAGE_OFFER_APPLY,
+                REQ_CARD_PAGE_OFFER_PAGE,
+            )
+
+            request[REQ_CARD_PAGE_OFFER_APPLY] = True
+            # The page the person said yes over, as the card last previewed it: a
+            # refreshed card names the template in force at the refresh.
+            before = rec.get("before")
+            page = before.get("page") if isinstance(before, dict) else None
+            request[REQ_CARD_PAGE_OFFER_PAGE] = page if isinstance(page, dict) else None
         return
     if kind in (catalog.KIND_CREWMATE_GOAL, catalog.KIND_CREWMATE_KEY_RESULTS):
         before = rec.get("before")
@@ -932,19 +1346,32 @@ def _arm_card_undo_cron_guard(
         member_id = after.get("member_id")
         request[REQ_CARD_UNDO_CREWMATE_EXPECT] = member_id if isinstance(member_id, str) else ""
         return
+    if method == "PUT" and path.endswith("/rules") and kind == catalog.KIND_CREWMATE_IMPORT:
+        # Fail closed: with no recorded digest the sentinel never matches.
+        digest = after.get("rules")
+        request[REQ_CARD_UNDO_RULES_EXPECT] = (
+            digest if isinstance(digest, str) and digest else _CRON_FINGERPRINT_MISSING
+        )
+        return
     if method != "DELETE":
         return
     if path.startswith("/api/crons/") and kind in (
         catalog.KIND_SCHEDULE_CREATE,
         catalog.KIND_CREWMATE_CREATE,
+        catalog.KIND_CREWMATE_IMPORT,
     ):
-        revision = after.get("revision" if kind == catalog.KIND_SCHEDULE_CREATE else "schedule")
+        if kind == catalog.KIND_CREWMATE_IMPORT:
+            # One fingerprint per cron the import made, keyed by the id in this path.
+            job_id = urllib.parse.unquote(path[len("/api/crons/") :])
+            revision = (after.get("crons") or {}).get(job_id)
+        else:
+            revision = after.get("revision" if kind == catalog.KIND_SCHEDULE_CREATE else "schedule")
         # Fail closed: a cron DELETE in an Undo with no recorded fingerprint must
         # not delete unconditionally, so an impossible sentinel forces the 409.
         request[REQ_CARD_UNDO_CRON_EXPECT] = (
             revision if isinstance(revision, str) and revision else _CRON_FINGERPRINT_MISSING
         )
-    elif path.startswith("/api/agents/") and kind == catalog.KIND_CREWMATE_CREATE:
+    elif path.startswith("/api/agents/") and kind in catalog.CREWMATE_CREATING_KINDS:
         from kiro_crew.dashboard.handlers.undo_identity_guard import (
             REQ_CARD_UNDO_CREWMATE_EXPECT,
         )
@@ -1310,6 +1737,41 @@ async def _complete(request: web.Request, rec: dict[str, Any], *, partial: bool)
         undo_reason=reason,
         status=cards.STATUS_PARTIAL if partial else cards.STATUS_APPLIED,
     )
+    from kiro_crew import crewmate_dynamic_capabilities
+
+    # The nudge is the crewmate-driven capability path: that
+    # crewmate's Dynamic capabilities preview
+    # (``kiro_crew.crewmate_dynamic_capabilities``). The card names its crewmate.
+    raw_params = rec.get("params")
+    params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
+    if rec["kind"] == catalog.KIND_CREWMATE_CAPABILITIES and await asyncio.to_thread(
+        crewmate_dynamic_capabilities.enabled_for, str(params.get("member") or "")
+    ):
+        # A card press starts no turn: tell the crewmate, so the work that waited
+        # on the capability moves to a worker that has it.
+        from kiro_crew.dashboard import goal_setup
+
+        goal_setup.schedule_capabilities_nudge(
+            request.app.get("state"),
+            rec["slot_key"],
+            str(rec.get("title") or ""),
+            card_member=str(params.get("member") or ""),
+        )
+    from kiro_crew import mate_tool_access
+
+    if rec["kind"] == catalog.KIND_CREWMATE_UPDATE and mate_tool_access.is_tool_access_card(params):
+        # The user turned the crewmate's preview on (Turn on): the request that
+        # raised this card becomes its own capabilities card, and the conductor
+        # is reloaded onto the request tools and told.
+        from kiro_crew.dashboard import goal_setup
+
+        goal_setup.schedule_tool_access_nudge(
+            request.app.get("state"),
+            rec["slot_key"],
+            app=request.app,
+            session_key=str(rec.get("session_key") or ""),
+            card_member=str(params.get("name") or ""),
+        )
 
 
 def register_change_card_routes(app: web.Application) -> None:
@@ -1324,3 +1786,5 @@ def register_change_card_routes(app: web.Application) -> None:
     app.router.add_post("/api/cards/{card_id}/preview", api_cards_preview)
     app.router.add_post("/api/cards/{card_id}/cancel", api_cards_cancel)
     app.router.add_post("/api/cards/{card_id}/dismiss", api_cards_dismiss)
+    app.router.add_post("/api/members/import", api_members_import)
+    app.router.add_get("/api/members/import/{sha256}/files", api_members_import_files)

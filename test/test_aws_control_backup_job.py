@@ -16,7 +16,7 @@ The cases here are the ones that shape the design rather than merely cover it:
   can produce that this app's pre-flight would have rejected (absent, and not an
   account id) must fail with a clean recorded error and touch no AWS;
 * a run left non-terminal by a process that is gone comes back RESOLVED, never
-  ``running`` (``job_sdk.py:768``);
+  ``running`` (``JobSDK.reconcile``);
 * the app's own terminal ledger -- what a backup PRODUCED -- still works.
 """
 
@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import time
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,6 +41,7 @@ from kiro_crew.apps.builtins.aws_control import hooks
 from kiro_crew.apps.builtins.aws_control.backend import accounts as accounts_mod
 from kiro_crew.apps.builtins.aws_control.backend import backup
 from kiro_crew.apps.builtins.aws_control.backend import routes as routes_mod
+from kiro_crew.testing.wait import wait_until
 
 BASE = "/api/apps/aws-control"
 ACCOUNT = "111122223333"
@@ -507,21 +507,23 @@ def _await_terminal(sdk: job_sdk.JobSDK, run_id: str, timeout: float = 5.0) -> j
     signal for the claim; ``list_active`` reads the durable store, which the terminal
     write has already cleared, so it cannot witness this window.
     """
-    deadline = time.monotonic() + timeout
     settled: job_sdk.JobRun | None = None
-    while time.monotonic() < deadline:
+
+    def _released() -> job_sdk.JobRun | None:
+        nonlocal settled
         run = sdk.get(run_id)
         if run is not None and run.is_terminal:
             settled = run
             if run_id not in sdk._live:
                 return run
-        time.sleep(0.01)
-    if settled is not None:
-        raise AssertionError(
-            f"run reached {settled.status} but its slot was not released within {timeout}s"
-        )
-    run = sdk.get(run_id)
-    raise AssertionError(f"run did not settle within {timeout}s: {run}")
+        return None
+
+    def _state() -> str:
+        if settled is not None:
+            return f"run reached {settled.status} but its slot was not released"
+        return f"run did not settle: {sdk.get(run_id)}"
+
+    return wait_until(_released, timeout=timeout, describe=_state)
 
 
 @pytest.fixture
@@ -862,7 +864,7 @@ class TestReconcile:
     def test_a_run_left_running_by_a_dead_process_is_resolved(self, tmp_path):
         # DoD 3. Before reconciliation the record asserts `running` and nothing
         # can ever finish it, so `list_active` would serve a phantom the backup
-        # UI adopts on mount. `job_sdk.py:768` resolves it to `interrupted`.
+        # UI adopts on mount. `JobSDK.reconcile` resolves it to `interrupted`.
         sdk = job_sdk.JobSDK("aws-control", tmp_path)
         for kind in backup.JOB_KINDS:
             sdk.register(kind, backup.make_job_runner(sdk, kind))

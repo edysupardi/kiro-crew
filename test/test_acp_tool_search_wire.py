@@ -25,7 +25,7 @@ from kiro_crew.acp.types import (
     ACP_BACKEND_KAS,
     ACP_BACKEND_KIRO,
     ACP_BACKENDS_CLIENT_META_SETTINGS,
-    ACP_BACKENDS_KIRO_SLASH_COMMANDS,
+    ACP_BACKENDS_KIRO_FAMILY,
     ACP_BACKENDS_KNOWN,
     ACP_BACKENDS_TOOL_SEARCH_OVERLAY,
     KAS_CLIENT_CAPABILITIES,
@@ -170,9 +170,9 @@ class TestMembership:
         assert ACP_BACKENDS_CLIENT_META_SETTINGS <= ACP_BACKENDS_KNOWN
         assert not (ACP_BACKENDS_TOOL_SEARCH_OVERLAY & ACP_BACKENDS_CLIENT_META_SETTINGS)
 
-    def test_the_overlay_is_narrower_than_the_slash_dialect(self):
-        """KAS speaks the slash dialect but never reads the Tool Search overlay."""
-        assert ACP_BACKENDS_TOOL_SEARCH_OVERLAY < ACP_BACKENDS_KIRO_SLASH_COMMANDS
+    def test_the_overlay_is_narrower_than_the_kiro_family(self):
+        """KAS is in the kiro family but never reads the Tool Search overlay."""
+        assert ACP_BACKENDS_TOOL_SEARCH_OVERLAY < ACP_BACKENDS_KIRO_FAMILY
         assert ACP_BACKEND_KIRO in ACP_BACKENDS_TOOL_SEARCH_OVERLAY
         assert ACP_BACKEND_KAS not in ACP_BACKENDS_TOOL_SEARCH_OVERLAY
         assert ACP_BACKEND_KAS in ACP_BACKENDS_CLIENT_META_SETTINGS
@@ -447,19 +447,48 @@ class TestLoaderReachabilityOnSharedProcess:
     ON = {"toolSearch": {"enabled": True, "minPct": 5, "minTokens": 50_000}}
     OFF = {"toolSearch": {"enabled": False, "minPct": 5, "minTokens": 50_000}}
 
-    def test_a_different_agent_without_the_loader_is_refused(self):
-        rt = _bare_runtime(agent="kirocrew", wire=self.ON)
-        with pytest.raises(AcpToolSurfaceBindingError, match="worker"):
-            rt._refuse_if_loader_unreachable("worker", [{"id": "worker", "tools": ["fs_read"]}])
+    @pytest.mark.parametrize(
+        ("wire", "agents", "refused"),
+        [
+            pytest.param(
+                ON,
+                [{"id": "worker", "tools": ["fs_read"]}],
+                True,
+                id="a_different_agent_without_the_loader_is_refused",
+            ),
+            pytest.param(
+                ON,
+                [{"id": "worker", "tools": ["tool_search"]}],
+                False,
+                id="a_different_agent_with_the_loader_passes",
+            ),
+            pytest.param(
+                OFF,
+                [{"id": "worker", "tools": []}],
+                False,
+                id="nothing_is_refused_when_deferral_is_off_or_unsent-off",
+            ),
+            pytest.param(
+                {},
+                [{"id": "worker", "tools": []}],
+                False,
+                id="nothing_is_refused_when_deferral_is_off_or_unsent-unsent",
+            ),
+            pytest.param(ON, None, False, id="a_host_with_no_projection_is_never_refused"),
+        ],
+    )
+    def test_a_later_agent_on_the_shared_process(self, wire, agents, refused):
+        rt = _bare_runtime(agent="kirocrew", wire=wire)
+        if refused:
+            with pytest.raises(AcpToolSurfaceBindingError, match="worker"):
+                rt._refuse_if_loader_unreachable("worker", agents)
+        else:
+            assert rt._refuse_if_loader_unreachable("worker", agents) is None
 
     def test_the_refusal_is_the_binding_error_the_run_runtime_caller_handles(self):
         """Callers that already fall back to a dedicated runtime on a workspace
         binding refusal must take this refusal the same way."""
         assert issubclass(AcpToolSurfaceBindingError, AcpWorkspaceBindingError)
-
-    def test_a_different_agent_with_the_loader_passes(self):
-        rt = _bare_runtime(agent="kirocrew", wire=self.ON)
-        rt._refuse_if_loader_unreachable("worker", [{"id": "worker", "tools": ["tool_search"]}])
 
     def test_the_spawn_agent_is_judged_on_its_projection_too(self):
         """The process decision was made from the spec as it stood at spawn; a later
@@ -472,15 +501,6 @@ class TestLoaderReachabilityOnSharedProcess:
         rt._refuse_if_loader_unreachable(
             "kirocrew", [{"id": "kirocrew", "tools": ["tool_search", "@kirocrew-dashboard"]}]
         )
-
-    def test_nothing_is_refused_when_deferral_is_off_or_unsent(self):
-        for wire in (self.OFF, {}):
-            rt = _bare_runtime(agent="kirocrew", wire=wire)
-            rt._refuse_if_loader_unreachable("worker", [{"id": "worker", "tools": []}])
-
-    def test_a_host_with_no_projection_is_never_refused(self):
-        rt = _bare_runtime(agent="kirocrew", wire=self.ON)
-        rt._refuse_if_loader_unreachable("worker", None)
 
     def test_the_projection_seam_itself_refuses_so_both_start_paths_are_covered(self):
         """``create_session`` and ``load_session`` both take their payload from

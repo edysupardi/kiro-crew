@@ -89,6 +89,11 @@ def _to_llm_event(e: Any) -> LLMEvent:
         mcp_identity_trusted=e.mcp_identity_trusted,
         mcp_identity_unreadable=e.mcp_identity_unreadable,
         kas_builtin_ids=e.kas_builtin_ids,
+        # Dropping this would refuse every deepseek read on a side turn.
+        deepseek_tool_name=e.deepseek_tool_name,
+        # Dropping this would let a READ_ONLY turn on an unproved dsh
+        # composition reach the gate's other read-only proofs.
+        deepseek_read_only_issue=e.deepseek_read_only_issue,
         server_name=e.server_name,
         oauth_url=e.oauth_url,
         subagents=e.subagents,
@@ -127,7 +132,29 @@ def _to_llm_event(e: Any) -> LLMEvent:
         # it before the evidence text, and the sub-agent run loop yields
         # its lane slot (``waiting_input`` WaitRecord) on it.
         status=e.status,
+        # The MCP server's ask itself (mode, message, fields or URL). Dropping
+        # it hands the dashboard runner an EVENT_ELICITATION_REQUEST with
+        # nothing to render: an empty card the person cannot answer, while
+        # the engine holds the tool call open for the whole window.
+        elicitation=e.elicitation,
     )
+
+
+async def _ready_confirmed_session(self: AcpProvider) -> None:
+    """Make the direct client's session ready, and confirm a member's spec, before a send.
+
+    The one gate every path that sends a prompt goes through: :func:`stream`,
+    :func:`stream_command` and :func:`compact`. ``ensure_ready`` can respawn the
+    child and so create a NEW session on this adapter-only arm, and that session
+    must be confirmed before anything is prompted into it. A spec that cannot be
+    confirmed raises out of ``confirm_member_projection``, so nothing is sent.
+    A no-op for every session that projects nothing, and for one already
+    confirmed. Called on this arm only: the Kiro and KAS runtimes are not an
+    ``AcpClient``, so their paths gain no call or await (harness-parity H13).
+    """
+    if isinstance(self._client, AcpClient):
+        await self._client.ensure_ready()
+        await self._client.confirm_member_projection()
 
 
 async def stream(
@@ -135,8 +162,7 @@ async def stream(
 ) -> AsyncIterator[LLMEvent]:
     # The direct client can respawn in ensure_ready; resolve that BEFORE
     # comparing receipts so a recycled conversation receives the full text.
-    if isinstance(self._client, AcpClient):
-        await self._client.ensure_ready()
+    await self._ready_confirmed_session()
     send = self._client.stream_events
     if not allow_image:
         send = functools.partial(send, allow_image=False)
@@ -160,10 +186,12 @@ async def stream_command(self: AcpProvider, command: str) -> AsyncIterator[LLMEv
     #
     # Membership rather than "not claude": the RPC is the narrow capability
     # here, so a harness added later must opt in to it, not inherit it and
-    # hard-error on every slash command a user types.
+    # hard-error on every slash command a user types. KAS is the case in point:
+    # kiro-family, yet it answers the RPC with -32603.
     # /compact and /clear discard native history; invalidate before dispatch
     # so the next warm turn resends the complete snapshot even when the
     # status receipt is missing or arrives late.
+    await self._ready_confirmed_session()
     self.essential_delivery.prepare_command(command)
     send = (
         self._client.stream_events
@@ -179,6 +207,7 @@ async def stream_command(self: AcpProvider, command: str) -> AsyncIterator[LLMEv
 
 async def compact(self: AcpProvider, context: str = "") -> None:
     """Trigger native /compact with optional context-preserving prompt."""
+    await self._ready_confirmed_session()
     self.essential_delivery.invalidate()
     if context:
         # Truncate to avoid overwhelming the compact prompt

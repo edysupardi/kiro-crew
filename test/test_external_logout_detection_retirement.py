@@ -13,13 +13,18 @@ from types import SimpleNamespace
 
 import pytest
 from external_logout_detection_helpers import _private_sel_root_per_test  # noqa: F401
-from external_logout_detection_helpers import _DeadProvider, _FakeProvider, _FakeRuntime
+from external_logout_detection_helpers import (
+    _DeadProvider,
+    _FakeProvider,
+    _FakeRuntime,
+)
 
 from kiro_crew import kiro_prerequisite as kp
 from kiro_crew.session_allocation import (
     FOREGROUND_COLD_START_RESERVE as _COLD_START_RESERVE_FOR_TEST,
 )
 from kiro_crew.session_allocation import MAX_CONCURRENT_COLD_STARTS as _MAX_COLD_STARTS_FOR_TEST
+from kiro_crew.testing.wait import async_wait_until, await_until, until_parked
 
 
 class TestProviderMembership:
@@ -721,20 +726,25 @@ class TestRetirementCoverage:
             StartPriority.FOREGROUND
         ] * _COLD_START_RESERVE_FOR_TEST
         for priority in holds:
-            await asyncio.wait_for(smap._start_sem.acquire(priority), timeout=5.0)
+            await await_until(asyncio.ensure_future(smap._start_sem.acquire(priority)))
 
         first = asyncio.create_task(smap.retire_kiro_identity_sessions())
         second = asyncio.create_task(smap.retire_kiro_identity_sessions())
-        # flake-ok: pre-existing 50 ms sleep barrier before the not-done assert, moved verbatim; tracked for a de-flake pass
-        # nosemgrep: kirocrew.test-sleep-as-barrier -- pre-existing sleep barrier, moved verbatim; tracked for a de-flake pass
-        await asyncio.sleep(0.05)
+        # The first sweep holds the sweep lock and is draining the permits; the
+        # second is parked on that lock. Both are observed waiting, not merely
+        # not-yet-started.
+        await async_wait_until(
+            lambda: smap._start_sem._drain_held is not None,
+            describe=lambda: f"first.done()={first.done()}",
+        )
+        await until_parked(smap._identity_sweep_lock)
         assert not first.done() and not second.done()
 
         for priority in holds:
             smap._start_sem.release(priority)
             await asyncio.sleep(0)
 
-        results = await asyncio.wait_for(asyncio.gather(first, second), timeout=5.0)
+        results = await await_until(asyncio.ensure_future(asyncio.gather(first, second)))
         assert all(complete for _, complete in results)
         # Every permit returned, so later cold starts are unaffected.
         assert smap._start_sem._value == smap._start_sem._limit
@@ -751,16 +761,18 @@ class TestRetirementCoverage:
         from kiro_crew.start_priority import StartPriority
 
         smap = self._manager()
-        await asyncio.wait_for(smap._start_sem.acquire(StartPriority.BACKGROUND), timeout=5.0)
+        await await_until(asyncio.ensure_future(smap._start_sem.acquire(StartPriority.BACKGROUND)))
 
         task = asyncio.create_task(smap.retire_kiro_identity_sessions())
-        # flake-ok: pre-existing 50 ms sleep barrier before the not-done assert, moved verbatim; tracked for a de-flake pass
-        # nosemgrep: kirocrew.test-sleep-as-barrier -- pre-existing sleep barrier, moved verbatim; tracked for a de-flake pass
-        await asyncio.sleep(0.05)
+        # The sweep has started its drain and is waiting for the held permit.
+        await async_wait_until(
+            lambda: smap._start_sem._drain_held is not None,
+            describe=lambda: f"task.done()={task.done()}",
+        )
         assert not task.done(), "the sweep scanned while a cold start was in flight"
 
         smap._start_sem.release(StartPriority.BACKGROUND)
-        retired, complete = await asyncio.wait_for(task, timeout=2.0)
+        retired, complete = await await_until(task)
         assert complete is True
         assert retired == []
 
@@ -815,9 +827,8 @@ class TestRetirementCoverage:
         # cannot proceed until it is released.
         await smap._pool_fill_lock.acquire()
         task = asyncio.create_task(smap.retire_kiro_identity_sessions())
-        # flake-ok: pre-existing 50 ms sleep barrier before the not-done assert, moved verbatim; tracked for a de-flake pass
-        # nosemgrep: kirocrew.test-sleep-as-barrier -- pre-existing sleep barrier, moved verbatim; tracked for a de-flake pass
-        await asyncio.sleep(0.05)
+        # The drain is parked on the fill lock the in-flight fill holds.
+        await until_parked(smap._pool_fill_lock, describe=lambda: f"task.done()={task.done()}")
         assert not task.done(), "drain proceeded while a fill held the lock"
         smap._pool_fill_lock.release()
         await task
@@ -1068,7 +1079,7 @@ class TestRetirementCoverage:
         smap._session_map.set("doomed", "sid-account-a")
 
         first = asyncio.create_task(smap.retire_kiro_identity_sessions("fp-b"))
-        await asyncio.wait_for(entered.wait(), timeout=5.0)
+        await await_until(entered)
 
         # A busy successor registers under B while that shutdown is pending, then
         # the account moves on to C.
@@ -1082,7 +1093,7 @@ class TestRetirementCoverage:
         assert smap.pending_identity_sweep_fingerprint == "fp-c"
 
         released.set()
-        retired, first_complete = await asyncio.wait_for(first, timeout=5.0)
+        retired, first_complete = await await_until(first)
 
         assert retired == ["doomed"]
         assert first_complete is False, "an older sweep claimed a newer change was handled"

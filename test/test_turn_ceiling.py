@@ -929,14 +929,17 @@ class TestTheNoticeDoesNotAnswerItsOwnReflection:
 GATED = {
     "messaging/dispatch.py",
     "slack/transport_dispatch.py",
-    "slack/handler.py",
+    "slack/handler_runtime/turn.py",
     "telegram/dispatch/turn_engine.py",
 }
 
 #: Turn sites that must NOT compose the ceiling, each with the reason. A reason
 #: is required because an unexplained exemption is how a channel goes unbounded.
 EXEMPT = {
-    "dashboard/chat_runner.py": (
+    "dashboard/chat_turn/turn_dispatch_gates.py": (
+        "dashboard turns are driven by a human watching and clicking through them"
+    ),
+    "dashboard/chat_turn/turn_entry.py": (
         "dashboard turns are driven by a human watching and clicking through them"
     ),
     "slack/gateway_runtime/nudge_channel_fire.py": (
@@ -944,7 +947,9 @@ EXEMPT = {
         "through a channel's own gated dispatcher inside "
         "turn_ceiling.generated_turn, which is where the exemption is decided"
     ),
-    "session.py": "forwards to the gate's definition rather than opening a channel turn",
+    "session_parts/claims.py": (
+        "forwards to the gate's definition rather than opening a channel turn"
+    ),
 }
 
 

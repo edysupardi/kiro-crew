@@ -99,6 +99,12 @@ HEALTH_NO_CREDENTIAL = rt.HEALTH_FOREIGN - 1
 #: Derived from :data:`HEALTH_NO_CREDENTIAL` for the reason given above it, and pinned
 #: distinct from every sibling by a test.
 HEALTH_SERVING_TOO_BRIEFLY = HEALTH_NO_CREDENTIAL - 1
+#: The boot THIS command started recorded a terminal refusal (its ``.refused`` note
+#: changed after the start). Nothing will ever answer the port, so the wait stops at
+#: once instead of running out the budget: on macOS a refusal exits 0 so launchd does
+#: not restart it, which leaves no failure in the unit state for the crash check to
+#: see. Derived from its sibling for the same no-collision reason as above.
+HEALTH_BOOT_REFUSED = HEALTH_SERVING_TOO_BRIEFLY - 1
 #: How long a pod must have been CONTIGUOUSLY serving before the exhausted budget
 #: is attributed to its credential write rather than to a slow boot. One poll
 #: interval, which is the smallest span that can carry the claim: the verdict says
@@ -106,6 +112,21 @@ HEALTH_SERVING_TOO_BRIEFLY = HEALTH_NO_CREDENTIAL - 1
 #: appeared. A gateway that binds in the final second is serving on the last poll
 #: while having had no chance to publish, and its remedy is a bigger budget.
 _MIN_SERVING_SPAN_SECS = 1.0
+
+
+def _refusal_stamp(cfg: PodConfig, name: str) -> tuple[int, ...]:
+    """Identity of the pod's refusal note right now; ``()`` when there is none.
+
+    Taken before ``start_pod`` and compared during the wait, so only a note THIS
+    start wrote ends the wait: an earlier boot's note survives until a boot gets
+    past every refusal, and must not be read as this one's. ``lstat`` never follows
+    a link, and nothing here reads the note's contents.
+    """
+    try:
+        st = os.lstat(cfg.refusal_file(name))
+    except OSError:
+        return ()
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
 
 
 def _health_wait_secs(args: argparse.Namespace) -> int:
@@ -147,12 +168,30 @@ def _health_wait_secs(args: argparse.Namespace) -> int:
     return min(max(secs, _POD_HEALTH_WAIT_FLOOR_SECS), _POD_HEALTH_WAIT_CEIL_SECS)
 
 
+def _retire_hint(name: str, *, deliberately: bool = False) -> str:
+    """The one sentence that tells an operator how to retire a pod `up` left behind.
+
+    Truthful on Windows, where `pod down` itself can refuse: a run whose producer
+    cannot be proven gone (a boot that never claimed its reservation, a supervisor
+    that died with a serving gateway) is preserved rather than reclaimed, and the
+    operator must then follow the README's manual retirement instead of retrying a
+    command that will keep refusing. The backend's refusal text never carries that
+    pointer; this CLI is its only speaker, so it appears once.
+    """
+    verb = "Retire it deliberately" if deliberately else "Retire it"
+    hint = f"{verb} with `kirocrew pod down {name}`."
+    if rt.IS_WINDOWS:
+        hint += " " + rt.win_backend.MANUAL_RETIREMENT_POINTER
+    return hint
+
+
 def _wait_healthy(
     cfg: PodConfig,
     name: str,
     port: int,
     tries: int = POD_HEALTH_WAIT_SECS_DEFAULT,
     superseded: str = "",
+    refusal_mark: tuple[int, ...] | None = None,
 ) -> int:
     """Poll until the pod is USABLE (serving 200/401/403 *and* credentialled), or
     bail fast on failure.
@@ -180,6 +219,10 @@ def _wait_healthy(
       :data:`HEALTH_SERVING_TOO_BRIEFLY` = the pod was serving on the final poll but
            for less than that span, so the budget is what ran out rather than the
            credential write. The caller reports a slow boot and names the budget.
+      :data:`HEALTH_BOOT_REFUSED` = the boot recorded a terminal refusal after
+           *refusal_mark* (a :func:`_refusal_stamp` taken before the start), so
+           the gateway will never answer. Not checked when *refusal_mark* is None,
+           which is the case for a pod this command did not start.
 
     Serving is NOT the whole readiness signal, which is why the credential is part
     of the success condition rather than something the caller checks afterwards. A
@@ -279,6 +322,16 @@ def _wait_healthy(
         # caller's cleanup would delete the home of the pod that had just
         # recovered. While serving, the only honest outcomes are success and the
         # credential verdict, both reached below.
+        if not serving and refusal_mark is not None:
+            # Ahead of the crash check: a refusal is positive knowledge of WHY the
+            # gateway is not coming up, and on macOS it is the only signal there is
+            # (the refusal exits 0, so the unit never reads as failed). A note that
+            # is present AND differs from the pre-start stamp was written by this
+            # start; an earlier boot's note is left alone, and one that vanished
+            # means a boot cleared it on its way past every refusal.
+            stamp = _refusal_stamp(cfg, name)
+            if stamp and stamp != refusal_mark:
+                return HEALTH_BOOT_REFUSED
         if not serving and (state == "failed" or restarts > 0):
             return rt.HEALTH_FOREIGN if saw_foreign else -1
         remaining = deadline - time.monotonic()
@@ -514,6 +567,13 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
         # a new generation, so its current credential is the correct one and the
         # health wait must accept it rather than wait it out for the whole budget.
         superseded_credential = ""
+        # Where this start's log output begins, taken beside `start_pod`. None
+        # on the already-active path, which reports the tail as it stands.
+        journal_since: dict[str, int] | None = None
+        # The refusal note's identity before THIS command's start; None when this
+        # command starts nothing, so the wait never reads a refusal for a pod that
+        # was already running.
+        refusal_mark: tuple[int, ...] | None = None
         # Set only where `start_pod` actually returned success, so it records what
         # THIS invocation did rather than what a probe inferred about the unit. The
         # failed-wait cleanup keys on it because that cleanup can delete a home.
@@ -587,6 +647,8 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
                 # the top of `_up` because the port is only final once allocation
                 # has run, and the credential is keyed by port.
                 superseded_credential = rt.published_credential(cfg, name, port)
+                journal_since = rt.journal_mark(cfg, name)
+                refusal_mark = _refusal_stamp(cfg, name)
                 cp = rt.start_pod(cfg, name)
                 if cp.returncode != 0:
                     _audit(
@@ -598,6 +660,16 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
                     _die(f"starting pod {name} failed: {(cp.stderr or '').strip()}")
                 started_here = True
         else:
+            # A Windows gateway whose supervisor died is serving outside any
+            # drainable Job; adopting it would mint a credential `down` cannot revoke.
+            orphaned = rt.win_backend.unsupervised_reason(cfg, name) if rt.IS_WINDOWS else None
+            if orphaned is not None:
+                _audit("pod.up", "denied", f"name={name}", error="unsupervised gateway")
+                _die(
+                    f"refusing: pod {name!r} is serving, but {orphaned}, so nothing "
+                    "contains its gateway and no token was issued. "
+                    f"{rt.win_backend.MANUAL_RETIREMENT_POINTER}"
+                )
             # Re-resolve INSIDE the lock. `port` above was read before we held it,
             # so a concurrent same-name `up` that pinned a fallback in the meantime
             # would leave us holding the OLD port -- and the health wait below
@@ -645,7 +717,14 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
         _audit("pod.up", "allowed", resources)
 
         wait_secs = _health_wait_secs(args)
-        code = _wait_healthy(cfg, name, port, tries=wait_secs, superseded=superseded_credential)
+        code = _wait_healthy(
+            cfg,
+            name,
+            port,
+            tries=wait_secs,
+            superseded=superseded_credential,
+            refusal_mark=refusal_mark,
+        )
         if code not in (200, 401, 403):
             # A pod IS the worktree's own gateway. If it won't boot, that's a broken
             # worktree build (bad import / config / unbuilt dist) — NOT a pod-tooling
@@ -659,8 +738,11 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
             # during the health wait, and the stop below would then act on the
             # REPLACEMENT pod. Holding the lock across the whole boot transaction
             # means the pod stopped here can only be the one we started.
-            tail = rt.recent_journal(cfg, name, 30)
+            tail = rt.recent_journal(cfg, name, 30, since=journal_since)
             print(tail, file=sys.stderr)
+            # Read before the teardown below can touch anything, like the unit
+            # state: the verdict must quote the refusal this boot recorded.
+            refused_why = rt.refusal_reason(cfg, name) if code == HEALTH_BOOT_REFUSED else None
             # Attribution must be read BEFORE stop_pod tears the unit down:
             # after the stop, unit_state cannot tell a slow boot from a dead
             # gateway. Positive evidence only, and the two inputs that can carry
@@ -765,11 +847,7 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
             if destroyed:
                 # Silent on success: a pod this command created and then removed
                 # leaves the operator nothing to act on, so there is nothing to say.
-                left_running = (
-                    ""
-                    if not stop_failed
-                    else f"{stop_failed} Retire it with `kirocrew pod down {name}`."
-                )
+                left_running = "" if not stop_failed else f"{stop_failed} {_retire_hint(name)}"
             elif halted:
                 left_running = (
                     " The gateway this command started has been stopped, but its "
@@ -778,14 +856,30 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
                     if not halt_failed
                     else (
                         " Its isolated home was KEPT because it held state beforehand."
-                        f"{halt_failed} Retire it with `kirocrew pod down {name}`."
+                        f"{halt_failed} {_retire_hint(name)}"
                     )
                 )
             else:
                 left_running = (
                     " This pod was NOT stopped: this command did not start it, and "
                     "tearing it down would delete an isolated home it did not create. "
-                    f"Retire it deliberately with `kirocrew pod down {name}`."
+                    f"{_retire_hint(name, deliberately=True)}"
+                )
+            if code == HEALTH_BOOT_REFUSED:
+                # The boot told us why it stopped, so say that rather than "still
+                # starting" (false: it has exited) or "the worktree build" (false:
+                # the refusal names its own cause, usually the pod home).
+                _audit(
+                    "pod.up",
+                    "failure",
+                    f"name={name} port={port}",
+                    error="boot refused",
+                )
+                _die(
+                    f"{name}: the pod's boot refused and exited: "
+                    f"{refused_why or 'boot refused (reason not recorded)'}\n"
+                    f"  The same note is shown by `kirocrew pod ls`."
+                    f"{left_running}"
                 )
             if code == rt.HEALTH_FOREIGN:
                 # Reported ahead of the crash verdict: the port being taken is
@@ -974,7 +1068,11 @@ def _down(cfg: PodConfig, args: argparse.Namespace) -> None:
         # still registered and must be deleted before the HOME is reclaimed.
         if cp.returncode != 0 and (was_up or had_home or rt.IS_MACOS or rt.IS_WINDOWS):
             _audit("pod.down", "failure", f"name={name}", error=f"stop rc={cp.returncode}")
-            _die(f"stopping pod {name} failed: {(cp.stderr or '').strip()}")
+            detail = (cp.stderr or "").strip()
+            if rt.IS_WINDOWS:
+                # The refusal names what could not be proven; this names the way out.
+                detail = f"{detail} {rt.win_backend.MANUAL_RETIREMENT_POINTER}"
+            _die(f"stopping pod {name} failed: {detail}")
         if rt.RECLAIMED_MARKER in (cp.stdout or ""):
             # Defense-in-depth for writers that bypass the mutex: a new pod
             # claimed this name mid-teardown. The old pod is gone, but the env

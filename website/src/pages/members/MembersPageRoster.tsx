@@ -21,7 +21,7 @@
  * change even when every test of the moved code still passes.
  */
 import { Fragment, useCallback, useMemo, useRef, useState } from 'react'
-import { Check, Circle, Goal, MessageCircleQuestionMark, Plus, Star, X, Zap } from 'lucide-react'
+import { Check, Circle, FileUp, Goal, MessageCircleQuestionMark, Plus, Star, X, Zap } from 'lucide-react'
 import { Btn } from '../../components/ui'
 import { CrewMemberMark } from '../../components/CrewMemberMark'
 import { useTranslation } from 'react-i18next'
@@ -42,6 +42,7 @@ import { LIST_SHELL_CLS, LIST_HEADER_CLS, LIST_TITLE_CLS, LIST_BODY_CLS, ROW_STA
 import { ListDock } from '../../components/ListDock'
 import { tabStatus } from '../../lib/sessionTabs'
 import TeamGroupHeader from './TeamGroupHeader'
+import CrewmateImportDialog from './CrewmateImportDialog'
 import { useMemberProjection } from '../../state/useMemberProjection'
 import type { RosterView } from '../../state/memberProjectionTypes'
 import type { CrewmateIdentity } from '../chat/CrewmateMessage'
@@ -440,15 +441,19 @@ interface MembersPageRosterColumnProps {
   postCreateError: PostCreateFailure | null
   createHeld: string | null
   slotKeyOf: (m: MemberRosterRow) => string
+  /** The crewmate whose face is centre stage in the first Mate's entrance
+   *  (#23207), so its row holds the face unpainted until it lands; `''` for none. */
+  faceOnStageFor: string
 }
 
 /** The roster card. On a phone the facade portals it into the roster drawer (`placeRoster`). */
 export function MembersPageRosterColumn({
   rosterRead, teamsRead, layout, drawers, rosterView, rosterSignals, profileFlight, navigation, teamView,
   activeName, scrollActiveRowIntoView, gone, createOpen, openAdvanced, openQuick, postCreateError, createHeld,
-  slotKeyOf,
+  slotKeyOf, faceOnStageFor,
 }: MembersPageRosterColumnProps) {
   const { t } = useTranslation()
+  const [importing, setImporting] = useState(false)
   const { rosterQuery, loaded, loadError, collidingSlugs, members } = rosterRead
   const { teamsNoticeShown, dismissTeamsNotice, activeTeam, collapsedTeams, toggleTeamCollapsed } = teamsRead
   const { roster, rosterPinned, rosterFolded, rosterShown, rosterAsideRef, setRosterPin } = layout
@@ -460,6 +465,7 @@ export function MembersPageRosterColumn({
   } = rosterView
   const {
     isUnread, patrol, automationOf, isNeedsYou, sortedMembers, filterCounts, narrowed, filteredOut, allHidden,
+    hiddenCount, hiddenNames,
   } = rosterSignals
   const { reduceMotion } = profileFlight
   const { openMember, pickFromRosterDrawer } = navigation
@@ -589,9 +595,18 @@ export function MembersPageRosterColumn({
                       )}
                     </span>
                   </DropdownMenuItem>
+                  {/* Import from file, the same dialog the switcher opens, so the
+                      phone roster (where the switcher is hidden) reaches it too. */}
+                  {createHeld === null && (
+                    <DropdownMenuItem onSelect={() => setImporting(true)} data-testid="member-add-import">
+                      <FileUp size={13} className="lucide-inline text-muted shrink-0" aria-hidden="true" />
+                      <span {...uiLocation('members.add-menu.import')}>{t('pages.membersPage.import_from_file')}</span>
+                    </DropdownMenuItem>
+                  )}
                 </DropdownMenuContent>
               </DropdownMenu>
               )}
+              {importing && <CrewmateImportDialog open onOpenChange={setImporting} />}
               {/* The pinned roster's own way out, beside a thread on desktop — a
                   second close for the pin the switcher's footer action also lifts.
                   Not in a team view: the column stands there on its own, so
@@ -834,7 +849,7 @@ export function MembersPageRosterColumn({
                 // instead (see the DM thread section), so the two panes never
                 // show the same hero twice on a wide viewport.
                 <li className="md:hidden">
-                  <CrewmateEmptyHero onCreate={openQuick} onAdvanced={openAdvanced} held={createHeld} />
+                  <CrewmateEmptyHero onCreate={openQuick} onAdvanced={openAdvanced} held={createHeld} onImport={() => setImporting(true)} />
                 </li>
               )}
               {loadError && (
@@ -927,11 +942,28 @@ export function MembersPageRosterColumn({
                           scrollActiveRowIntoView={scrollActiveRowIntoView}
                           slugCollides={collidingSlugs.has(m.slug)}
                           indented={grouped}
+                          faceOnStage={faceOnStageFor === m.name}
                         />
                       ))}
                   </Fragment>
                 )
               })}
+              {/* The crewmates the listing rule hides, counted at the list's end
+                  (#21852): the count above covers the listed rows only, so
+                  without this a crew of three read as "2 crewmates". */}
+              {rowsReady && hiddenCount > 0 && (
+                <li className="px-4 py-3 text-xs text-muted" data-testid="member-hidden-hint">
+                  {hiddenCount <= hiddenNames.length
+                    ? t('pages.membersPage.hidden_named_hint', {
+                        count: hiddenNames.length,
+                        names: fmtList(hiddenNames),
+                      })
+                    : t('pages.membersPage.hidden_more_hint', {
+                        count: hiddenCount - hiddenNames.length,
+                        names: fmtList(hiddenNames, { type: 'unit', style: 'short' }),
+                      })}
+                </li>
+              )}
             </ul>
             </ListDock>
             {/* Window-splitter between roster and thread: the same component as the

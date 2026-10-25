@@ -82,6 +82,7 @@ from kiro_crew.computer_use.types import (
     PolicyStateError,
 )
 from kiro_crew.config.loader import computer_use_state_path, read_config_text
+from kiro_crew.edition_locks import LOCKED_BY_POLICY, local_enable_locked
 from kiro_crew.executors import subprocess_executor
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,7 @@ ERR_DISPATCH_FAILED = "Error: computer use failed unexpectedly"
 class StateCorruptError(Exception):
     """A settings file exists but is unreadable/not-a-dict — refuse to mutate it.
 
-    Mirrors ``handlers/security.py::ConfigCorruptError``, for the same reason: a
+    Mirrors ``handlers/security_audit.py::ConfigCorruptError``, for the same reason: a
     mutation that read a corrupt keystone as ``{}`` and wrote it back would
     silently reset the operator's allow-list and blocked-app additions, and one
     that read a corrupt ``config.json`` as ``{}`` would replace the user's entire
@@ -151,9 +152,10 @@ class StateCorruptError(Exception):
 def _sel():
     """Late-binding ``sel()`` for test monkeypatch compatibility.
 
-    The function-local import is the deliberate circular-import exception every
-    sibling handler uses (``core.py``, ``sessions.py``, ``files.py``, ``cron.py``,
-    ``memory.py``, ``agents.py``, ``hooks.py``, ``prompts.py``): this module is
+    The function-local import is the deliberate circular-import exception every sibling
+    handler uses (``core_security.py``, ``sessions_parts/app_scope.py``, ``files.py``,
+    ``cron_shared.py``, ``memory.py``, ``agents.py``, ``hooks_scripts.py``,
+    ``prompts_caller_gates.py``): this module is
     imported BY ``handlers/__init__``, so a top-level ``from .. import sel`` would
     be a cycle. Resolving the package attribute per call is also what lets a test
     monkeypatch ``handlers.sel`` and have it take effect here.
@@ -188,7 +190,7 @@ def _audit(
 async def _off_loop(fn):
     """Run a blocking (filesystem / governance-resolution) callable in a thread.
 
-    Same rationale as ``handlers/security.py::_run_off_loop``: reading the
+    Same rationale as ``handlers/security_audit.py::_run_off_loop``: reading the
     keystone and resolving governance profiles both walk the filesystem, and a
     slow or stalled FS must not freeze the gateway's sole event loop.
 
@@ -391,6 +393,7 @@ def _snapshot() -> dict[str, Any]:
 
     return {
         "enabled": enable_state.is_enabled(state),
+        "locked_by_policy": local_enable_locked("computer_use"),
         "supported": supported,
         "platform": platform_id,
         "reason": reason,
@@ -557,7 +560,7 @@ async def api_computer_use_config_save(request: web.Request) -> web.Response:
     cannot), so without this gate an agent that can author an app manifest could read
     its own ``.app_secret``, mint an app token and flip ``enabled: true`` on its own
     desktop automation. Same guard as ``handlers/kiro_prerequisite.py`` and
-    ``handlers/messaging.py``'s notification push.
+    ``messaging_api/agent_push.py``'s notification push.
 
     **There is no governance ceiling on this route, and therefore no 409.** Computer
     use is one operator opt-in: ``SCOPE_CATALOG`` carries no ``computer_use*`` row, so
@@ -619,6 +622,11 @@ async def api_computer_use_config_save(request: web.Request) -> web.Response:
             return web.json_response(
                 {"error": "enabled must be a boolean", "code": "invalid_field_type"},
                 status=400,
+            )
+        if body["enabled"] and local_enable_locked("computer_use"):
+            _audit(request, operation=OP_CONFIG_SAVE, outcome="denied", resources="enabled=locked")
+            return web.json_response(
+                {"error": LOCKED_BY_POLICY, "code": "locked_by_policy"}, status=409
             )
         state_patch[STATE_KEY_ENABLED] = body["enabled"]
     for key in _APP_LIST_KEYS:

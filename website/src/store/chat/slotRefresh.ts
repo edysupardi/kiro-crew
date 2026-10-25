@@ -7,7 +7,7 @@ import type { ChatMessage } from '../../types'
 import { mergePreservedPastes } from '../../utils/pasteTokens'
 import type { ChatState } from './state'
 import { fetchSlotDetail, isUnsafeKey, safeKey } from './wire'
-import { deduplicateByMid, finalizeAllStreaming, finalizeTrailingStreaming, floorForGen, hasUnidentifiedDurableRow, idAnchorsOneRow, isDurableRow, mergePreservedClientTs, midOccurrences, olderHeadAbovePage, preserveSettledMcpOauth, preserveSettledStopState, raiseChunkSeq, rowIdentities, serverRowCount, snapshotChunkGen, snapshotChunkSeq, tailNotInPage, transcriptTsMs, tsEpoch } from './transcript'
+import { deduplicateByMid, finalizeAllStreaming, finalizeTrailingStreaming, floorForGen, hasUnidentifiedDurableRow, idAnchorsOneRow, isDurableRow, mergePreservedClientTs, midOccurrences, olderHeadAbovePage, preserveSettledMcpOauth, preserveSettledStopState, preserveSettledUpsertRows, raiseChunkSeq, reuseUnchangedRows, rowIdentities, serverRowCount, snapshotChunkGen, snapshotChunkSeq, tailNotInPage, transcriptTsMs, tsEpoch } from './transcript'
 import { PANE_HYDRATE_LIMIT, REFRESH_LIMIT_CEILING, SLOT_DETAIL_MAX_LIMIT, countMatchedFetchLimit, pagingCursorAfterKeptHead, slotCoverageShortfall } from './paging'
 import { mergePreservedThinking, reinsertThinkingOrphans } from './thinking'
 import {
@@ -19,6 +19,22 @@ import {
 import { retainServerTotal, seedContextUsage, setPagingCursor, writeSlotPage } from './slotCache'
 import { hydrateQueuedBubbles } from './queue'
 import { walkWindowBackTo } from './windowWalk'
+
+/** The two row kinds a person decides on and the client stamps locally: a tool
+ *  permission and an MCP server's elicitation. Both are held out of a refreshed
+ *  page and re-seated from the client's own copies, so a decision taken between
+ *  the server snapshot and the refresh is never lost, and the answered card
+ *  never vanishes. An elicitation is keyed by its row `mid` when it has one: an
+ *  ACP request id is connection-scoped and a backend may reuse it. */
+export function isDecidedRow(m: { role?: string }): boolean {
+  return m.role === 'permission' || m.role === 'elicitation'
+}
+export function decidedRowKey(m: { role?: string; meta?: Record<string, unknown> }): string | undefined {
+  const aid = m.meta?.approval_id
+  if (typeof aid !== 'string' || !aid) return undefined
+  const mid = m.meta?.mid
+  return m.role === 'elicitation' && typeof mid === 'string' && mid ? `elicitation:${mid}` : `${m.role}:${aid}`
+}
 
 const refreshFields = [
   'activeSlot', 'messages', 'slotRunning', 'slotState', 'slotStopping',
@@ -341,7 +357,7 @@ export const warmSlotCache = createAsyncThunk(
        * too. That window covers the cache, so it is not disjoint, and the reducer's
        * rescue of rows newer than the page (a just-sent row, a client streaming
        * copy) must still run. Same anchor set and test as the walk itself. */
-      const anchorRows = priorRows.filter(m => m.role !== 'permission')
+      const anchorRows = priorRows.filter(m => !isDecidedRow(m))
       const coversCache = !walked.hasMore || idAnchorsOneRow(
         anchorRows[0]?.meta?.mid, anchorRows, walked.messages,
         midOccurrences(anchorRows), midOccurrences(walked.messages))
@@ -353,6 +369,12 @@ export const warmSlotCache = createAsyncThunk(
     return { ...first, warmSeq, runTickAtDispatch }
   },
 )
+
+/** A transcript array as the store held it when the reducer started: the
+ *  draft's base when Immer drafted it, which is what `reuseUnchangedRows` must
+ *  hand back to keep row identity. */
+const plainRows = (rows: ChatMessage[] | undefined): readonly ChatMessage[] =>
+  (rows && isDraft(rows) ? original(rows) : rows) ?? []
 
 export function addSlotRefreshCases(builder: ActionReducerMapBuilder<ChatState>): void {
   builder
@@ -387,17 +409,47 @@ export function addSlotRefreshCases(builder: ActionReducerMapBuilder<ChatState>)
       const endedTurnHistory = reportedRunning && !running
       if (endedTurnHistory) return
       if (!reportedRunning) recordEndedTurn(state, key, action.payload)
+      // The rows on screen before this refresh, as plain store objects, so the
+      // rebuilt transcript can hand back the ones the page repeats unchanged.
+      const rowsBeforeRefresh = plainRows(state.messages)
       retainServerTotal(state, key, action.payload.total, running, undefined, action.payload.boundedRead)
       // Merge permission messages: prefer state perms (have frontend resolved flags)
       // but include API perms for any we don't have locally (e.g. arrived while disconnected)
       const statePerms = new Map<string, typeof state.messages[0]>()
       for (const m of state.messages) {
-        if (m.role === 'permission' && m.meta?.approval_id) statePerms.set(m.meta.approval_id as string, m)
+        const k = isDecidedRow(m) ? decidedRowKey(m) : undefined
+        if (k) statePerms.set(k, m)
       }
-      const apiPerms = messages.filter(m => m.role === 'permission')
+      const apiPerms = messages.filter(isDecidedRow)
+      const apiKeys = new Set<string>()
       for (const m of apiPerms) {
-        const aid = m.meta?.approval_id as string | undefined
-        if (aid && !statePerms.has(aid)) statePerms.set(aid, m)
+        const k = decidedRowKey(m)
+        if (!k) continue
+        apiKeys.add(k)
+        if (!statePerms.has(k)) statePerms.set(k, m)
+      }
+      // A PENDING elicitation card the server page no longer lists is over:
+      // the gateway keeps an open ask in its bounded tail and drops it only
+      // once answered or expired, so a local copy still showing buttons (this
+      // tab missed the answer while disconnected) is retired as `stale`, the
+      // same no-outcome retirement a permission card takes -- never left
+      // actionable to 404 on every click. An answered local copy is kept as it
+      // is; the tail omits those by design. Only a card the page's own window
+      // reaches is judged: one older than the page's first row is not in
+      // evidence either way. And only when no live frame reduced into this
+      // view after the fetch was dispatched: a card delivered over the stream
+      // during the round trip is newer than the snapshot, so its absence from
+      // the page is not evidence it ended.
+      // A card newer than the page's last row is past the snapshot's window
+      // too, live frame counted or not, so it is not judged either.
+      const noLiveFrameSince = (state.liveFrameSeq ?? 0) === action.payload.liveFrameSeqAtDispatch
+      const pageTs = messages.map(m => transcriptTsMs(m.ts == null ? '' : String(m.ts))).filter((t): t is number => t !== null)
+      const pageOldest = pageTs.length ? Math.min(...pageTs) : Infinity
+      const pageNewest = pageTs.length ? Math.max(...pageTs) : -Infinity
+      if (noLiveFrameSince) for (const [k, m] of statePerms) {
+        if (m.role !== 'elicitation' || m.meta?.resolved || apiKeys.has(k)) continue
+        const at = transcriptTsMs(m.ts == null ? '' : String(m.ts))
+        if (at !== null && at >= pageOldest && at <= pageNewest) statePerms.set(k, { ...m, meta: { ...m.meta, resolved: 'stale' } })
       }
       // Sort key from a transcript ts via the ONE shared parser (#6004).
       // `?? 0` keeps unreadable/absent ts sorting first, as before. The
@@ -427,14 +479,14 @@ export function addSlotRefreshCases(builder: ActionReducerMapBuilder<ChatState>)
        * unidentified page declines the cut rather than guessing -- the same
        * boundary the two existing head-keeping reducers already stand on.
        */
-      const priorServerRows = state.messages.filter(m => m.role !== 'thinking' && m.role !== 'permission')
+      const priorServerRows = state.messages.filter(m => m.role !== 'thinking' && !isDecidedRow(m))
       const { olderHead } = olderHeadAbovePage(priorServerRows, messages)
       /* The cursor is a row OFFSET, so a kept head shifts it down by its own
        * server-row count. Both boundary cases (head proves completeness / the two
        * counts disagree) are owned by `pagingCursorAfterKeptHead`, not clamped. */
       const keptCursor = pagingCursorAfterKeptHead(
         hasMore, nextBefore, serverRowCount(olderHead))
-      const merged = [...olderHead, ...messages.filter(m => m.role !== 'permission'), ...statePerms.values()]
+      const merged = [...olderHead, ...messages.filter(m => !isDecidedRow(m)), ...statePerms.values()]
       const mergedWithPastes = mergePreservedPastes(state.messages, merged)
       // Only sort if permissions were re-injected (they need positional merge).
       // Backend messages arrive in order; sorting with mixed ts formats reorders them.
@@ -453,7 +505,7 @@ export function addSlotRefreshCases(builder: ActionReducerMapBuilder<ChatState>)
        * Same value as the `reinsertThinkingOrphans` call below and as
        * `switchSlot.fulfilled` -- the retained head is part of the loaded window,
        * so raw `hasMore` would park reasoning whose anchor is already on screen. */
-      state.messages = preserveSettledStopState(state.messages, deduplicateByMid(preserveSettledMcpOauth(state.messages, mergePreservedThinking(state.messages, mergePreservedClientTs(state.messages, sorted), messages, !keptCursor.hasMore))))
+      state.messages = preserveSettledStopState(state.messages, deduplicateByMid(preserveSettledUpsertRows(state.messages, preserveSettledMcpOauth(state.messages, mergePreservedThinking(state.messages, mergePreservedClientTs(state.messages, sorted), messages, !keptCursor.hasMore)))))
       // A refresh rebuilds `messages` wholesale, so parked reasoning has to be re-seated
       // here too — otherwise it stays invisible until the next slot switch.
       // (Re-seating only ADDS client-only thinking rows, which by contract
@@ -489,13 +541,18 @@ export function addSlotRefreshCases(builder: ActionReducerMapBuilder<ChatState>)
        * for the restart's interruption row never renders, though the row and
        * its card did arrive. The live-frame counter guards the one case where
        * the snapshot is stale: a frame of a NEW turn reduced after this fetch
-       * was dispatched, which owns the stream state from then on. */
-      const noLiveFrameSince = (state.liveFrameSeq ?? 0) === action.payload.liveFrameSeqAtDispatch
+       * was dispatched, which owns the stream state from then on
+       * (`noLiveFrameSince`, read above). */
       if (!running && (action.meta?.recoveryRevision !== undefined || noLiveFrameSince)) {
         state.slotState = 'idle'
         state.slotStopping = false
         finalizeTrailingStreaming(state.messages)
       }
+      // Last write to `messages` in this reducer: every helper above may copy or
+      // edit rows in place, and a reused row is frozen store state. Most turn
+      // ends repeat every row but the last turn's, so the turn grouper and the
+      // memoised rows re-render that turn alone.
+      state.messages = reuseUnchangedRows(rowsBeforeRefresh, state.messages)
       state.pendingTurnSlot = null
       // Same seeding as switchSlot: this refresh is the reconnect recovery,
       // and the frames that raced it are exactly the ones it must not let
@@ -537,17 +594,17 @@ export function addSlotRefreshCases(builder: ActionReducerMapBuilder<ChatState>)
       // in the refetched history (a grid pane can resolve an approval between
       // the server snapshot and this warm), then collapse the pane's
       // optimistic/streamed/echoed messages to the canonical history.
-      const localResolved = new Map<string, unknown>()
+      // An elicitation's decision travels with the answer that was sent
+      // (`meta.answer`, written by the resolution frame), so both are kept.
+      const localResolved = new Map<string, { resolved: unknown; answer?: unknown }>()
       for (const m of (state.slotMessages[key] || [])) {
-        if (m.role === 'permission' && m.meta?.approval_id && m.meta?.resolved) {
-          localResolved.set(m.meta.approval_id as string, m.meta.resolved)
-        }
+        const k = isDecidedRow(m) && m.meta?.resolved ? decidedRowKey(m) : undefined
+        if (k) localResolved.set(k, { resolved: m.meta!.resolved, ...(m.meta!.answer !== undefined ? { answer: m.meta!.answer } : {}) })
       }
       const hydrated = messages.map(m => {
-        const aid = m.role === 'permission' ? (m.meta?.approval_id as string | undefined) : undefined
-        return aid && localResolved.has(aid)
-          ? { ...m, meta: { ...m.meta, resolved: localResolved.get(aid) } }
-          : m
+        const k = isDecidedRow(m) ? decidedRowKey(m) : undefined
+        const local = k ? localResolved.get(k) : undefined
+        return local ? { ...m, meta: { ...m.meta, ...local } } : m
       })
       // Hydrate queued bubbles through the single shared path
       // (hydrateQueuedBubbles). Without this, warming a background slot's cache
@@ -704,7 +761,9 @@ export function addSlotRefreshCases(builder: ActionReducerMapBuilder<ChatState>)
       const cacheUnchanged = (isDraft(cacheAtFulfil) ? original(cacheAtFulfil) : cacheAtFulfil)
         === action.payload.cacheAtDispatch
       if (!walkUnanchored || cacheUnchanged) {
-        writeSlotPage(state, key, revived, warmIsPrefix ? hasMore : undefined,
+        // Row reuse keeps every position, so `boundedLen` still indexes the
+        // page's last row in the array written.
+        writeSlotPage(state, key, reuseUnchangedRows(plainRows(cacheAtFulfil), revived), warmIsPrefix ? hasMore : undefined,
           warmIsPrefix && hasMore ? boundedLen : undefined,
           action.payload.nextBefore)
       }

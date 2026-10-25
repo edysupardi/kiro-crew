@@ -128,6 +128,8 @@ export interface Slot {
   pinned?: boolean
   /** The per-row mute (see ChatSlot.muted); drawn as a marker at rest. */
   muted?: boolean
+  /** A worker tab's process: `released` once the idle sweep stopped it. */
+  process?: 'live' | 'released'
   tags?: string[]
   forked_from?: string | null
   source_links?: Array<{
@@ -142,6 +144,9 @@ export interface Slot {
     // the gateway it talks to must keep rendering. See `chipLabel`.
     label?: string
     ci?: 'running' | 'passed' | 'failed' | null
+    // `'1'` when `ci` is `failed` but other checks are still running. See
+    // `PullRequestStatus.ciPending`.
+    ciPending?: string
     state?: 'open' | 'draft' | 'merged' | 'closed'
     // Owner-gated chips spread the whole cached chip-status entry, which also
     // carries the settled merge pair. Present only once the provider settled it.
@@ -182,6 +187,8 @@ export interface AgentInfo {
   session_color?: string
   /** The roster namespace (`/api/agents/catalog`); `member` is a crewmate. */
   selection_kind?: 'member' | 'template'
+  /** A crewmate's presentation label, shown in place of `name`. */
+  display_name?: string
 }
 
 export type SessionFilterKey = 'unread' | 'running' | 'pinned' | 'recent'
@@ -225,6 +232,10 @@ export interface FilterDimension {
    *  folder filter: counting it would strand every folder as an empty
    *  "New chat in <name>" shell while one is hidden). */
   narrows: (() => boolean) | null
+  /** Does a pinned row pass this dimension whatever it says? Read by
+   *  `pinnedExemptNarrowing`, so the pinned-band caption follows the same
+   *  rule `filtersRow` applies instead of restating it. */
+  exemptsPinned: boolean
   /** Does this dimension hide THIS row from a reveal? `excluded` reports list
    *  membership, for dimensions (search, status) that rank against backend
    *  state a single row cannot answer for alone. Non-nullable on purpose,

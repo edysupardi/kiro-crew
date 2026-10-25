@@ -38,8 +38,27 @@ def test_decisions_doc_documents_the_wake_judge_providers() -> None:
         assert f"| `{provider}`" in text, provider
 
 
+def test_decisions_model_route_example_names_only_kiro_served_ids() -> None:
+    registry = json.loads(
+        (ROOT / "src" / "kiro_crew" / "model_registry.json").read_text(encoding="utf-8")
+    )
+    served = {
+        entry["providers"]["acp"]
+        for entry in registry.values()
+        if isinstance(entry, dict) and entry.get("providers", {}).get("acp")
+    }
+    block = re.search(r'"model_route": (\{.*?\})', _doc("decisions.md"), re.S)
+    assert block, "model_route example not found in decisions.md"
+    route = json.loads(block.group(1))
+    assert set(route) == {"simple", "medium", "complex"}, route
+    assert set(route.values()) <= served, set(route.values()) - served
+
+
 def test_feishu_doc_names_only_registered_security_subcommands() -> None:
-    cli = (ROOT / "src" / "kiro_crew" / "cli.py").read_text(encoding="utf-8")
+    package = ROOT / "src" / "kiro_crew"
+    # The parser is cli.py plus the cli_parser_* registrars it calls.
+    parser_files = [package / "cli.py", *sorted(package.glob("cli_parser_*.py"))]
+    cli = "\n".join(path.read_text(encoding="utf-8") for path in parser_files)
     registered = set(re.findall(r'sec_sub\.add_parser\(\s*"([a-z-]+)"', cli))
     assert registered, "security subcommands not found in cli.py"
     named = set(re.findall(r"`kirocrew security ([a-z-]+)`", _doc("feishu-integration.md")))

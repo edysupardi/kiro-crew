@@ -616,23 +616,14 @@ class TestDeclaredEnvForwarding:
         monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
         assert gatewayd._declared_non_secret_env(_pool_key()) == {}
 
-    def test_malformed_sidecar_is_ignored(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("body", ["{not json", '["a", "b"]'], ids=["malformed", "non-object"])
+    def test_unreadable_sidecar_is_ignored(self, tmp_path, monkeypatch, body):
         key = _pool_key()
         monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
         sidecar_dir = env_sidecar_dir(resolve_overlay_dir())
         sidecar_dir.mkdir(parents=True, exist_ok=True)
         (sidecar_dir / env_sidecar_name(_AGENT, key.server_name)).write_text(
-            "{not json", encoding="utf-8"
-        )
-        assert gatewayd._declared_non_secret_env(key) == {}
-
-    def test_non_object_sidecar_is_ignored(self, tmp_path, monkeypatch):
-        key = _pool_key()
-        monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
-        sidecar_dir = env_sidecar_dir(resolve_overlay_dir())
-        sidecar_dir.mkdir(parents=True, exist_ok=True)
-        (sidecar_dir / env_sidecar_name(_AGENT, key.server_name)).write_text(
-            '["a", "b"]', encoding="utf-8"
+            body, encoding="utf-8"
         )
         assert gatewayd._declared_non_secret_env(key) == {}
 
@@ -845,7 +836,7 @@ class TestSidecarNaming:
 
 def _load_config_from_dict(data: object):
     """Write ``data`` to a temp config file and load it through the real
-    ``KiroCrewConfig.load()`` parse path (mirrors ``test_config_loader``)."""
+    ``KiroCrewConfig.load()`` parse path (mirrors ``config_loader_helpers``)."""
     import tempfile
     import unittest.mock
     from pathlib import Path

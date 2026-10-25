@@ -43,6 +43,7 @@ if TYPE_CHECKING:  # avoid import cycles — config.loader imports heavy modules
         EmbeddingSource,
         ExternalAccessPolicy,
         FeatureApp,
+        FeedbackTrackerProvider,
         GatewayLifecycleProvider,
         IdentityProvider,
         ImportSourceProvider,
@@ -59,6 +60,7 @@ if TYPE_CHECKING:  # avoid import cycles — config.loader imports heavy modules
         SandboxPolicy,
         SkillDiscoveryProvider,
         SlackEnterpriseGate,
+        SpeechProviderRegistry,
         TelemetryProvider,
         TipsProvider,
         TunnelProvider,
@@ -341,6 +343,16 @@ class PlatformContext:
     # plus whatever the edition adds), each backed by a ``LaunchEngine`` the
     # core's launch job drives. v1 addition (no CONTRACT_VERSION bump).
     remote_provisioners: "RemoteProvisionerProvider"
+    # Where Report a Problem / `kirocrew doctor` send the user to file the
+    # bundle. REPLACE-capable like ``tips``: the public pre-filled GitHub link
+    # or the edition's own URL, never a merge of the two. The backend half of
+    # the dashboard's ``setFeedbackTracker`` seam. v1 addition (no
+    # CONTRACT_VERSION bump).
+    feedback: "FeedbackTrackerProvider"
+    # Edition-registered STT / TTS providers and the edition's default choice.
+    # ADD-only: a name colliding with a built-in or ``off`` fails boot. Read by
+    # ``kiro_crew.speech_providers``. v1 addition (no CONTRACT_VERSION bump).
+    speech: "SpeechProviderRegistry"
 
     # ── bundled feature apps ──
     feature_apps: "Tuple[FeatureApp, ...]"  # [RESERVED] — see RESERVED_SLOTS
@@ -633,7 +645,16 @@ PEEK_CALLERS: "dict[str, str]" = {
         "its policy failed to compose — is handled separately by withholding "
         "the line's text (LOG_WITHHELD_PLACEHOLDER)."
     ),
-    "platform/governance.py::active_policy_distribution": (
+    "speech_providers.py::_installed_speech": (
+        "no-context answer is 'no registered speech providers and no edition "
+        "default', which is the standalone answer: the built-in STT and TTS sets. "
+        "An unknown stored name then keeps its built-in fallback (STT fails closed "
+        "to off, TTS falls back to the local default), so an absent context can only "
+        "NARROW what is selectable, never route audio anywhere. It must peek: the STT "
+        "half runs inside KiroCrewConfig.load(), and current_context() with nothing "
+        "installed loads config, which would re-enter that load."
+    ),
+    "platform/governance_parts/carriers.py::active_policy_distribution": (
         "no-context answer is an unconfigured PolicyDistribution, i.e. no "
         "central fetch. It is reached only when boot never installed a context, "
         "and then this process holds no ceiling to refresh and runs no refresher "

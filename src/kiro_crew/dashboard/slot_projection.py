@@ -7,6 +7,7 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from kiro_crew.dashboard.slot_preparing import is_preparing
 from kiro_crew.safety_override import safety_override, yolo_policy_permits
 from kiro_crew.session_lifecycle import STOP_DECLINED_ESCALATION_SECS
 
@@ -218,7 +219,7 @@ class SlotProjection:
         is_turn_interrupted: Callable[[list[dict]], bool],
         is_system_notice: Callable[[str, dict], bool],
         latest_transcript_ts: Callable[..., str | None],
-        strip_markdown_preview: Callable[[str], str],
+        last_message_preview: Callable[[str], str],
         resolve_effective_agent: Callable[[str, str | None], str],
         budget_source_links: Callable[[list[dict]], list[dict]],
         project_source_links: Callable[[list[dict], bool], list[dict]],
@@ -258,18 +259,28 @@ class SlotProjection:
         options: list[str] = []
         prompt_preview = ""
         last_conv_role = ""
+        # When the session last moved: the newest durable row of any role that is
+        # not a system notice (a reload card is not activity). The scan runs
+        # newest-first, so the first match IS the newest row by position; no
+        # timestamp text is compared (rows mix naive and offset-aware formats).
         last_activity_ts = ""
+        # When the AGENT last acted: the newest assistant / tool row. Kept apart
+        # for readers that ask "did the agent act after X", which a user prompt
+        # must not answer (the artifact freshness nudge).
+        last_agent_ts = ""
         found_conv = False
         for message in reversed(rows):
             role = message.get("role")
             msg_meta = message.get("meta") or {}
             notice = is_system_notice(role, msg_meta)
+            if not last_activity_ts and role not in transient_roles and not notice:
+                last_activity_ts = message.get("ts") or ""
             if (
-                not last_activity_ts
+                not last_agent_ts
                 and role in ("tool_call", "tool_result", "assistant")
                 and not notice
             ):
-                last_activity_ts = message.get("ts") or ""
+                last_agent_ts = message.get("ts") or ""
             if role in ("user", "assistant") and not notice:
                 text = message.get("content") or ""
                 if text:
@@ -286,17 +297,46 @@ class SlotProjection:
                                     stripped[:240] + "…" if len(stripped) > 240 else stripped
                                 )
                     if not last_msg:
-                        # Strip before redaction so markdown cannot split a
-                        # credential signature and then rejoin it on the wire.
-                        redacted = redact(strip_markdown_preview(text))
-                        last_msg = redacted[:80] + "…" if len(redacted) > 80 else redacted
-            if found_conv and last_msg and last_activity_ts:
+                        # Stripped, redacted and cut by the caller, which strips
+                        # before redacting so markdown cannot split a credential
+                        # signature and then rejoin it on the wire.
+                        last_msg = last_message_preview(text)
+            # An agent row is durable and not a notice, so once `last_agent_ts`
+            # is set `last_activity_ts` is too.
+            if found_conv and last_msg and last_agent_ts:
                 break
+
+        # A send queued behind a busy turn is user input with no transcript row
+        # yet. The dashboard bumps `last_activity_ts` on `queue_push`, so the
+        # snapshot folds the same instant in, or the next frame would undo it.
+        # `latest_transcript_ts` compares instants, not text.
+        queued_activity_ts = slot._last_enqueue_ts if slot._queue else ""
+        if queued_activity_ts:
+            last_activity_ts = (
+                latest_transcript_ts(last_activity_ts, queued_activity_ts) or last_activity_ts
+            )
 
         slot_pending = any(not future.done() for future in slot._approval_futures.values())
         pending_approval = slot_pending or bool(coordinator_pending)
+        # A turn is in flight when this slot's own task runs it OR when another
+        # path (a channel dispatcher answering in the Slack thread this slot is
+        # bound to) holds the linked session's turn lease. The second is not a
+        # dashboard turn, so it has no task, no generation and no queue here;
+        # it only stops the summary from reading its trailing user row as an
+        # interruption, and reports the row as running like any other turn.
+        turn_in_flight = slot.turn_running or getattr(slot, "linked_turn_running", False) is True
+        # A turn running only on the linked session has no number here, so the
+        # row names none, as the slot detail does: naming the slot's last
+        # dashboard turn would tell the open pane, which already saw that turn
+        # end, that this running row is stale, and the pane would stay idle --
+        # no Stop, and Resume offered on a reply still being written.
+        turn_identity: dict[str, object] = (
+            {}
+            if turn_in_flight and not slot.turn_running
+            else {"turn": slot._turn_generation, "turn_gen": chunk_generation()}
+        )
         last_turn_ts = last_ts
-        if slot.turn_running:
+        if turn_in_flight:
             prompt_ts = next(
                 (
                     message.get("ts") or ""
@@ -311,14 +351,14 @@ class SlotProjection:
                 last_turn_ts = latest_transcript_ts(prompt_ts, queued_ts) or queued_ts
 
         waiting_for_input = (
-            not slot.turn_running
+            not turn_in_flight
             and not has_options
             and not pending_approval
             and bool(rows)
             and last_conv_role == "assistant"
         )
         needs_input = bool(slot._question_pending)
-        interrupted = not slot.turn_running and is_turn_interrupted(rows)
+        interrupted = not turn_in_flight and is_turn_interrupted(rows)
 
         pending_approval_info: dict[str, str] | None = None
         if slot_pending:
@@ -417,7 +457,7 @@ class SlotProjection:
             "row_identity": resolved_row_identity(slot),
             "artifact": slot._artifact,
             "messages": len(rows),
-            "running": slot.turn_running,
+            "running": turn_in_flight,
             # A loop wake is opening this running turn and its row is not in the
             # transcript yet: a structured monitor writes that row only once the
             # runner accepts the turn. Rides the same frame as `running`, so a
@@ -426,13 +466,17 @@ class SlotProjection:
             "wake_starting": bool(
                 slot.turn_running and getattr(slot, "_wake_starting_task", None) is slot.task
             ),
-            "turn": slot._turn_generation,
-            "turn_gen": chunk_generation(),
+            **turn_identity,
             # An automatic compaction in flight on this session. Separate from
             # `running` because it is NOT a dashboard turn: the composer reads
             # idle while it holds the session, which without this field looks
             # like a stall worth pressing Stop on.
             "compacting": bool(getattr(slot, "_compacting", False)),
+            # A background assistant message is being prepared outside any
+            # turn (``slot_preparing``). Separate from `running` for the same
+            # reason as `compacting`: it must not make the slot look busy to
+            # sends or queueing, only show the chat's working indicator.
+            "preparing": is_preparing(slot),
             # A cooperative Stop was declined moments ago (the session was
             # compacting) and the next press escalates to a force stop. Read
             # with the same window the stop route uses, so the button's hint and
@@ -443,6 +487,7 @@ class SlotProjection:
             "pending_approval": pending_approval,
             "pending_approval_info": pending_approval_info,
             "last_activity_ts": last_activity_ts,
+            "last_agent_ts": last_agent_ts,
             "waiting_for_input": waiting_for_input,
             "needs_input": needs_input,
             "interrupted": interrupted,

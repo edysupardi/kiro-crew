@@ -446,7 +446,30 @@ describe("first-download installer design contract", () => {
     );
   });
 
-  it("bundles the pinned Windows kiro-cli without installing the MSI", () => {
+  it("ships no kiro-cli unless BUNDLE_KIRO_CLI=1 opts the build in", () => {
+    // The shipped app detects the user's own kiro-cli; the first-run gate
+    // tells them to install one. A bundled copy ranks above every system
+    // install, which hides that step and freezes the runtime at the pin, so
+    // the default is off and the install smokes refuse an unasked-for payload.
+    const buildScript = fs.readFileSync(
+      path.join(REPO_ROOT, "packaging", "build-desktop.sh"),
+      "utf8"
+    );
+    assert.match(buildScript, /if \[ "\$\{BUNDLE_KIRO_CLI:-0\}" = "1" \]; then\n\s*fetch_kiro_cli/);
+    for (const smoke of ["smoke-macos-install.sh", "smoke-windows-install.ps1"]) {
+      const text = fs.readFileSync(path.join(REPO_ROOT, "scripts", smoke), "utf8");
+      assert.doesNotMatch(text, /BUNDLE_KIRO_CLI:-1|BUNDLE_KIRO_CLI -ne "0"|BUNDLE_KIRO_CLI -eq "0"/, smoke);
+    }
+    for (const workflow of ["build-desktop.yml", "build-windows.yml"]) {
+      // Non-comment lines only: a comment may NAME the opt-in while explaining
+      // the default; what must not appear is a step that sets or logs it.
+      const text = fs.readFileSync(path.join(REPO_ROOT, ".github", "workflows", workflow), "utf8")
+        .split("\n").filter(line => !/^\s*#/.test(line)).join("\n");
+      assert.doesNotMatch(text, /Bundling kiro-cli|BUNDLE_KIRO_CLI/, workflow);
+    }
+  });
+
+  it("stages the pinned Windows kiro-cli without installing the MSI when opted in", () => {
     const buildScript = fs.readFileSync(
       path.join(REPO_ROOT, "packaging", "build-desktop.sh"),
       "utf8"
@@ -537,7 +560,9 @@ describe("first-download installer design contract", () => {
     // The recogniser, compressed-audio decoder, and every Python/runtime
     // dependency are installer payload. The gate executes a hash-authenticated,
     // immutable view of the decoder, so pip metadata alone cannot make a release pass.
-    assert.match(buildScript, /imageio-ffmpeg==0\.6\.0/);
+    assert.match(buildScript, /-m kiro_crew\.stt\.decoder \\\n\s+--install-into "\$2\/kirocrew_ffmpeg\/bin"/);
+    assert.match(windowsBuilder, /install_desktop_decoder "\$out\/python\.exe" "\$sp"/);
+    assert.doesNotMatch(buildScript, /imageio-ffmpeg/);
     assert.match(buildScript, /ERROR: no prebuilt speech recogniser for supported target/);
     assert.match(buildScript, /macOS Intel[^\n]+legacy backend unsupported/);
     assert.doesNotMatch(buildScript, /bundling without it/);

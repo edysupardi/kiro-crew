@@ -68,6 +68,7 @@ export function useConfirm(): {
   const lastOptsRef = useRef<ConfirmOptions | null>(null)
 
   const confirm = useCallback((opts: ConfirmOptions) => {
+    if (process.env.NODE_ENV !== 'production') console.log('DBG ask', String(opts.title))
     return new Promise<boolean>(resolve => {
       // A second ask while one is open answers the first "no" rather than
       // leaking its promise (and its awaiting caller) forever.

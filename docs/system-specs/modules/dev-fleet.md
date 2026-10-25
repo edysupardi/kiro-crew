@@ -35,12 +35,32 @@ behind that facade is split by state and lifecycle ownership:
   subprocesses, and shutdown admission.
 - `repository.py` owns `MAIN_REPO`, repository discovery and validation, git/worktree
   access, and dirty-state inspection.
-- `live.py` owns live-target discovery, gateway restart backends, the Make Live lock and
-  committed-cutover latch, and rollback.
+- `live.py` owns the pointer-provider seam, live-target discovery (`_live_worktree_path`)
+  and its cache, the Make Live lock and committed-cutover latch, removal-lease acquisition
+  and the backend's lease client, the gateway restart, the cutover and its rollback. Its
+  owners hold the rest:
+  - `live_leases.py`: the gateway-held removal-lease and pod-start registries;
+  - `live_service.py`: the checkout probes discovery uses (own package, launchd program,
+    running checkout, staged target) and the live gateway as a service (unit and label,
+    systemd/launchd/foreground restart backend, service probes, the drop-in);
+  - `live_plan.py`: a cutover's dry-run plan, operator-facing text, and the Switch-back
+    undo-binding check (`_undo_binding_holds`).
 - `fleet_state.py` owns PR/context/resource caches, fleet projections and tombstones, and
-  provision reattachment state.
-- `worktree_ops.py` owns pod actions, worktree remove/sync/rebase/prune orchestration, and
-  the background task handles.
+  provision reattachment state. PR status is cached for `_PR_TTL` (300 s); the context
+  `git log` is reused while the row's git facts key holds (`_CTX_LOG_CACHE`), and a log
+  over `_CTX_LOG_MAX_CHARS` (64 Ki chars) is used once and never kept.
+- `git_facts.py` owns the fleet view's per-worktree git facts cache (`_GIT_FACTS_CACHE`),
+  the shared base snapshot (`_BASE_SNAPSHOT`, one `for-each-ref` per base move) and
+  `_DIRTY_TTL`. The key is plain reads and stats of HEAD, the branch ref, the index and
+  `<remote>/<base>`: bounded `O_NOFOLLOW|O_NONBLOCK` regular-file reads, inside the
+  managed repo's `.git` layout only. Any refusal skips the cache and runs sandboxed git.
+  Display only: a row's `dirty` may lag an unstaged edit or untracked file by up to
+  300 s; removal and discard read git fresh.
+- `worktree_ops.py` owns rebase and prune orchestration and the background task handles.
+  Its owners hold the rest:
+  - `worktree_ops_pods.py`: pod actions and the per-worktree lock `_wt_lock`;
+  - `worktree_ops_removal.py`: removing one worktree, and `_GIT_MUTATION_LOCK`;
+  - `worktree_ops_sync.py`: Pull + Build sync of the main checkout.
 - `http_api.py` owns proxy HMAC verification, request/audit adapters, and response-shape
   translation.
 
@@ -51,12 +71,37 @@ authoritative instance. The facade forwards legacy private attribute reads, writ
 deletes to that owner, but tests patch the actual owner rather than treating the facade as
 a dependency-injection namespace.
 
+`live.py` and `worktree_ops.py` are in turn `kiro_crew._facade_mirror` facades over their
+`live_*` and `worktree_ops_*` owners: a name is still reached as `live.<name>` or
+`worktree_ops.<name>`, a patch through the facade reaches every owner holding the name,
+and each facade keeps the code that rebinds the state it shares. Owners never import
+their facade; new work goes to the owner of its responsibility.
+
 The split does not change lifecycle ordering. Shutdown first closes admission and
 snapshots active runs under the runtime admission lock, then kills process trees before
 cancelling their workers, and only then cancels the idle refresher/reaper/prune tasks.
 Destructive worktree operations retain the lock order `_wt_lock(name)` ->
 `_MAKE_LIVE_LOCK` -> `_GIT_MUTATION_LOCK`; changing either ordering can strand a build or
 deadlock removal against a live cutover.
+
+## Frontend component boundaries
+
+`website/src/pages/DevFleetPage.tsx` is the page and its only import path. It keeps
+the page's state, effects and actions (the sync and provision poll loops, the row
+actions, prune, restart and Make Live), the notification bus the page writes to,
+the log-window merge and the relative-time label. The owners beside it take new
+work for their part:
+
+- `devFleetPageModel.ts` owns the fleet payload types, the sync step-marker
+  protocol, the restart identity handshake and its route-independent watcher, the
+  provision progress model, the prune labels and the Switch back dismissal receipt.
+- `DevFleetPageMenus.tsx` owns the row-actions menu and the confirm popover.
+- `DevFleetPageRow.tsx` owns a row's action buttons, its Pull+Build and provision
+  steppers, the pod readout and the expanded detail panel.
+- `DevFleetPagePrune.tsx` owns the prune review and progress dialogs.
+- `DevFleetPageNotices.tsx` owns the notices between the header and the table.
+
+Every other module imports the page, never an owner.
 
 ## Main Checkout Discovery
 
@@ -1902,7 +1947,8 @@ Two different jobs live in that one dict, and they are worth keeping apart:
 - **What git writes on a read.** `GIT_OPTIONAL_LOCKS=0` is also not a config key.
   `git status` refreshes the index's stat cache and saves it back under
   `index.lock`, so a command that is a read to its caller is a **write** to the
-  repository. Every fleet render runs one per row, so without this the fleet
+  repository. The fleet render runs one per row whose cached `dirty` is older than
+  `_DIRTY_TTL` (300 s), and one per row whose git facts key moved, so without this the fleet
   contends with the operator's own git for the lock on the ordinary path. Pinned on
   the env chokepoint rather than as `--no-optional-locks` per call site, so the argv
   this module builds keeps naming just its subcommand and a read added later
@@ -2167,8 +2213,8 @@ stages no top-level `skills/` tree.
 Skills are registered as symlinks into `~/.kiro/crew/skills/` via the app bridge at
 two lifecycle points:
 
-1. **On enable** — `register_app()` in `bridges.py` creates namespaced + flat symlinks
-2. **On gateway startup** — `reconcile_app_skills()` in `bridges.py` (called from
+1. **On enable** — `register_app()` in `bridges_register.py` creates namespaced + flat symlinks
+2. **On gateway startup** — `reconcile_app_skills()` in `bridges_skills.py` (called from
    `start_enabled_app_backends()`) ensures manifest-declared skills are linked for
    already-enabled apps, creating missing symlinks and removing stale ones for skills
    dropped from the manifest since the last registration

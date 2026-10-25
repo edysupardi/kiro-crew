@@ -106,11 +106,31 @@ class TestNoWorkOnTheBootPath:
 
 class TestTheTaskIsHeldAndCancelled:
     def test_the_task_attribute_exists_before_anything_starts_it(self) -> None:
-        """Declared in __init__, so a reader that runs first is not an AttributeError."""
+        """Set in __init__, so a reader that runs first is not an AttributeError.
+
+        ``__init__`` is composed from ``gateway_runtime/orchestrator_init.py``, where an
+        inline annotation on ``self`` is a type error, so the class declares the field
+        and the constructor assigns it.
+        """
+        import ast
+        from pathlib import Path
+
+        from kiro_crew.slack import gateway
         from kiro_crew.slack.gateway import GatewayOrchestrator
 
         src = inspect.getsource(GatewayOrchestrator.__init__)
-        assert 'self._feature_video_task: "asyncio.Task[bool] | None" = None' in src
+        assert "self._feature_video_task = None" in src
+        cls = next(
+            node
+            for node in ast.parse(Path(gateway.__file__).read_text(encoding="utf-8")).body
+            if isinstance(node, ast.ClassDef) and node.name == "GatewayOrchestrator"
+        )
+        declared = {
+            node.target.id: ast.unparse(node.annotation)
+            for node in cls.body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+        }
+        assert declared.get("_feature_video_task") == "'asyncio.Task[bool] | None'"
 
     def test_shutdown_cancels_it_beside_its_sibling(self) -> None:
         """A pending transfer must not outlive the process it was started for."""

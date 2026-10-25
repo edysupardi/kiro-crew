@@ -9,6 +9,7 @@ Composed onto ``kiro_crew.hooks``; see :mod:`kiro_crew.hook_runtime`.
 from __future__ import annotations
 
 import fnmatch
+import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -19,13 +20,14 @@ if TYPE_CHECKING:
         _BUILTIN_APP_MCP_SERVERS,
         _BUILTIN_APP_NAMES,
         _GLOBAL_INLINE_FLAGS_RE,
-        _HOST_READ_ONLY_BUILTIN_ALIASES,
         _HOST_READ_ONLY_BUILTIN_TOOLS,
         _TITLE_ONLY_GRANT_NOTED,
         _TITLE_ONLY_GRANT_NOTED_CAP,
         _TITLE_TRUNCATION_MARKER,
         _TOOL_TITLE_PREFIXES,
         CORE_MCP_SERVER,
+        DEEPSEEK_READ_ONLY_TOOLS,
+        KIRO_TOOL_ALIASES,
         TOOL_AUTO_APPROVE,
         ToolHookResult,
         _bounded_pattern_search,
@@ -88,7 +90,7 @@ class ToolCall:
 
     #: The display title / pill label. For shell tools it may be an LLM-authored
     #: ``description`` rather than the literal command (``select_tool_title`` in
-    #: ``acp/_dispatch.py`` prefers ``description`` over ``command``), so it is
+    #: ``acp/_dispatch_parts/surfaced_text.py`` prefers ``description`` over ``command``), so it is
     #: UNTRUSTED for security decisions: every deny tier also runs against
     #: ``command`` when one is present, and a match on EITHER denies. Auto-approve
     #: stays keyed on the title only -- failing to auto-approve merely falls
@@ -168,6 +170,12 @@ class ToolCall:
     #: deny target, so a rule on ``web_fetch`` binds claude's WebFetch, and the
     #: claude half of the read-only built-in proof. Never a grant.
     harness_builtin_tool: str = ""
+    #: ``AcpEvent.deepseek_tool_name``: the DeepSeek Harness tool a call is for, as
+    #: its tool_call frame stated it. Read by the gate on a ``classifier_only``
+    #: (READ_ONLY) turn only: a deny target and a governance identity under both
+    #: its own name and its kiro-cli policy name, and the deepseek half of the
+    #: read-only built-in proof.
+    deepseek_tool_name: str = ""
     #: The ``spawn_run`` target the governance spawn policy judges.
     spawn_target: str = ""
     #: The agent that ACTUALLY ran (``read_effective_agent``), never the slot's
@@ -216,6 +224,7 @@ class ToolCall:
             "identity_unreadable": bool(getattr(event, "mcp_identity_unreadable", False)),
             "kas_builtin_ids": bool(getattr(event, "kas_builtin_ids", False)),
             "harness_builtin_tool": getattr(event, "harness_builtin_tool", "") or "",
+            "deepseek_tool_name": getattr(event, "deepseek_tool_name", "") or "",
             "spawn_target": getattr(event, "spawn_target", "") or "",
         }
         values.update(overrides)
@@ -240,6 +249,7 @@ class ToolCall:
             "mcp_identity_unreadable": self.identity_unreadable,
             "kas_builtin_ids": self.kas_builtin_ids,
             "harness_builtin_tool": self.harness_builtin_tool,
+            "deepseek_tool_name": self.deepseek_tool_name,
             "spawn_target": self.spawn_target,
         }
 
@@ -272,6 +282,22 @@ def hook_gate_kwargs(event: object, **overrides: Any) -> dict[str, Any]:
         )
     kwargs.update(overrides)
     return kwargs
+
+
+def _host_builtin_alias(mcp_tool_name: str, mcp_server_name: str) -> str:
+    """The spec spelling of a host built-in kiro-cli stamped under a short name.
+
+    ``read`` -> ``fs_read``, ``write`` -> ``fs_write``, ``shell`` -> ``execute_bash``
+    (:data:`kiro_crew.platform.tool_names.KIRO_TOOL_ALIASES`); ``""`` for any
+    other stamp. The deny rules, governance and the read-only proof all resolve a
+    stamp through this one call, so a rule written in the spec spelling reaches
+    the call the proof would judge. Built-ins only: kiro-cli stamps
+    ``mcpServerName`` on every MCP-served call, and a server's own tool called
+    ``read`` is not the host's file reader.
+    """
+    if mcp_server_name:
+        return ""
+    return KIRO_TOOL_ALIASES.get(mcp_tool_name, "")
 
 
 def _is_host_read_only_builtin(
@@ -309,20 +335,17 @@ def _is_host_read_only_builtin(
     (``kiro_tool_identity_meta`` in the engine) and is the one every
     ``mcp_server_name`` consumer in ``kiro_crew.hooks`` already rests on.
 
-    The stamped name is read through ``_HOST_READ_ONLY_BUILTIN_ALIASES`` first.
-    kiro-cli names its file-read built-in ``read`` (``fs_read`` is the alias it
-    still accepts in a spec), while the allowlist and ``BUILTIN_TOOL_SCOPES``
-    carry ``fs_read``; without the step a ``read`` call is unproven and a
-    ``READ_ONLY`` surface refuses every file read. The table holds only the
-    read-only aliases, so a ``write`` or ``shell`` stamp has no entry, is
-    tested under its own name, and is refused as before.
+    The stamped name is resolved through :func:`_host_builtin_alias` first:
+    kiro-cli stamps its file-read built-in ``read`` where the allowlist carries
+    ``fs_read``, and without the step a ``READ_ONLY`` surface refuses every file
+    read. The allowlist decides what the step may prove: ``write`` and ``shell``
+    resolve to names it does not hold and stay unproven.
     """
     if not mcp_identity_trusted:
         return False
     if mcp_server_name or not mcp_tool_name:
         return False
-    # A kiro-cli alias (``read``) reads under the name a rule is written in.
-    name = _HOST_READ_ONLY_BUILTIN_ALIASES.get(mcp_tool_name, mcp_tool_name)
+    name = _host_builtin_alias(mcp_tool_name, mcp_server_name) or mcp_tool_name
     if name in _HOST_READ_ONLY_BUILTIN_TOOLS:
         return True
     # A KAS built-in arrives under its own id (``read_file``, ``grep_search``;
@@ -355,11 +378,37 @@ def _is_harness_read_only_builtin(harness_builtin_tool: str, mcp_server_name: st
     return harness_builtin_tool in _HOST_READ_ONLY_BUILTIN_TOOLS
 
 
+def _is_deepseek_read_only_builtin(
+    deepseek_tool_name: str, mcp_server_name: str, raw_params: object
+) -> bool:
+    """True when a DeepSeek Harness call is one of its read built-ins, with its target named.
+
+    ``deepseek_tool_name`` is filled only from the name the call's own tool_call
+    frame stated (``AcpEvent.deepseek_tool_name``), never from the permission
+    payload. dsh dispatches the call to the tool registered under that name and
+    prefixes every MCP tool ``mcp__<server>__``, so a bare ``read`` is its own file
+    read. The call must also name what it reads (``DEEPSEEK_READ_ONLY_TOOLS``) as an
+    ABSOLUTE path, ``~`` allowed: dsh resolves a missing ``path`` (``grep``, ``glob``)
+    or a relative one against the session's work dir, while the sensitive-path and
+    ``filesystem.read`` checks resolve a relative path against the gateway's own, so
+    a ``../`` spelling of a guarded file would pass them. A call with an MCP server
+    behind it fails closed.
+    """
+    entry = DEEPSEEK_READ_ONLY_TOOLS.get(deepseek_tool_name)
+    if mcp_server_name or entry is None:
+        return False
+    policy_name, target_param, _owner = entry
+    target = raw_params.get(target_param) if isinstance(raw_params, dict) else None
+    if not isinstance(target, str) or not os.path.isabs(os.path.expanduser(target)):
+        return False
+    return policy_name in _HOST_READ_ONLY_BUILTIN_TOOLS
+
+
 def _app_owns_mcp_server(mcp_server_name: str, app: str) -> bool:
     """True when *mcp_server_name* is *app*'s OWN app-scoped MCP server.
 
     App-declared MCP servers are registered under the ``<app>:<server>`` key
-    (``apps/bridges.py`` ``_own_mcp_servers``), so the owning app is the segment
+    (``apps/bridges_agents.py`` ``_own_mcp_servers``), so the owning app is the segment
     before the first ``:``.  ``mcp_server_name`` is the trusted, NON-model-authored
     identity from ``_meta.kiro.mcpServerName`` (``AcpEvent.mcp_server_name``) —
     NOT the LLM-authored display title — so a forged shell/host title cannot spoof

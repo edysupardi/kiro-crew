@@ -9,7 +9,7 @@ import { requestSlotReveal } from '../../../store/chatSlice'
 import { ChatHeaderMenu } from '../ChatHeaderMenu'
 import type { useSteerDelivery } from './turnActions'
 import { SELECTION_INERT_ATTR } from '../useSelectionInertOverlays'
-import InboundLinkChip from '../../../components/InboundLinkChip'
+import ChatHeaderChips from '../../../components/ChatHeaderChips'
 import { PinnedPrompt } from '..'
 import { pinCandidateKey } from '../usePinnedPrompt'
 import SessionTitleControl from '../SessionTitleControl'
@@ -101,7 +101,7 @@ export default function ChatTitleOverlay({
             prompt and the header fade stay: they belong to the transcript
             column, not to the bar. */}
         {!titleInTopbar && (
-        <div className={`relative pr-1.5 pt-[9px] pb-2 flex items-center gap-2 bg-bg pointer-events-none transition-[padding-left] duration-[240ms] [transition-timing-function:cubic-bezier(.32,.72,0,1)] ${!isMobile && embedMode !== 'chat' && filteredSlots.length > 0 && !sidebarOpen ? 'pl-[60px]' : isMobile ? (embedMode === 'chat' ? 'pl-4' : 'pl-3') : 'pl-5'}`}>
+        <div className={`@container/chathead relative pr-1.5 pt-[9px] pb-2 flex items-center gap-2 bg-bg pointer-events-none transition-[padding-left] duration-[240ms] [transition-timing-function:cubic-bezier(.32,.72,0,1)] ${!isMobile && embedMode !== 'chat' && filteredSlots.length > 0 && !sidebarOpen ? 'pl-[60px]' : isMobile ? (embedMode === 'chat' ? 'pl-4' : 'pl-3') : 'pl-5'}`}>
           {/* Divider between toggle and title — ALWAYS mounted and
               absolute (zero width, no flex-gap participation) so it can
               never change the row's layout; it rides the row (title
@@ -150,7 +150,7 @@ export default function ChatTitleOverlay({
             />
           )}
           </div>
-        <InboundLinkChip slotKey={activeSlot} />
+        <ChatHeaderChips slotKey={activeSlot} />
         {/* Trailing controls grouped under a single ml-auto so multiple
             right-aligned items don't each absorb free space (two ml-auto
             siblings split the gap, parking the split icon mid-header). */}

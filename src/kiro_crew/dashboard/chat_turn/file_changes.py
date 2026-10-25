@@ -11,17 +11,18 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from kiro_crew.dashboard.state import row_mid
+from kiro_crew.hooks import safe_read_file_bytes_nolink
+from kiro_crew.security import redact
+from kiro_crew.wakatime.heartbeats import line_changes_from_file_changes
+
 if TYPE_CHECKING:
     from kiro_crew.dashboard.chat_runner import (
         _MAX_SLOT_MESSAGES,
         _MAX_TURN_FULL_CONTENT_CHARS,
         _ChatSlot,
-        line_changes_from_file_changes,
         logger,
-        redact,
-        row_mid,
         safe_read_file,
-        safe_read_file_bytes_nolink,
         validate_file_path,
     )
 
@@ -1296,8 +1297,8 @@ def _flush_file_changes(
         _dropped,
         _MAX_TURN_SNAPSHOT_CHARS,
     )
-    # Honour the in-place-mutation contract (see resolve_permission_message in
-    # state.py): "the periodic flush skips non-dirty slots, so an unflagged
+    # Honour the in-place-mutation contract (see _mark_permission_resolved in
+    # state_parts/transcript_rows.py): "the periodic flush skips non-dirty slots, so an unflagged
     # in-place mutation can be lost on restart". The assistant-message branch
     # above mutates meta in place without appending, so nothing else marks the
     # slot dirty. That matters on the error/cancel call path, which — unlike the

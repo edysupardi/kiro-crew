@@ -66,6 +66,7 @@ def add_job(
     minimal_context: bool = False,
     timeout: int = 0,
     timeout_secs: int = 0,
+    auto_pause_after_failures: int | None = None,
 ) -> CronJob:
     """Add a new job. Provide one of ``every_secs``, ``at_ts``, or ``cron_expr``.
 
@@ -127,6 +128,7 @@ def add_job(
         minimal_context=minimal_context,
         timeout=timeout,
         timeout_secs=timeout_secs,
+        auto_pause_after_failures=auto_pause_after_failures,
     )
     self._persist_add_locked(job)
     self._arm_timer()
@@ -248,7 +250,25 @@ def _persist_add_if_absent_locked(
         bind_cron_memory(job)
         self._drop_owner_if_parent_gone(job)
         self._jobs.append(job)
-        self._save()
+        # A save that fails must leave the in-memory list as the caller found
+        # it: the appended row is published to every reader the instant it
+        # lands (``list_jobs`` hands out ``self._jobs`` itself), so a job the
+        # store rejected would otherwise stay visible, be fired by the timer,
+        # and be persisted by the next save that succeeds -- the exact
+        # survive-a-failed-save defect the remove and update cores already
+        # guard. Popping the row restores the list to exactly what disk still
+        # holds, so no fingerprint reset is needed (the same reason
+        # ``_update_job_locked`` omits one): the failed ``_save`` never reached
+        # ``_record_fingerprint``, so the tracked digest still matches the
+        # untouched file and the cache now matches it too. The remove cores
+        # reset the fingerprint only because they reassign ``self._jobs`` and a
+        # failed save leaves the cache missing rows that are still on disk.
+        try:
+            self._save()
+        except BaseException:
+            self._jobs.pop()
+            raise
+    job.audit_auto_pause_limit_change(None, job.session_key)
     return True
 
 
@@ -301,7 +321,16 @@ def _persist_add_locked(self: CronService, job: CronJob) -> None:
         bind_cron_memory(job)
         self._drop_owner_if_parent_gone(job)
         self._jobs.append(job)
-        self._save()
+        # Roll the append back on a failed save, for the reason
+        # :meth:`_persist_add_if_absent_locked` spells out: a row the store
+        # rejected must not survive in the live list. Popping restores the
+        # list to what disk still holds, so no fingerprint reset is needed.
+        try:
+            self._save()
+        except BaseException:
+            self._jobs.pop()
+            raise
+    job.audit_auto_pause_limit_change(None, job.session_key)
 
 
 async def add_job_async(
@@ -336,6 +365,7 @@ async def add_job_async(
     minimal_context: bool = False,
     timeout: int = 0,
     timeout_secs: int = 0,
+    auto_pause_after_failures: int | None = None,
     source_preset: str = "",
     source_template_prompt: str = "",
 ) -> CronJob:
@@ -387,6 +417,7 @@ async def add_job_async(
         minimal_context=minimal_context,
         timeout=timeout,
         timeout_secs=timeout_secs,
+        auto_pause_after_failures=auto_pause_after_failures,
     )
     # Dashboard-only template provenance. Set on the freshly-built job
     # BEFORE the off-loop persist -- the object has no other reference yet,
@@ -409,7 +440,8 @@ def update_job(self: CronService, job_id: str, **kwargs: Any) -> CronJob | None:
 
     Accepted kwargs: name, message, every_secs, cron_expr, agent_id, channel,
     approval_mode, silent, skip_dates, timezone, thread_ts, model,
-    timeout_secs (per-wake execution budget, 1..86400).
+    timeout_secs (per-wake execution budget, 1..86400),
+    auto_pause_after_failures (0..10000; 0 = never auto-pause).
 
     Raises :class:`CronStoreBusy` if the store lock is contended past the
     timeout; see :meth:`update_job_async` for the event-loop-safe variant.
@@ -507,10 +539,18 @@ def _ack_job_locked(self: CronService, job_id: str, summary: str) -> bool:
         self._sync_for_write()
         for job in self._jobs:
             if job.id == job_id:
+                before = list(job.acked_items)
                 job.acked_items.append(summary[:500])
                 # Keep only last 20 acks
                 job.acked_items = job.acked_items[-20:]
-                self._save()
+                # Restore the list a failed save never persisted: the mutated
+                # object is the one ``list_jobs`` already handed out, so a
+                # rejected ack must not linger in the live cache.
+                try:
+                    self._save()
+                except BaseException:
+                    job.acked_items = before
+                    raise
                 return True
     return False
 
@@ -540,7 +580,14 @@ def _unack_job_locked(self: CronService, job_id: str) -> bool:
         self._sync_for_write()
         for job in self._jobs:
             if job.id == job_id and job.acked_items:
+                before = list(job.acked_items)
                 job.acked_items.pop()
-                self._save()
+                # Restore the list a failed save never persisted (see
+                # :meth:`_ack_job_locked`).
+                try:
+                    self._save()
+                except BaseException:
+                    job.acked_items = before
+                    raise
                 return True
     return False

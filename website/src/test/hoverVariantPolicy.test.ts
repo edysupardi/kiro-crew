@@ -123,15 +123,15 @@ const TOUCH = /\[@media\(hover:none\)\]:|HOVER_NONE_ACTIONS_ROW_CLS|HOVER_NONE_A
  *  inside a button that is itself always visible, or a hover tooltip. On touch
  *  these simply do not appear. Keyed by file and a snippet of the line. */
 const DECORATIVE: Array<[file: string, snippet: string, why: string]> = [
-  ['App.tsx', 'group-hover/nav:opacity-100 group-focus-visible/nav', 'keyboard-shortcut chord hint on a nav link'],
+  ['shell/nav/navRow.tsx', 'group-hover/nav:opacity-100 group-focus-visible/nav', 'keyboard-shortcut chord hint on a nav link'],
   ['apps/spec-builder/components/SpecDetail.tsx', '<Pencil size={11}', 'edit glyph inside the always-visible title button'],
   ['components/ChatInput.tsx', 'group-hover/drag:opacity-100', 'resize-grip bar; the drag handle itself stays in place'],
   ['components/CopyBranchButton.tsx', 'group-hover/branch:opacity-70', 'copy glyph inside the always-visible branch button'],
   ['components/FileChangeChips.tsx', 'group-hover/tip:opacity-100', 'hover tooltip on a clickable chip; tapping opens the diff view, which names the file'],
   ['components/crew/CrewAvatarButton.tsx', 'group-hover/avatar:opacity-100', 'hover overlay, explicitly hidden under (hover: none)'],
-  ['pages/ArtifactDetailPage.tsx', '<Pencil size={14}', 'edit glyph inside the always-visible rename button'],
+  ['pages/ArtifactDetailPageHeader.tsx', '<Pencil size={14}', 'edit glyph inside the always-visible rename button'],
   ['pages/chat/SessionTitleControl.tsx', '<Pen size=', 'edit glyph beside the always-visible title'],
-  ['pages/settings/SecurityPanel.tsx', '<ExternalLink size={11}', 'external-link glyph on an always-visible row'],
+  ['pages/settings/SecurityPanelPosture.tsx', '<ExternalLink size={11}', 'external-link glyph on an always-visible row'],
   ['components/WelcomeView.tsx', '[@media(min-width:640px)_and_(min-height:600px)]:group-hover:line-clamp-none', 'unclamps a suggestion\'s text on hover; one tap sends the full text to the composer'],
 ]
 

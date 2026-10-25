@@ -21,6 +21,12 @@ import pytest
 from kiro_crew import agent_panel, dashboard_frame
 
 
+def _page_of(size: int) -> str:
+    """A page of exactly *size* bytes of UTF-8: markup around one inlined script."""
+    head, tail = '<div id="scene"></div><script>', "</script>"
+    return head + "x" * (size - len(head) - len(tail)) + tail
+
+
 class TestThePageContract:
     def test_an_empty_page_is_refused(self) -> None:
         with pytest.raises(dashboard_frame.PageError) as caught:
@@ -82,8 +88,19 @@ class TestThePageContract:
             dashboard_frame.validate_page(page)
         assert caught.value.code == "page_too_large"
 
-    def test_the_cap_is_dsh_visualizes_own_default(self) -> None:
-        assert dashboard_frame.MAX_PAGE_BYTES == 1_000_000
+    def test_the_cap_holds_a_page_that_inlines_a_library(self) -> None:
+        """3 MiB: a client-side library and the page's own scene code, inlined."""
+        assert dashboard_frame.MAX_PAGE_BYTES == 3 * 1024 * 1024
+
+    def test_a_page_exactly_at_the_cap_is_accepted(self) -> None:
+        page = _page_of(dashboard_frame.MAX_PAGE_BYTES)
+        assert dashboard_frame.validate_page(page) == dashboard_frame.MAX_PAGE_BYTES
+
+    def test_one_byte_over_the_cap_is_refused_naming_the_cap(self) -> None:
+        with pytest.raises(dashboard_frame.PageError) as caught:
+            dashboard_frame.validate_page(_page_of(dashboard_frame.MAX_PAGE_BYTES + 1))
+        assert caught.value.code == "page_too_large"
+        assert f"over the {dashboard_frame.MAX_PAGE_BYTES}-byte limit" in str(caught.value)
 
 
 class TestTheFramesSecurityPolicy:
@@ -135,7 +152,13 @@ class TestTheFramesSecurityPolicy:
             / "CrewDynamicDashboard.tsx"
         )
         source = component.read_text(encoding="utf-8")
-        assert "export const CREW_DASHBOARD_SANDBOX = 'allow-scripts'" in source
+        # The grant is defined once, in lib/crewDashboardSandbox.ts, and the
+        # component imports exactly that definition.
+        grant = component.parents[2] / "lib" / "crewDashboardSandbox.ts"
+        assert "export const CREW_DASHBOARD_SANDBOX = 'allow-scripts'" in grant.read_text(
+            encoding="utf-8"
+        )
+        assert "import { CREW_DASHBOARD_SANDBOX } from '../../lib/crewDashboardSandbox'" in source
         # The static mount is the empty attribute, which is every restriction
         # applied; a non-empty value here would be a second grant set.
         assert "export const CREW_DASHBOARD_SANDBOX_STATIC = ''" in source
@@ -487,8 +510,26 @@ class TestTheCodeTextOfAPage:
     def texts(html: str) -> list[str]:
         return [html[start:end] for start, end in dashboard_frame.code_spans(html)]
 
-    def test_a_page_with_neither_element_has_no_span(self) -> None:
-        assert self.texts('<p data-dashboard-field="goal"></p><b onclick="f()">x</b>') == []
+    @pytest.mark.parametrize(
+        "html",
+        [
+            pytest.param(
+                '<p data-dashboard-field="goal"></p><b onclick="f()">x</b>',
+                id="a_page_with_neither_element_has_no_span",
+            ),
+            pytest.param(
+                "<scripted>x</scripted><styles>y</styles>", id="a_longer_name_is_not_one_of_them"
+            ),
+            pytest.param("<script></script><style></style>", id="an_empty_element_has_no_span"),
+            pytest.param("<plaintext><script>a</script>", id="plaintext_ends_the_scan"),
+            pytest.param(
+                "<a =x><script>a</script>",
+                id="an_attribute_name_the_scan_cannot_read_ends_the_scan",
+            ),
+        ],
+    )
+    def test_no_span(self, html: str) -> None:
+        assert self.texts(html) == []
 
     def test_the_span_is_the_text_and_the_tags_stay_markup(self) -> None:
         html = '<p>a</p><script type="module">let x = 1;</script><b>b</b><style>.a{c:red}</style>'
@@ -497,22 +538,32 @@ class TestTheCodeTextOfAPage:
     def test_the_names_fold_case_and_an_end_tag_may_carry_whitespace(self) -> None:
         assert self.texts("<SCRIPT>a</Script ><Style>b</STYLE\n>") == ["a", "b"]
 
-    def test_a_longer_name_is_not_one_of_them(self) -> None:
-        assert self.texts("<scripted>x</scripted><styles>y</styles>") == []
-
-    def test_an_empty_element_has_no_span(self) -> None:
-        assert self.texts("<script></script><style></style>") == []
-
-    def test_an_end_tag_must_end_its_name(self) -> None:
-        assert self.texts("<script>a</scripts>b</script>") == ["a</scripts>b"]
-
-    def test_the_first_end_tag_ends_the_element_as_the_parser_reads_it(self) -> None:
-        assert self.texts("<script>var s = '</script>';</script>") == ["var s = '"]
-
-    def test_a_style_inside_a_script_is_script_text(self) -> None:
-        assert self.texts("<script>var a = '<style>x</style>';</script>") == [
-            "var a = '<style>x</style>';"
-        ]
+    @pytest.mark.parametrize(
+        "html, spans",
+        [
+            pytest.param(
+                "<script>a</scripts>b</script>", ["a</scripts>b"], id="an_end_tag_must_end_its_name"
+            ),
+            pytest.param(
+                "<script>var s = '</script>';</script>",
+                ["var s = '"],
+                id="the_first_end_tag_ends_the_element_as_the_parser_reads_it",
+            ),
+            pytest.param(
+                "<script>var a = '<style>x</style>';</script>",
+                ["var a = '<style>x</style>';"],
+                id="a_style_inside_a_script_is_script_text",
+            ),
+            pytest.param(
+                "<script data-note=\">\" data-k='>'>var x</script><p>t</p>",
+                ["var x"],
+                id="a_greater_than_inside_a_quoted_value_does_not_end_the_start_tag",
+            ),
+            pytest.param("1 < 2 and 3 <4 <script>a</script>", ["a"], id="a_lone_less_than_is_text"),
+        ],
+    )
+    def test_the_span_is_the_element_text(self, html: str, spans: list[str]) -> None:
+        assert self.texts(html) == spans
 
     def test_a_limit_stops_the_scan_after_that_many(self) -> None:
         html = "<script>a</script><style>b</style><script>c</script>"
@@ -537,9 +588,6 @@ class TestTheCodeTextOfAPage:
         assert self.texts('<p title="<style>">x</p>') == []
         assert self.texts("<p title='<script>'>x</p><script>a</script>") == ["a"]
         assert self.texts('<a href="x" data-t="<script>">t</a><style>b</style>') == ["b"]
-
-    def test_a_greater_than_inside_a_quoted_value_does_not_end_the_start_tag(self) -> None:
-        assert self.texts("<script data-note=\">\" data-k='>'>var x</script><p>t</p>") == ["var x"]
 
     @pytest.mark.parametrize("name", ["textarea", "title", "xmp", "iframe", "noembed", "noframes"])
     def test_the_content_of_a_raw_text_element_is_text(self, name: str) -> None:
@@ -580,9 +628,6 @@ class TestTheCodeTextOfAPage:
         assert self.texts("<![CDATA[<script>x</script>]]><script>a</script>") == ["a"]
         assert self.texts("<?xml <script> ?><script>a</script>") == ["a"]
         assert self.texts("</ <script>><script>a</script>") == ["a"]
-
-    def test_a_lone_less_than_is_text(self) -> None:
-        assert self.texts("1 < 2 and 3 <4 <script>a</script>") == ["a"]
 
     # -- names are read as the tokenizer reads them, not as Python folds them ---------
 
@@ -691,12 +736,6 @@ class TestTheCodeTextOfAPage:
         """HTML ignores the slash and opens a script; a value ending in ``/`` looks the same."""
         assert self.texts("<p><script/></p><script>a</script>") == []
         assert self.texts("<script src=a/><script>a</script>") == []
-
-    def test_plaintext_ends_the_scan(self) -> None:
-        assert self.texts("<plaintext><script>a</script>") == []
-
-    def test_an_attribute_name_the_scan_cannot_read_ends_the_scan(self) -> None:
-        assert self.texts("<a =x><script>a</script>") == []
 
     def test_a_page_that_needs_more_steps_than_the_bound_gets_no_more_spans(self) -> None:
         reads = dashboard_frame._MAX_SCAN_STEPS
@@ -971,3 +1010,32 @@ class TestMappingAPageByKind:
         dashboard_frame.map_page_text(html, markup, code)
         assert code_seen == ["a", "b"]
         assert all(markup_seen), markup_seen
+
+
+#: The CSS generic families a role variable may be built from.
+_GENERIC_FAMILIES = frozenset(
+    {"system-ui", "sans-serif", "ui-sans-serif", "ui-serif", "serif", "ui-monospace", "monospace"}
+)
+
+
+def _roles(css: str) -> dict[str, list[str]]:
+    return {
+        name: [part.strip() for part in value.split(",")]
+        for name, value in re.findall(r"(--font-(?:sans|serif|mono))\s*:\s*([^;}]+)", css)
+    }
+
+
+def test_type_comes_from_three_role_variables_of_generic_families_only() -> None:
+    """Each OS draws its own face: the frame names no typeface, only roles."""
+    css = dashboard_frame._HOST_CSS
+    roles = _roles(css)
+    assert set(roles) == {"--font-sans", "--font-serif", "--font-mono"}
+    for name, families in roles.items():
+        assert families and set(families) <= _GENERIC_FAMILIES, (name, families)
+    assert roles["--font-sans"] == ["system-ui", "sans-serif"]
+    assert roles["--font-serif"] == ["ui-serif", "serif"]
+    assert roles["--font-mono"] == ["ui-monospace", "monospace"]
+    body = re.search(r"body\s*\{([^}]*)\}", css)
+    assert body and "var(--font-sans)" in body.group(1)
+    for face in ("apple-system", "BlinkMacSystemFont", "Segoe UI"):
+        assert face not in body.group(1)

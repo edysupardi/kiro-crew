@@ -2,7 +2,7 @@ import { useEffect, useCallback, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAppDispatch, useAppStore } from '../store'
 import { switchSlot, deleteSlot, openActivityToTab } from '../store/chatSlice'
-import { sessionIsBusyForClose } from '../lib/closeBusyGate'
+import { closeConfirmPrompt } from '../lib/closeConfirmPrompt'
 import { loadChatConfig } from '../pages/chat/ChatSettings'
 import { focusComposerElement, queryComposerOrExpand, queryPendingApprovalAction, releaseComposerForKeyboardSwitch } from '../pages/chat/composerFocus'
 import { reportSeamCollision } from '../apps/seamCollision'
@@ -39,6 +39,7 @@ import { MOBILE_BREAKPOINT } from './useIsMobile'
 import { isEditableTarget } from '../utils/editableTarget'
 import { closeShownCrewWindow, crewWindowShown } from '../pages/chat/crew-window/crewWindowStore'
 import { stepTurn } from '../pages/chat/turnStep'
+import { noteEscapeStoppedSpeech } from '../utils/speechStopKey'
 
 /** Shortcuts scoped to the session on screen (see the crew-window guard). */
 const CREW_WINDOW_SCOPED: ReadonlySet<string> = new Set([
@@ -1007,20 +1008,28 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
         // collapsed, which outlives a reload.
         'focus-input': () => queryComposerOrExpand(focusComposerElement),
         // ⌘N / Ctrl+N (alias Option/Alt+Shift+N): new session.
-        'new-chat': () => onNewChat(),
+        // A held chord's auto-repeat is not another press: without this
+        // filter, holding the keys creates one session per repeat tick. The
+        // repeat is still claimed (preventDefault below), so the browser's own
+        // binding does not fire either. Two separate presses are two requests
+        // and still make two sessions.
+        'new-chat': () => { if (!e.repeat) onNewChat() },
         // ⌘W / Ctrl+W (alias Option/Alt+Shift+W): close the current session —
         // same semantics as the header-menu / sidebar close (gated by
-        // confirmCloseSession, dispatches deleteSlot, and a session that is not
-        // idle always confirms — `sessionIsBusyForClose`). ⌘W/Ctrl+W is the most
-        // habitual chord there is (it closed the WINDOW in the previous desktop
-        // release on Windows/Linux). The ⌥⇧W alias keeps its shipped behaviour:
-        // only the user's confirm setting gates it.
+        // confirmCloseSession, dispatches deleteSlot, and a session with live work
+        // always confirms — `closeBusyReasons`; the prompt text comes from
+        // `closeConfirmPrompt` so every path says why it asked). ⌘W/Ctrl+W is the
+        // most habitual chord there is (it closed the WINDOW in the previous
+        // desktop release on Windows/Linux). The ⌥⇧W alias keeps its shipped
+        // behaviour: only the user's confirm setting gates it.
         'close-chat': () => {
           if (!activeSlot) return
           const modChord = e.metaKey || e.ctrlKey
-          const mustConfirm = loadChatConfig().confirmCloseSession
-            || (modChord && sessionIsBusyForClose(appStore.getState(), activeSlot))
-          if (!mustConfirm || confirm(i18nT('hooks.useKeyboardShortcuts.close_this_session'))) {
+          const prompt = closeConfirmPrompt(appStore.getState(), activeSlot, {
+            settingOn: loadChatConfig().confirmCloseSession,
+            checkBusy: modChord,
+          })
+          if (prompt === null || confirm(prompt)) {
             dispatch(deleteSlot(activeSlot))
           }
         },
@@ -1163,6 +1172,9 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
       if (e.key !== 'Escape') return
       const { voicePlaying, voicePreparing } = appStore.getState().chat
       if (!voicePlaying && !voicePreparing) return
+      // Spent on speech: the composer's Escape-to-stop gate reads this and
+      // leaves the running turn alone (utils/speechStopKey.ts, #22315).
+      noteEscapeStoppedSpeech(e)
       window.dispatchEvent(new Event('voice-stop'))
     }
     document.addEventListener('keydown', onEsc, true)

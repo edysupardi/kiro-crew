@@ -32,6 +32,7 @@ from pathlib import Path
 from types import ModuleType as _ModuleType
 from typing import Any
 
+from kiro_crew import md_notebook_state as _md_notebook_state
 from kiro_crew import platform_compat
 from kiro_crew.apps import deps_boot as _deps_boot_module
 from kiro_crew.apps.execution import (
@@ -50,12 +51,14 @@ from kiro_crew.constants import (
     KIROCREW_SPAWNED_VALUE,
 )
 from kiro_crew.env import nvm_dirs as _nvm_dirs
+from kiro_crew.jsonl_util import rotate_jsonl_at as _rotate_jsonl_at
 from kiro_crew.owner_only_files import ensure_directory as _ensure_directory
 from kiro_crew.owner_only_files import owner_only_opener_for as _owner_only_opener_for
 from kiro_crew.sandbox import (
     MD_NOTEBOOK_APP_NAME,
     RLIMIT_PROFILE_BUILD,
     RLIMIT_PROFILE_TOOL,
+    _md_notebook_degraded_mask_dirs,
     app_backend_visible_targets,
     carveout_shadowed_by_foreign_mask,
     cgroup_scope_argv,
@@ -126,6 +129,21 @@ _warned_unconfined_cache = False
 # elevated-but-finite NOFILE ceiling as the workload's ANCESTOR. Every other
 # app backend keeps the standard (operator-configurable) resource policy.
 _BUILD_CAPABLE_APPS = frozenset({"dev-fleet"})
+
+
+# backend.log durability bound. The log is opened in APPEND mode so a crash
+# cause written just before a respawn survives the next start (truncate-on-open
+# would erase exactly the line that explains the crash). To stop the file
+# growing without limit ACROSS restarts, a size cap is applied ON OPEN with the
+# shared ``rotate_jsonl_at`` primitive: when backend.log reaches the cap it is
+# rolled aside to backend.log.1 (one previous generation kept, under a
+# non-blocking lock, never raising) before the append handle is taken, so the
+# previous session's log -- including a crash cause -- is still readable next to
+# the fresh current file. The check runs at spawn time only; within a single
+# session the child writes through the inherited stdout descriptor and can
+# overshoot the cap until the next (re)start rolls it, so this bounds growth
+# across restarts rather than continuously.
+_BACKEND_LOG_MAX_BYTES = 1_048_576  # 1 MiB
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +436,7 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
     # Module-style entry point (e.g. "kiro_crew.apps.builtins.<name>"):
     # used by built-in apps that live inside the KiroCrew package itself.
     # The shape test is the shared `is_module_style_entry_point` -- the same
-    # predicate `bridges.py` and the install-time desktop gate answer from,
+    # predicate `bridges_mcp.py` and the install-time desktop gate answer from,
     # so what this spawn provisions and what those sites assume it provisions
     # cannot drift.
     is_module_entry = is_module_style_entry_point(entry_point, root)
@@ -1151,6 +1169,37 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
     _visible: tuple[str, ...] = ()
     if is_builtin_app(app_root=execution_path, app_name=app_name):
         _visible = app_backend_visible_targets(app_name)
+    if _shipped_md_notebook:
+        # Move legacy Notes state into the state directory before the backend reads it.
+        # Spawn prep runs the same move on sandboxed hosts; this call covers a host with no
+        # sandbox wrap (Windows). Marker-gated, so a second call is one stat. Until it is
+        # sealed the backend does not start, so no backend write can race the move.
+        if not _md_notebook_state.sealed_default_legacy_state():
+            logger.error(
+                "App %s: not starting until its one-time state move finishes (see the "
+                "warning above); the next start retries it",
+                app_name,
+            )
+            return None
+        _active_home = str(config_dir())
+
+        def _under_active_home(path: str) -> bool:
+            try:
+                return os.path.commonpath([_active_home, path]) == _active_home
+            except ValueError:  # another drive on Windows: not under this home
+                return False
+
+        if any(_under_active_home(d) for d in _md_notebook_degraded_mask_dirs()):
+            # A link under ``workspace/md-notebook`` makes every spawn mask that whole
+            # directory with a writable, namespace-only stand-in, and without its carve-out
+            # the state directory is one too. Any attach, clone or PAT save would then
+            # succeed and vanish on restart, so the backend does not start at all.
+            logger.error(
+                "App %s: not starting: workspace/md-notebook is reached through a link, so "
+                "its writes would be lost on restart; replace the link with a real directory",
+                app_name,
+            )
+            return None
     if _cache_visible:
         # SECURITY: refuse rather than carve when the cache sits beneath an
         # independently masked directory (a data home relocated under a credential
@@ -1211,13 +1260,28 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
         # why provisioning failed. ``errors="replace"`` keeps the write total
         # for any codepoint; the child's own output is appended as raw bytes
         # through the inherited fd and is not affected by this wrapper.
+        #
+        # APPEND, not truncate: a respawn (including a crash-respawn loop) must
+        # not erase the prior session's log, which is exactly where the crash
+        # cause was written. The size cap is applied first by rolling the file
+        # aside with the shared ``rotate_jsonl_at`` primitive when it is full,
+        # so append does not grow it without bound.
+        _rotate_jsonl_at(log_path, _BACKEND_LOG_MAX_BYTES)
         log_fh = open(
             log_path,
-            "w",
+            "a",
             encoding="utf-8",
             errors="replace",
             opener=_owner_only_opener_for(log_path),  # 0600 inside the data home
         )
+        # Where THIS session's output begins. backend.log is opened in append
+        # mode, so it may already hold prior sessions' lines; the immediate-exit
+        # diagnostic below must read only from here, or a stale "errno 98" from a
+        # previous session would mislabel a silent child as [PORT COLLISION].
+        try:
+            log_start_offset = log_fh.tell()
+        except OSError:
+            log_start_offset = 0
         if provision_error:
             # Put the real cause at the top of the backend's own (user-visible)
             # log: the import error missing deps produce reads as an app bug,
@@ -1278,6 +1342,11 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
             # the header and may be any encoding, so decode with replacement
             # rather than letting one stray byte turn the tail into "(no output)".
             with open(log_path, "r", encoding="utf-8", errors="replace") as _lf:
+                # Read only THIS session's output. In append mode the file may
+                # start with prior sessions' lines; seeking past them keeps a
+                # stale "errno 98" from mislabelling a silent exit as a port
+                # collision.
+                _lf.seek(log_start_offset)
                 tail = "".join(_lf.readlines()[-8:]).strip()[-600:]
         except Exception:  # noqa: BLE001
             pass

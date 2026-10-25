@@ -486,7 +486,13 @@ describe('SchedulePage write-capable preset indicator', () => {
     // SECOND advisory note (the cheaper-execution-mode hint), and a bare
     // `role="note"` query cannot tell the two apart. The contract here is about
     // the writes notice specifically.
-    expect(await screen.findByTestId('schedule-writes-notice')).toHaveTextContent(/not enforced policy/i)
+    const writesNotice = await screen.findByTestId('schedule-writes-notice')
+    expect(writesNotice).toHaveTextContent(/not enforced policy/i)
+    // The warn hue meant for a `bg-warn-subtle` wash, not `text-warn-fg`: that
+    // token is black in the dark themes and vanishes over the 12% tint
+    // (dark-on-dark, #21450 / #21335).
+    expect(writesNotice).toHaveClass('bg-warn-subtle', 'text-warn-text')
+    expect(writesNotice).not.toHaveClass('text-warn-fg')
   })
 
   it('re-selecting the SAME preset resets the form (pins the selection-nonce remount)', async () => {
@@ -612,7 +618,7 @@ describe('SchedulePage job detail dialog', () => {
     expect(await screen.findByDisplayValue('Nightly report')).toBeInTheDocument()
   })
 
-  it('?job=<id> opens that job\'s detail once the list loads (the Crewmate Profile link)', async () => {
+  it('?job=<id> opens that job\'s detail once the list loads (the Mate Profile link)', async () => {
     const { api } = await import('../api/client')
     vi.mocked(api).crons.mockResolvedValue({ jobs: [mkJob({ id: 'job-7', name: 'Linked job' })] })
 

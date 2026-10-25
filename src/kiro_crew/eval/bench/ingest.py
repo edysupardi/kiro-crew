@@ -13,7 +13,7 @@ would silently corrupt a score if ignored.
 
 **1. The embedder loads in the background and returns ``None`` until resident.**
 ``make_sync_embed_fn`` waits at most ``_COLD_LOAD_WAIT_SECS`` for a cold load
-(embeddings.py) and returns ``None`` if the model is still not resident. A harness
+(embeddings_llama.py) and returns ``None`` if the model is still not resident. A harness
 that starts writing immediately could store
 rows with NULL embeddings, degrade ``search_episodic`` to its FTS5 ``LIKE``
 keyword fallback, and report a "retrieval score" that measured substring matching.
@@ -84,8 +84,7 @@ class IngestConfig:
     turn-level recall means anything, and because it is the harder, more honest
     retrieval task: the store must find one utterance among thousands rather than
     one document among forty. Note that NEITHER matches what production
-    consolidation writes — production writes LLM-summarized fragments. That
-    difference is the whole reason :mod:`.pipeline` exists as a separate mode.
+    consolidation writes — production writes LLM-summarized fragments.
 
     ``timeline`` — see the module docstring. ``"anchored"`` preserves the corpus's
     relative time structure while placing its most recent session at "now", which
@@ -527,7 +526,7 @@ def ingest_instance(
         report.dropped_gold = tuple(dropped_gold)
 
         if cfg.timeline != "now":
-            report.backdated = _backdate(store, times, text_to_turn, inst)
+            report.backdated = _backdate(store, times, inst)
 
         # Only meaningful when FAISS is present; returns 0 otherwise, which is why the
         # backend is reported separately rather than inferred from this call.
@@ -557,7 +556,6 @@ def ingest_instance(
 def _backdate(
     store: VectorMemoryStore,
     times: dict[str, datetime],
-    text_to_turn: dict[str, str],
     inst: BenchInstance,
 ) -> int:
     """Rewrite ``created_at`` so the decay term sees the corpus's real structure.

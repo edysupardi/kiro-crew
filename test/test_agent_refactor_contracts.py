@@ -7,7 +7,7 @@ where the code lives:
 
 * the SURFACE: every name the module bound, with its kind, signature and value;
 * ``toolsSettings.subagent.availableAgents``: a kiro-cli-owned allowlist Crew reads at
-  its own spawn gate (``subagent.py``), carried byte-for-byte through every read,
+  its own spawn gate (``subagent_parts/agent_policy.py``), carried byte-for-byte through every read,
   normalize, rebuild, derived-agent and atomic-write path;
 * the tool-less guest spec, including its model fallback and install order;
 * the conductor prompts and grant tuples, which are spec bytes too.
@@ -56,7 +56,7 @@ BASE_SURFACE: dict[str, str] = {
     "GUEST_AGENT_PROMPT": "value str 9f07b9e7c179fff5",
     "KIRO_AGENTS_DIR": "value host",
     "MCP_PATH_HINT": "value str 2c0b855124e13185",
-    "OWNED_KIRO_AGENT_FILES": "value tuple b6cbb50d931ce6c1",
+    "OWNED_KIRO_AGENT_FILES": "value tuple dd392f80c6781ad5",
     "Path": "class Path",
     "REQUIRED_KIRO_AGENT_FILES": "value tuple d3a5d201c05d5c9b",
     "SecurityEvent": "class SecurityEvent",
@@ -115,7 +115,7 @@ BASE_SURFACE: dict[str, str] = {
     # catalog. The readable pin for this tuple is
     # ``test_the_member_grants_extend_the_conductor_grants``, which spells the whole set
     # out; this digest is the byte-level half and moves with it.
-    "_MEMBER_PANEL_GRANTS": "value tuple fe49f85f5f3b65f6",
+    "_MEMBER_PANEL_GRANTS": "value tuple 5d490a048710e572",
     "_NATIVE_PROMPT_STUB": "value str cf6d81ff1d0b3797",
     "_PIPELINE_CONDUCTOR_AGENT_FILENAME": "value str 3b5e111de6d1d305",
     "_PIPELINE_CONDUCTOR_CORE_GRANTS": "value tuple 1ad9ce711e266082",
@@ -207,6 +207,8 @@ BASE_SURFACE: dict[str, str] = {
     "_install_ledger_conductor_agent": "callable _install_ledger_conductor_agent(*, clean: 'bool' = False) -> 'bool'",
     "_install_lite_agent_fallback": "callable _install_lite_agent_fallback() -> 'None'",
     "_install_pipeline_conductor_agent": "callable _install_pipeline_conductor_agent(*, clean: 'bool' = False) -> 'bool'",
+    "_install_mate_conductor_agent": "callable _install_mate_conductor_agent() -> 'None'",
+    "_install_mate_worker_agent": "callable _install_mate_worker_agent() -> 'None'",
     "_install_research_agent": "callable _install_research_agent() -> 'None'",
     "_install_security_conductor_agent": "callable _install_security_conductor_agent(*, clean: 'bool' = False) -> 'bool'",
     "_install_team_lead_agent": "callable _install_team_lead_agent() -> 'None'",
@@ -930,6 +932,7 @@ def test_the_member_grants_extend_the_conductor_grants_in_order() -> None:
         "@kirocrew-panel/dashboard_preview",
         "@kirocrew-panel/dashboard_apply",
         "@kirocrew-panel/dashboard_rollback",
+        "@kirocrew-panel/dashboard_snapshot",
     )
 
 

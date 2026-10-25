@@ -13,6 +13,8 @@ import { usePressActivation } from '../../hooks/usePressActivation'
 import { useActionShortcutHint } from '../../hooks/useActionShortcutHint'
 import { IS_MAC } from '../../hooks/useKeyboardShortcuts'
 import type { ChatInputProps } from './props'
+import type { MemorySource } from '../../lib/agentMemorySource'
+import { withMemorySource } from '../../utils/agentLabel'
 import type { useAutoCompactThreshold } from './autoCompact'
 import { uiLocation } from '../../uiLocations/uiLocation'
 import { useGuidePredicate } from '../../guide/guidePredicates'
@@ -148,10 +150,11 @@ export function SessionControlChips({ sessionControls, shelfCompact, onSessionCo
  *  would pin `var(--mono)`, which Settings → Display → Font Family writes only
  *  for OpenDyslexic, so for every other family it would make the shelf ignore
  *  the user's typeface. */
-export function AgentChip({ agentName, agentLabel, agentIsInheritedDefault, agentSource, isRunning, shelfCompact, onAgentClick }: {
+export function AgentChip({ agentName, agentLabel, agentIsInheritedDefault, agentMemory, agentSource, isRunning, shelfCompact, onAgentClick }: {
   agentName: string
   agentLabel?: string
   agentIsInheritedDefault?: boolean
+  agentMemory?: MemorySource | null
   agentSource?: string
   isRunning: boolean
   shelfCompact: boolean
@@ -165,11 +168,15 @@ export function AgentChip({ agentName, agentLabel, agentIsInheritedDefault, agen
   // because the marker alone reads as opaque. No glyph, no
   // layout change -- text on demand. A pinned chip keeps the plain
   // switch hint; it has nothing to explain.
+  // A same-name crewmate and custom agent read alike, so the chip says which
+  // memory this session runs on, in the visible text and the spoken name both.
+  // Null for every other agent, which leaves both unchanged.
+  const spokenName = withMemorySource(agentName, agentMemory ?? null)
   const label = isRunning
     ? i18nT('components.chatInput.stop_the_current_response_to_switch_agents')
     : agentIsInheritedDefault
-      ? i18nT('components.chatInput.agent_inherited_default', { name: agentName })
-      : i18nT('components.chatInput.agent', { name: agentName })
+      ? i18nT('components.chatInput.agent_inherited_default', { name: spokenName })
+      : i18nT('components.chatInput.agent', { name: spokenName })
   // The chip is the only visible place an agent switch happens, so it is where
   // the keyboard route to the same switch gets taught: a second tooltip line
   // naming the cycle chords. Spelled by a catalog string per platform, so it
@@ -191,7 +198,7 @@ export function AgentChip({ agentName, agentLabel, agentIsInheritedDefault, agen
       aria-keyshortcuts={!isRunning && nextHint ? nextHint.ariaKeyshortcuts : undefined}
     >
       <Bot size={13} className="shrink-0 opacity-70" />
-      {!shelfCompact && <span className="truncate max-w-[160px]">{agentLabel ?? agentName}</span>}
+      {!shelfCompact && <span className="truncate max-w-[160px]">{withMemorySource(agentLabel ?? agentName, agentMemory ?? null)}</span>}
     </button>
   )
 }
@@ -231,11 +238,15 @@ export function ContextUsageControl({ contextPct, contextUsedTokens, contextWind
   const readout = shelfCompact
     ? composeContextReadout(contextPct, used, win, { approx, showPct: showContextPct, showTokens: !!showContextTokens && !showContextPct })
     : composeContextReadout(contextPct, used, win, { approx, showPct: showContextPct, showTokens: showContextTokens })
+  // Opens on the mouse press (usePressActivation); keyboard and touch on click.
+  // `useContextPopover`'s outside-press dismiss skips `ctxWrapRef`, which holds
+  // this button, so a press while open toggles it closed.
+  const bindPress = usePressActivation()
   return (
   <div ref={ctxWrapRef} className="relative flex items-center">
     <button
       className={`inline-flex items-center h-7 px-2.5 rounded-md transition-colors border-none cursor-pointer ${ctxPopoverOpen ? 'bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))]' : 'bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))]'}`}
-      onClick={() => setCtxPopoverOpen(o => !o)}
+      {...bindPress(() => setCtxPopoverOpen(o => !o))}
       title={contextTip(contextPct)}
       aria-label={i18nT('components.chatInput.context_usage')}
       {...uiLocation('composer.context-usage')}
@@ -354,20 +365,27 @@ export function ModelChip({ modelName, modelIsJevRouted, modelIsInheritedDefault
   const effortShown = effortIsDefault
     ? i18nT('components.reasoningEffortDropdown.default_with_level', { level: effortLabel(reasoningEffort || '') })
     : effortLabel(reasoningEffort || '')
-  // The chip is disabled while a response runs: a guide to it says so.
+  // The chip stays enabled while a response runs -- a pick then is committed
+  // and applied from the next message (the gateway answers `deferred: true`;
+  // the running reply finishes on the model it started with), the project
+  // chip's contract. The predicate is still reported from here because the
+  // send control's location requires it; it no longer gates this chip.
   useGuidePredicate('no_response_running', !isRunning)
   const effortSuffix = hasEffort
     ? ` · ${i18nT('components.reasoningEffortDropdown.reasoning_effort')}: ${effortShown}`
     : ''
-  const modelChipLabel = `${isRunning
-    ? i18nT('components.chatInput.stop_the_current_response_to_switch_model')
-    : modelIsJevRouted
-      ? i18nT('pages.chatPage.model_auto_jev_description')
-      : modelIsInheritedDefault
-        ? i18nT('components.chatInput.model_inherited_default', { name: modelName })
-        : modelIsAutoChosen
-          ? `${i18nT('components.chatInput.model_2', { name: modelName })} · ${i18nT('components.jobForm.auto')}`
-          : i18nT('components.chatInput.model_2', { name: modelName })}${effortSuffix}`
+  const modelChipName = modelIsJevRouted
+    ? i18nT('pages.chatPage.model_auto_jev_description')
+    : modelIsInheritedDefault
+      ? i18nT('components.chatInput.model_inherited_default', { name: modelName })
+      : modelIsAutoChosen
+        ? `${i18nT('components.chatInput.model_2', { name: modelName })} · ${i18nT('components.jobForm.auto')}`
+        : i18nT('components.chatInput.model_2', { name: modelName })
+  // While a response runs the name is followed by the one line that matters
+  // then: a pick applies from the next message, as the project chip says.
+  const modelChipLabel = `${modelChipName}${effortSuffix}${isRunning
+    ? `\n${i18nT('components.chatInput.model_switch_applies_next_turn')}`
+    : ''}`
   // Opens on the mouse press (usePressActivation); keyboard and touch on click.
   const bindPress = usePressActivation()
   const press = bindPress<HTMLButtonElement>(el => {
@@ -387,7 +405,6 @@ export function ModelChip({ modelName, modelIsJevRouted, modelIsInheritedDefault
       press.onPointerDown(e)
     }}
     onClick={press.onClick}
-    disabled={isRunning}
     data-testid="composer-model-chip"
     {...uiLocation('chat.model-picker')}
     // Inherited default: the explanation rides on hover (title) AND keyboard

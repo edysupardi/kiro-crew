@@ -57,6 +57,7 @@ interface LayerArgs {
   sidebarClassName?: string
   sidebarStyle?: CSSProperties
   confirmDiscardDraft?: () => Promise<boolean>
+  submitSentIds?: ReadonlySet<string>
 }
 const layerArgs: LayerArgs[] = []
 /** Which layer's composer received each submit (`stacked` / `full`), with the text. */
@@ -76,6 +77,7 @@ const draftSlotClears: string[] = []
 // sizing — so each renders a distinguishable marker.
 vi.mock('../components/FileArtifactComments', async () => {
   const { useState } = await import('react')
+  const { pendingSubmitComments } = await import('../lib/commentFilter')
   function useFileArtifactComments(args: LayerArgs) {
     layerArgs.push(args)
     const [sidebarOpen, setSidebarOpen] = useState(args.sidebarDefaultOpen ?? true)
@@ -101,6 +103,8 @@ vi.mock('../components/FileArtifactComments', async () => {
       sidebarOpen,
       commentCount: stubComments.length,
       comments: stubComments,
+      // The real hook's batch rule, so the panel's count runs it for real.
+      pendingSubmit: args.submitSentIds ? pendingSubmitComments(stubComments, args.submitSentIds) : [],
       activeCommentId: null,
       scrollNonce: 0,
       unreadRootIds: new Set<string>(),
@@ -689,6 +693,29 @@ describe('ArtifactPanel', () => {
       expect(screen.queryByRole('button', { name: 'Submit' })).toBeNull()
     })
 
+    it('hands no sent-id set to the comment layers without a submit channel', async () => {
+      // No Submit bar means nothing for a row marker to answer to.
+      stubComments = [mkComment()]
+      renderPanel()
+      await screen.findByText(NAME)
+      expect(layerArgs.length).toBeGreaterThan(0)
+      expect(layerArgs.every(a => a.submitSentIds === undefined)).toBe(true)
+    })
+
+    it('hands both comment layers the sent-id set the count is filtered by', async () => {
+      // The layers mark rows from this set, so after a submit it must carry the
+      // batch: a row still marked after its comment went would contradict the bar.
+      const onSubmitComments = vi.fn()
+      stubComments = [mkComment()]
+      renderPanel({ onSubmitComments })
+      await screen.findByText(NAME)
+      const latest = () => layerArgs.slice(-2)
+      expect(latest().map(a => a.sidebarClassName ? 'stacked' : 'full').sort()).toEqual(['full', 'stacked'])
+      expect(latest().every(a => a.submitSentIds instanceof Set && a.submitSentIds.size === 0)).toBe(true)
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+      await waitFor(() => expect(latest().every(a => a.submitSentIds?.has(mkComment().id))).toBe(true))
+    })
+
     it('hides the submit bar when every comment is agent-authored', async () => {
       stubComments = [mkComment({ id: 'a1', thread_id: 'a1', is_agent: true, author: 'kiro' })]
       renderPanel({ onSubmitComments: vi.fn() })
@@ -798,6 +825,28 @@ describe('ArtifactPanel', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
       await act(async () => { vi.advanceTimersByTime(SUBMIT_GUARD_MS) })
       expect(screen.getByText('1 comment to send to this chat')).toBeInTheDocument()
+    })
+
+    it('hands back the typed instruction on a refused send, leaving the notice to the chat host', async () => {
+      // Before #12320 the typed instruction was cleared with no way back. The
+      // chat host reports its own send failure, so the bar adds no second
+      // notice that could disagree with it.
+      const onSubmitComments = vi.fn().mockResolvedValue(false)
+      stubComments = [mkComment()]
+      renderPanel({ onSubmitComments })
+      await screen.findByText(NAME)
+      fireEvent.click(screen.getByRole('button', { name: 'Add overall instruction' }))
+      fireEvent.change(await screen.findByLabelText('Overall instruction'), { target: { value: 'keep it short' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+      await act(async () => {})
+      expect(screen.getByLabelText('Overall instruction')).toHaveValue('keep it short')
+      expect(screen.queryByRole('alert')).toBeNull()
+
+      // A delivered retry carries the instruction.
+      onSubmitComments.mockResolvedValue(undefined)
+      await act(async () => { vi.advanceTimersByTime(SUBMIT_GUARD_MS) })
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+      expect(onSubmitComments.mock.calls[1][0]).toContain('keep it short')
     })
 
     it('threads an extra instruction through the message and clears it after submit', async () => {

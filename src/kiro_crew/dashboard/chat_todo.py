@@ -19,6 +19,7 @@ from aiohttp import web
 from kiro_crew.dashboard.chat_folders import member_slot_write_refused
 from kiro_crew.dashboard.handlers._shared import read_bounded_json
 from kiro_crew.dashboard.relay_archive import relay_archive_refusal
+from kiro_crew.dashboard.slot_ownership import slot_not_found
 from kiro_crew.dashboard.state import DashboardState, _fold_line_breaks
 from kiro_crew.dashboard.token_auth import (
     effective_request_app,
@@ -43,7 +44,7 @@ async def api_chat_slot_todo(request: web.Request) -> web.Response:
     name = request.match_info["slot"]
     slot = state._slots.get(name)
     if not slot:
-        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+        return slot_not_found()
     if (refusal := refuse_unattributable_caller(state, request, _OPERATION)) is not None:
         return refusal
     if (refusal := member_slot_write_refused(state, request, slot, _OPERATION)) is not None:
@@ -61,7 +62,7 @@ async def api_chat_slot_todo(request: web.Request) -> web.Response:
             resources=f"slot={slot.key}",
             error="checklist rows are ticked by the person, not by an app",
         )
-        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+        return slot_not_found()
     # A relay archive is read-only. AFTER the app fence, so an app caller cannot
     # tell an archive (409) from any other slot it does not own (404).
     if (refusal := relay_archive_refusal(slot)) is not None:
@@ -89,7 +90,7 @@ async def api_chat_slot_todo(request: web.Request) -> web.Response:
     # the write. A slot popped and recreated under the same name inside it
     # would take a stale write under the replacement's key; refuse instead.
     if state._slots.get(name) is not slot:
-        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+        return slot_not_found()
     payload = slot.todo_payload()
     if payload is None:
         return web.json_response(
@@ -106,7 +107,7 @@ async def api_chat_slot_todo(request: web.Request) -> web.Response:
     # rather than ticking (and telling the agent not to redo) the wrong one.
     #
     # CLICK IDENTITY IS RAW, not canonicalized. The pin/override matching in
-    # state.py canonicalizes (folds line breaks AND neutralizes markers) so a
+    # state_parts/slot_todo.py canonicalizes (folds line breaks AND neutralizes markers) so a
     # row the AGENT rebuilds from the recovery block still matches. That is the
     # wrong equality here: the neutralizers are lossy, so two DIFFERENT task
     # texts can collapse to one canonical string (a real "[Task checklist]" line

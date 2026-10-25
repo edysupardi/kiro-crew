@@ -42,7 +42,7 @@ import {
   COLLAPSED_TREE_WIDTH,
   PDF_WIDTH_KEY, MIN_PDF_WIDTH, maxPdfWidth, defaultPdfWidth,
   CHAT_WIDTH_KEY, DEFAULT_CHAT_WIDTH, MIN_CHAT_WIDTH, MAX_CHAT_WIDTH, CHAT_OPEN_KEY,
-  maxChatWidth,
+  maxChatWidth, projectQueryKey,
 } from './lib'
 import { loadColumnWidth, loadColumnCollapsed } from '../../lib/columnWidth'
 import { safeSetItem } from '../../utils/safeStorage'
@@ -267,7 +267,7 @@ export default function PapyrusPage() {
   // ── Project metadata ──────────────────────────────────────────────────────
 
   const projectQuery = useQuery({
-    queryKey: ['papyrus', 'project', project],
+    queryKey: projectQueryKey(project as string),
     queryFn: () => papyrusApi.getProject(project as string),
     enabled: !!project,
     retry: false,
@@ -376,7 +376,7 @@ export default function PapyrusPage() {
   })
 
   const invalidateFiles = useCallback(
-    () => queryClient.invalidateQueries({ queryKey: ['papyrus', 'project', project] }),
+    () => queryClient.invalidateQueries({ queryKey: projectQueryKey(project as string) }),
     [queryClient, project],
   )
 
@@ -988,11 +988,16 @@ export default function PapyrusPage() {
     if (trimmed) createFileMutation.mutate(trimmed)
   }, [createFileMutation])
 
-  const onDeleteFileClick = useCallback((path: string) => {
-    if (window.confirm(i18nT('apps.papyrus.workspace.delete_file_confirm', { file: path }))) {
+  const onDeleteFileClick = useCallback(async (path: string) => {
+    if (
+      await confirm({
+        title: i18nT('apps.papyrus.workspace.delete_file_confirm', { file: path }),
+        confirmLabel: i18nT('apps.papyrus.fileTree.delete_file', { file: path }),
+      })
+    ) {
       deleteFileMutation.mutate(path)
     }
-  }, [deleteFileMutation])
+  }, [deleteFileMutation, confirm])
 
   if (!project) {
     return (
@@ -1006,14 +1011,24 @@ export default function PapyrusPage() {
   }
 
   return (
-    <div className="flex flex-col flex-1 min-h-0" data-testid="papyrus-workspace">
+    <div
+      className={`flex flex-col flex-1 ${isMobile ? 'min-h-0' : ''}`}
+      data-testid="papyrus-workspace"
+    >
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-border bg-card shrink-0">
         <Btn onClick={closeProject}>
           <ArrowLeft className="lucide-inline" />
           {i18nT('apps.papyrus.workspace.papers')}
         </Btn>
-        <span className="text-[13px] font-medium text-text-strong truncate max-w-[12rem]">{project}</span>
+        {/* The paper's resolved title, matching the row that opened it — NOT the
+            directory name, which is the app's key and reads as an id for a
+            cloned paper. `||` rather than `??`: the fallback must also catch a
+            title that resolved to the empty string, and a header is not the
+            place to render `undefined`. */}
+        <span className="text-[13px] font-medium text-text-strong truncate max-w-[12rem]">
+          {detail?.title || project}
+        </span>
 
         {/* The picker is a `<button>` now, not a `<select>`, and HTML-AAM
             computes a button's accessible name from its own content — a
@@ -1027,25 +1042,48 @@ export default function PapyrusPage() {
             `MAX_PROJECT_FILES`), so they are nested paths sharing a common
             prefix — a Radix Select's first-letter typeahead cannot separate
             `chapters/01.tex` from `chapters/02.tex`. */}
-        <span className="flex items-center gap-1.5 text-[12px] text-muted">
-          {i18nT('apps.papyrus.workspace.main_document')}
-          <SearchableSelect
-            options={mainOptions}
-            value={mainFile}
-            onChange={file => setMainMutation.mutate(file)}
-            disabled={setMainMutation.isPending || mainCandidates.length === 0}
-            aria-label={i18nT('apps.papyrus.workspace.main_document')}
-            // The trigger is `w-full`, so it needs a definite flex basis in this
-            // wrapping toolbar; a path too long for it truncates inside the span.
-            style={{ flex: '0 0 14rem' }}
-          />
+        {/* `max-w-full` + `flex-wrap`: on a narrow screen (320px leaves ~296px
+            inside the toolbar) the label and the 224px select do not fit side by
+            side, so the group is capped at the row and the select drops under
+            its label instead of pushing the row sideways. */}
+        <span className="flex flex-wrap items-center gap-1.5 shrink-0 max-w-full text-[12px] text-muted">
+          {/* `whitespace-nowrap`: the label is a flex item beside a select of
+              fixed width, so every bit of squeeze landed on the text — which
+              broke "Main document" across two lines and grew the whole toolbar
+              row. Refusing the break makes the toolbar wrap this group as a unit
+              instead, which is what `flex-wrap` is for. */}
+          <span className="whitespace-nowrap">
+            {i18nT('apps.papyrus.workspace.main_document')}
+          </span>
+          {/* The select's width lives HERE, as a definite `width` on a wrapper,
+              and NOT as a `flex-basis` on the trigger.
+
+              The trigger is `w-full`, so it needs its width from somewhere. When
+              that somewhere was `flex: 0 0 14rem` on the trigger itself, this
+              span sized to the trigger's TEXT (measured at 202px against 315px
+              of content) and the 224px trigger painted 113px past the span, over
+              the file status beside it — a percentage width is circular
+              while the parent is being measured, so the basis never reached the
+              parent's intrinsic size. A definite width on a plain wrapper is not
+              circular, so the span measures the full group. */}
+          <span className="flex w-56 max-w-full shrink-0">
+            <SearchableSelect
+              options={mainOptions}
+              value={mainFile}
+              onChange={file => setMainMutation.mutate(file)}
+              disabled={setMainMutation.isPending || mainCandidates.length === 0}
+              aria-label={i18nT('apps.papyrus.workspace.main_document')}
+            />
+          </span>
         </span>
 
-        <span className="text-[12px] text-muted truncate">
-          {dirty
-            ? i18nT('apps.papyrus.workspace.editing_unsaved', { file: currentFile })
-            : i18nT('apps.papyrus.workspace.editing', { file: currentFile })}
-        </span>
+        {currentFile && (dirty || currentFile !== mainFile) && (
+          <span className="text-[12px] text-muted truncate">
+            {dirty
+              ? i18nT('apps.papyrus.workspace.editing_unsaved', { file: currentFile })
+              : i18nT('apps.papyrus.workspace.editing', { file: currentFile })}
+          </span>
+        )}
 
         {hasConflict && (
           // The conflict has to be VISIBLE and have an exit. A silent read-only editor
@@ -1130,13 +1168,13 @@ export default function PapyrusPage() {
       <ErrorNotice className="mx-3 mt-2 animate-rise" message={error} onDismiss={() => setError('')} />
 
       {/* Workspace */}
-      <div className={`flex flex-1 min-h-0 ${isMobile ? 'flex-col' : ''}`}>
+      <div className={`flex flex-1 ${isMobile ? 'min-h-0 flex-col' : ''}`}>
         {/* Source column: file tree + editor + status bar (+ diagnostics).
             `flex-1` on desktop rather than a fixed share: the PDF and co-author
             columns own persisted widths, so the editor takes what is left and a
             wider window grows the text being written instead of rescaling a
             preview the user just sized. */}
-        <div className={`flex flex-col flex-1 min-h-0 min-w-0 ${narrowChat ? 'hidden' : ''}`}>
+        <div className={`flex flex-col flex-1 min-w-0 ${isMobile ? 'min-h-0' : ''} ${narrowChat ? 'hidden' : ''}`}>
           {/* Narrow: the tree is reached from the TOP, so it reserves no
               horizontal space and the editor gets the full width. */}
           {isMobile && (
@@ -1149,7 +1187,7 @@ export default function PapyrusPage() {
               {i18nT('apps.papyrus.fileTree.files')}
             </Btn>
           )}
-          <div className={`flex flex-1 min-h-0 ${isMobile ? 'flex-col' : ''}`}>
+          <div className={`flex flex-1 ${isMobile ? 'min-h-0 flex-col' : 'min-h-[180px] [contain:size]'}`}>
             {/* Height-bounded while stacked, or the tree pushes the editor off
                 the pane. `vh` rather than a percentage: no ancestor here has a
                 definite height, so a percentage max-height would not resolve. */}
@@ -1280,13 +1318,15 @@ export default function PapyrusPage() {
                 animate={{ height: 'auto', opacity: 1 }}
                 exit={{ height: 0, opacity: 0 }}
                 transition={{ duration: 0.16 }}
-                className="border-t border-border bg-card overflow-hidden shrink-0 max-h-56"
+                className="border-t border-border bg-card overflow-hidden shrink-0"
               >
-                <DiagnosticsList
-                  diagnostics={diagnostics}
-                  log={compileLog}
-                  onJumpToLine={line => editorRef.current?.jumpToLine(line)}
-                />
+                <div className="max-h-56 overflow-x-hidden overflow-y-auto">
+                  <DiagnosticsList
+                    diagnostics={diagnostics}
+                    log={compileLog}
+                    onJumpToLine={line => editorRef.current?.jumpToLine(line)}
+                  />
+                </div>
               </motion.div>
             )}
           </AnimatePresence>
@@ -1343,7 +1383,7 @@ export default function PapyrusPage() {
               // drag reads as broken. It stays animated for the open/close it was
               // written for.
               transition={{ duration: chat.dragging ? 0 : 0.18 }}
-              className={`min-h-0 overflow-hidden ${isMobile ? 'flex-1' : 'shrink-0'}`}
+              className={`min-h-0 overflow-hidden ${isMobile ? 'flex-1' : 'shrink-0 [contain:size]'}`}
             >
               {/* BOTH widths have to move together. This wrapper is animated and
                   content-sized, so a percentage on the child alone resolves

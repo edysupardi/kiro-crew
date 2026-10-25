@@ -89,8 +89,8 @@ class TestSlotDetailPaginationPersistedSuffix:
 
         The redaction is asymmetric in a session that was never restored. The save
         redacts every non-user role (``chat_persistence.py:1282-1284``) while the
-        window keeps the text verbatim (``state.py:2107``), so the disk side is
-        redacted and the window side is raw. Redacting only the disk side cannot
+        window keeps the text verbatim (``state_parts/slot_transcript.py`` ``append``), so the disk
+        side is redacted and the window side is raw. Redacting only the disk side cannot
         converge on that pair, because redacting an already-redacted body just
         reproduces it. The row then reads as un-flushed, the walk stops, and the
         persisted suffix is appended a second time.
@@ -477,8 +477,8 @@ class TestSlotDetailPaginationPersistedSuffix:
         rendered order is wrong.
 
         Resolution is an in-place edit of the row's ``cls`` JSON
-        (``state.py`` ``_mark_permission_resolved``), so the row stays in the window
-        and its position cannot distinguish it.
+        (``state_parts/transcript_rows.py`` ``_mark_permission_resolved``), so the row stays in the
+        window and its position cannot distinguish it.
         """
         import json as _json
 
@@ -535,8 +535,8 @@ class TestSlotDetailPaginationPersistedSuffix:
         """A live ``chunk`` row must reach the bounded response.
 
         ``_prepare_messages`` does not discard chunk rows, it ACCUMULATES them and
-        emits one ``streaming`` row (``chat_utils.py:1651-1660``). That is the only
-        way in-flight assistant text reaches the client through this endpoint,
+        emits one ``streaming`` row (``chat_utils_display._prepare_messages_scoped``).
+        That is the only way in-flight assistant text reaches the client through this endpoint,
         because the client filters raw ``chunk`` itself (``store/chat/wire.ts``
         ``SKIP_ROLES``). So skipping chunk rows in the owed set does not merely omit
         noise — it destroys the partial answer.
@@ -589,7 +589,7 @@ class TestSlotDetailPaginationPersistedSuffix:
 
         The scan runs in a worker thread, so an event-loop append can trim the
         front of the window and bump ``_disk_older_count``
-        (``state.py:2191-2200``) while the snapshot is being taken. Pairing a
+        (``state_parts/slot_transcript.py`` ``append``) while the snapshot is being taken. Pairing a
         PRE-trim window with a POST-trim count shortens ``window_disk``, hides the
         trimmed rows' ids, and re-appends rows the disk read already returned.
 

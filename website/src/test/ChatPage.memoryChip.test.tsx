@@ -3,7 +3,7 @@
  * while the welcome state shows (empty session). WelcomeView is
  * mocked to nothing here, so any chip found comes from ChatPage's own slot.
  */
-import { describe, it, expect, vi, onTestFinished } from 'vitest'
+import { beforeEach, describe, it, expect, vi, onTestFinished } from 'vitest'
 import { render, screen, act, fireEvent, waitFor, cleanup } from '@testing-library/react'
 import { Provider } from 'react-redux'
 import { MemoryRouter } from 'react-router-dom'
@@ -73,6 +73,19 @@ import { __resetComposerSendHoldsForTests, isComposerSendHeld, takeComposerArriv
 // same reason the app does. (The miss degrades safely to the surface-free
 // sentence, which is what the unregistered-surface case below asserts.)
 import '../surfaces/builtins'
+
+beforeEach(() => {
+  createChatSlot.mockReset()
+  deleteChatSlot.mockReset().mockResolvedValue(undefined)
+  vi.mocked(api.chatSlotDetail).mockReset().mockImplementation(async () => ({
+    messages: detail.messages,
+    running: false,
+    has_more: false,
+    total: detail.messages.length,
+  }))
+  vi.mocked(api.uploadFiles).mockReset().mockResolvedValue({ paths: [] })
+  switchTimeout.mockReset().mockReturnValue(15_000)
+})
 
 type Slot = { messages: Msg[]; mode?: string; slotKeys?: string[] }
 
@@ -262,6 +275,28 @@ describe('memory chip above the composer', () => {
     await waitFor(() => expect(deleteChatSlot).toHaveBeenCalledWith('slot-b'), SWITCH_CHAIN_WAIT)
     expect(deleteChatSlot).not.toHaveBeenCalledWith('slot-a')
     expect(store.getState().chat.activeSlot).toBe('slot-x')
+  })
+
+  it('abandons the switch, keeping the old session, when the user goes away and back mid-create', async () => {
+    let resolveCreate: (v: unknown) => void = () => {}
+    createChatSlot.mockImplementationOnce(() => new Promise(r => { resolveCreate = r }))
+    deleteChatSlot.mockClear()
+    const store = await renderWith({ messages: [], slotKeys: ['slot-a', 'slot-x'] })
+
+    fireEvent.click(screen.getByText('Choose memory mode').closest('button')!)
+    fireEvent.click(screen.getByText('Incognito').closest('button')!)
+    await waitFor(() => expect(createChatSlot).toHaveBeenCalled(), SWITCH_CHAIN_WAIT)
+
+    // The user opens another session and returns to A before the create ends.
+    await act(async () => { await store.dispatch(switchSlot('slot-x')) })
+    await act(async () => { await store.dispatch(switchSlot('slot-a')) })
+
+    await act(async () => { resolveCreate({ key: 'slot-b', messages: 0, running: false, memory_mode: 'incognito' }) })
+
+    await waitFor(() => expect(deleteChatSlot).toHaveBeenCalledWith('slot-b'), SWITCH_CHAIN_WAIT)
+    expect(deleteChatSlot).not.toHaveBeenCalledWith('slot-a')
+    expect(settledSwitches).not.toContain('slot-b')
+    expect(store.getState().chat.activeSlot).toBe('slot-a')
   })
 
   it('reports a failed cleanup of the abandoned replacement', async () => {

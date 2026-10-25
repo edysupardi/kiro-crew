@@ -165,10 +165,42 @@ def _canonical_glob(pattern: str, project_dir: str | Path | None = None) -> str:
     return _glob_with_prefix(pattern, _canonical_prefix(pattern, project_dir))
 
 
+def _spelled_canonically(pattern: str, project_dir: str | Path | None) -> bool:
+    """True when *pattern*'s literal prefix already resolves to itself (POSIX only).
+
+    :func:`_canonical_glob` then returns *pattern* whether the sensitive-path gate
+    admits the prefix or refuses it, so the gate's pooled check can be skipped
+    without changing the result. The ``realpath`` here is the one
+    ``validate_file_path`` runs on the same thread. Windows, and any UNC-shaped
+    prefix, always take the gate: ``realpath`` on a UNC prefix is the SMB probe the
+    gate screens first. A project-local prefix is never resolved, as in
+    :func:`_canonical_prefix`. Nothing is stored, so a prefix that later becomes
+    a link is caught on the next call.
+    """
+    from kiro_crew import skills as sk  # circular import: the facade imports this module
+
+    if os.name == "nt":
+        return False
+    parts, literal = _literal_split(pattern)
+    if literal == 0:
+        return False
+    prefix = str(Path(*parts[:literal]))
+    if sk.hooks_module.is_unc_shape(prefix):
+        return False
+    try:
+        if project_dir and sk._within_any(os.path.abspath(prefix), (os.path.abspath(project_dir),)):
+            return False
+        return _glob_with_prefix(pattern, os.path.realpath(os.path.expanduser(prefix))) == pattern
+    except (OSError, ValueError):
+        return False
+
+
 def _with_canonical_globs(globs: list[str], project_dir: str | Path | None = None) -> list[str]:
     """*globs* plus each one's canonical spelling, original order first, no duplicates."""
     out = list(globs)
     for glob in globs:
+        if _spelled_canonically(glob, project_dir):
+            continue
         canonical = _canonical_glob(glob, project_dir)
         if canonical not in out:
             out.append(canonical)
@@ -852,8 +884,67 @@ def _iter_visible(
     return [
         (name, skill_file, within)
         for name, skill_file, within in loader._iter(project_dir)
-        if loader._owning_app(name, skill_file) not in disabled_apps
+        if loader._owning_app(name, skill_file, within) not in disabled_apps
     ]
+
+
+def _alias_selected(
+    entries: list[_ScopedSkillEntry],
+    selected: list[_ScopedSkillEntry],
+    only: list[str],
+    heads: dict[str, str | None],
+    canonicals: dict[str, str],
+    loader_roots: list[Path],
+    real_roots: list[str],
+) -> list[_ScopedSkillEntry]:
+    """Catalog rows a mapping names through a second link to the same skill.
+
+    An app skill is linked twice under the skills directory, at
+    ``<app>/<skill>`` and usually at a flat ``<skill>``, and the catalog walk
+    keeps only the spelling it reaches first. For a skill whose name sorts
+    before the app's that is the flat link, which ``<app>/*/SKILL.md`` alone
+    does not match. A row the globs missed is still selected when the path one level
+    under the mapping's literal prefix, named like the row's directory,
+    matches the mapping and resolves to the row's target. Only prefixes inside
+    a loader-owned root, spelled or validated and resolved, are tried: the
+    catalog walk already resolved those links, and a project tree is never
+    resolved before consent.
+    """
+    from kiro_crew import skills as sk  # circular import: the facade imports this module
+
+    roots = (*(os.path.abspath(root) for root in loader_roots), *real_roots)
+    candidates: list[tuple[Path, list[str]]] = []
+    for pattern in only:
+        parts, literal = _literal_split(pattern)
+        if literal == 0 or literal != len(parts) - 2 or parts[-1] != "SKILL.md":
+            continue
+        globs = list(dict.fromkeys([pattern, canonicals[pattern]]))
+        for prefix in dict.fromkeys([str(Path(*parts[:literal])), heads[pattern]]):
+            if prefix and sk._within_any(os.path.abspath(prefix), roots):
+                candidates.append((Path(prefix), globs))
+    if not candidates:
+        return []
+    taken = {id(entry) for entry in selected}
+    found: list[_ScopedSkillEntry] = []
+    for entry in entries:
+        if id(entry) in taken or entry.project_root is not None:
+            # A confined project row is never resolved: its path may be a
+            # swapped link or junction, and project paths stay lexical.
+            continue
+        path = Path(entry[1])
+        target: str | None = None
+        for base, globs in candidates:
+            alias = base / path.parent.name / "SKILL.md"
+            if not any(fnmatch.fnmatch(str(alias), g) for g in globs):
+                continue
+            if not os.path.lexists(alias):
+                continue
+            if target is None:
+                target = os.path.normcase(os.path.realpath(path))
+            if os.path.normcase(os.path.realpath(alias)) == target:
+                found.append(entry)
+                break
+    return found
 
 
 def _scoped_entries(
@@ -892,6 +983,9 @@ def _scoped_entries(
     # rows or probe a project skills junction before consent admission.
     excluded = tuple(
         dict.fromkeys([*(os.path.abspath(path) for path in catalog_roots), *real_roots])
+    )
+    selected.extend(
+        _alias_selected(entries, selected, only, heads, canonicals, loader_roots, real_roots)
     )
     # Mapping paths are spec-owned, never caller-supplied read keys. Walk the
     # literal prefix through the same provider/sensitive-path fence as the
@@ -949,8 +1043,20 @@ def _iter_uncached(
 
     # Unconfined (None): the global tree may legitimately hold app-registered
     # symlinks resolving into a provider root outside it.
+    #
+    # warn_outside_links: this is the catalog base walk, the one surface that
+    # can say a direct-child link in the skills dir was dropped from the whole
+    # catalog, so it is the only caller that turns the outside-root warning on.
+    # It passes the resolved ``skills.extra_paths`` as extra_path_roots: a link
+    # whose target is under one of those loads through the extra-path walk
+    # below, so it must not warn — the operator already followed the advice.
+    # Admission and containment are unchanged; only the warning is affected.
+    _extra_real = tuple(os.path.realpath(path) for path in loader._extra_paths)
     results: list[tuple[str, Path, str | None]] = [
-        (name, path, None) for name, path in sk._iter_skill_files(loader._dir)
+        (name, path, None)
+        for name, path in sk._iter_skill_files(
+            loader._dir, warn_outside_links=True, extra_path_roots=_extra_real
+        )
     ]
     seen = {name for name, _, _ in results}
     # (root, confine_to): only the project root is confined — see
@@ -1064,7 +1170,9 @@ def _invalidate_iter_cache(loader: SkillsLoader) -> None:
         loader._request_catalog_refresh(scope)
 
 
-def _owning_app(loader: SkillsLoader, name: str, skill_file: Path) -> str | None:
+def _owning_app(
+    loader: SkillsLoader, name: str, skill_file: Path, within: str | None = None
+) -> str | None:
     """The app whose bundle this skill came from, or ``None``.
 
     Two shapes have to resolve to the same owner, because ``bridges``
@@ -1085,6 +1193,13 @@ def _owning_app(loader: SkillsLoader, name: str, skill_file: Path) -> str | None
     Path-shaped, not manifest-keyed, on purpose: it must answer for a
     third-party app just as well as a builtin, and the registration layout
     is the one thing every app shares.
+
+    A skill whose path names no app may name one itself in an ``app:``
+    frontmatter line. An app's skill shipped in ``builtin_skills/`` needs it:
+    the builtin sync copies it into the skills directory, so neither shape
+    above sees it. The line can only withhold the skill that carries it. A
+    confined project skill (*within* set) belongs to its repository, so its
+    frontmatter is not read here.
     """
     from kiro_crew import skills as sk  # circular import: the facade imports this module
 
@@ -1095,7 +1210,8 @@ def _owning_app(loader: SkillsLoader, name: str, skill_file: Path) -> str | None
         from kiro_crew.apps.manager import apps_dir
 
         real = Path(os.path.realpath(skill_file))
-        root = apps_dir()
+        # Resolved like ``real``: the default data home keeps $HOME's spelling.
+        root = Path(os.path.realpath(apps_dir()))
         if real.is_relative_to(root):
             # <apps root>/<app>/... — the segment directly under the root.
             return real.relative_to(root).parts[0]
@@ -1105,7 +1221,10 @@ def _owning_app(loader: SkillsLoader, name: str, skill_file: Path) -> str | None
             return _builtin_dir_app_name(str(pkg_dir))
     except Exception:
         return None
-    return None
+    if within is not None:
+        return None
+    meta = loader._readable_frontmatter(skill_file, within=None) or {}
+    return meta.get("app", "").strip() or None
 
 
 def _resolve_path(

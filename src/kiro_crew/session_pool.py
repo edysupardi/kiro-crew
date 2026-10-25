@@ -21,6 +21,7 @@ from concurrent.futures import Executor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
+from kiro_crew.agent_sdk.kas_floor_wait import await_kas_floor_verdict
 from kiro_crew.config.loader import resolve_agent_identity
 from kiro_crew.kiro_prerequisite import pre_spawn_identity, spawn_pid, stamp_spawn_identity
 
@@ -166,6 +167,8 @@ class WarmSessionPool:
         self._owner = owner
         self._deps = deps
         self.state = state if state is not None else self._state_from_owner()
+        # Bumped by ``mark_mcp_config_changed``; a fill compares it across its start.
+        self._mcp_config_generation = 0
 
     def _state_from_owner(self) -> WarmPoolState:
         cfg = self._owner._cfg
@@ -273,6 +276,21 @@ class WarmSessionPool:
     @_pool_identity_epoch.setter
     def _pool_identity_epoch(self, value: float) -> None:
         self.state.identity_epoch = value
+
+    def mark_mcp_config_changed(self) -> None:
+        """Note an MCP config write for the fill in flight, if one is.
+
+        The dashboard's live-apply gate marks the providers it can SEE -- the
+        registered sessions and the queued pool -- but the fill loop releases
+        ``_pool_fill_lock`` across each provider start, so a provider between
+        its ``start()`` and its enqueue is in neither snapshot and would join
+        the pool projected from the spec as it was before the write. The
+        fill loop compares this generation across the start and marks such a
+        provider at its enqueue re-check, so its first turn re-sends the
+        projection like every other re-injecting session. A provider that
+        does not re-inject ignores the mark, as it does everywhere else.
+        """
+        self._mcp_config_generation += 1
 
     def mark_identity_epoch(self) -> None:
         """Disqualify every already-queued provider from future claims.
@@ -408,6 +426,9 @@ class WarmSessionPool:
                 # identity change is discarded at the enqueue re-check below
                 # rather than seeded behind the drain, and refused on age at
                 # claim time, whatever order it and the teardown run in.
+                # A defaulted KAS waits (bounded) for the kiro-cli floor first, so a
+                # pooled process is never KAS on a kiro-cli that rejects it.
+                await await_kas_floor_verdict()
                 async with self._pool_fill_lock:
                     factory = self._owner._provider_factory
                     if factory is None or self._warm_pool.qsize() >= self._pool_size:
@@ -422,6 +443,9 @@ class WarmSessionPool:
                     # the warm-pool TTL is 1800 seconds; more importantly, a
                     # start spanning an identity epoch stays pre-epoch.
                     spawn_time = time.monotonic()
+                    # The MCP generation this start projects from; compared at the
+                    # enqueue re-check (``mark_mcp_config_changed``).
+                    mcp_generation = self._mcp_config_generation
                     pre_spawn = await pre_spawn_identity(
                         getattr(self._owner, "spawn_identity_reader", None)
                     )
@@ -459,6 +483,12 @@ class WarmSessionPool:
                         )
                         stale_identity = self._claimed_under_previous_identity(provider, spawn_time)
                         if factory_ok and not stale_identity:
+                            if self._mcp_config_generation != mcp_generation:
+                                # An MCP write landed while this provider started,
+                                # after the gate's snapshots could include it.
+                                mark = getattr(provider, "mark_mcp_config_changed", None)
+                                if callable(mark):
+                                    mark()
                             self._warm_pool.put_nowait((provider, spawn_time))
                             provider = None
                     if provider is None:

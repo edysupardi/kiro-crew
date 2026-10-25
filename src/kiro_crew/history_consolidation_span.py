@@ -21,6 +21,7 @@ from typing import NamedTuple
 
 from kiro_crew.history_projection import DISPLAY_ONLY_ROLES
 from kiro_crew.image_refs import strip_image_refs
+from kiro_crew.warm_task_brief_contract import is_warm_task_brief_message
 
 # Budget-sized slices one over-budget head message may be prompted in before the
 # fallback retires its remainder. A message near the transcript cap
@@ -267,7 +268,11 @@ def _fmt_message(message: dict, *, prestripped: bool = False) -> str:
 
 def _prompt_rows(messages: list[dict]) -> list[dict]:
     """*messages* without display-only rows, which no consolidation prompt carries."""
-    return [m for m in messages if m.get("role") not in DISPLAY_ONLY_ROLES]
+    return [
+        m
+        for m in messages
+        if m.get("role") not in DISPLAY_ONLY_ROLES and not is_warm_task_brief_message(m)
+    ]
 
 
 def _consolidation_chunk(messages: list[dict]) -> list[dict]:
@@ -301,7 +306,7 @@ def _consolidation_chunk(messages: list[dict]) -> list[dict]:
     used = 0
     rendered_any = False
     for index, message in enumerate(messages):
-        if message.get("role") in DISPLAY_ONLY_ROLES:
+        if message.get("role") in DISPLAY_ONLY_ROLES or is_warm_task_brief_message(message):
             continue
         # One separator per rendered message after the first, matching the
         # "\n".join the prompt builder performs over exactly these strings.
@@ -321,7 +326,7 @@ def _head_exceeds_budget(message: dict) -> bool:
     by any provider that enforces a context ceiling, so it is the message that
     sub-chunking slices rather than prompts whole.
     """
-    if message.get("role") in DISPLAY_ONLY_ROLES:
+    if message.get("role") in DISPLAY_ONLY_ROLES or is_warm_task_brief_message(message):
         return False
     return len(_fmt_message(message)) > _CONSOLIDATION_PROMPT_BUDGET_CHARS
 
